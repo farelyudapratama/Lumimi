@@ -53,8 +53,11 @@ ok('renderParamNotesPopup mengelompokkan param sebelum render',
   /const byGroup = new Map\(\);[\s\S]{0,600}appendGroupHeader\(pnList, g, members\.length\)/.test(appSrc));
 ok('appendGroupHeader menulis judul + jumlah param',
   /function appendGroupHeader\(list, title, count\)[\s\S]{0,500}textContent = count \+ ' param'/.test(appSrc));
-ok('Bagian (Parts) tetap jadi grup sendiri di ujung',
-  /appendGroupHeader\(pnList, 'Bagian \(Parts\)', parts\.length\)/.test(appSrc));
+ok('Bagian (Parts) tetap jadi grup sendiri di ujung (label lewat i18n)',
+  /appendGroupHeader\(pnList, __t\("sheet\.groupParts"\), parts\.length\)/.test(appSrc));
+ok('ID param = teks utama di baris slider; label hanya pelengkap (audit i18n 2026-09-29)',
+  /idEl\.textContent = id;/.test(appSrc) &&
+  /if \(label && label !== id\) \{[\s\S]{0,200}lEl\.textContent = "· " \+ label;/.test(appSrc));
 
 // ── 3. label cdi3 ────────────────────────────────────────────────────────────
 section('label + grup asli rigger dari cdi3');
@@ -93,10 +96,10 @@ ok('releasePresetPose menghapus override + memulihkan part + resetEmotion',
   /function releasePresetPose\(\)[\s\S]{0,900}delete state\.overrides\[id\];[\s\S]{0,1400}setPartOpacityById\(id,[\s\S]{0,1600}resetEmotion\(\);/.test(appSrc));
 ok('releasePresetPose total: SEMUA override + motion berhenti + aiPose di-nol-kan + param ke default',
   /for \(const id in state\.overrides\) delete state\.overrides\[id\];[\s\S]*?stopAllMotions\(\);[\s\S]*?state\.aiPose = \{[\s\S]*?setParameterValueById\(id, def, 1\);/.test(appSrc));
-ok('tombol Reset Pose ada di atas daftar preset',
-  /resetBtn\.textContent = 'Reset Pose';/.test(appSrc));
-ok('setiap ekspresi teradopsi punya tombol tes (pasang di model)',
-  /testBtn\.textContent = 'tes';/.test(appSrc) &&
+ok('tombol Reset Pose ada di atas daftar preset (label lewat i18n)',
+  /resetBtn\.textContent = __t\("sheet\.resetPose"\);/.test(appSrc));
+ok('setiap ekspresi teradopsi punya tombol tes (pasang di model, label lewat i18n)',
+  /testBtn\.textContent = __t\("sheet\.testBtn"\);/.test(appSrc) &&
   /window\.__live2dAgent\.setExpression\(e\.Name, 1\)/.test(appSrc));
 ok('hint System Prompt menjelaskan scope koneksi (persona tetap di Catatan Karakter)',
   /Persona karakter jangan di sini: pakai Catatan Karakter/.test(htmlSrc));

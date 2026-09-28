@@ -74,9 +74,12 @@ Daftar semantic roles yang tersedia:\n[{roles}]\n\n\
 TUGAS: Analisis setiap parameter (nama ID, range, konvensi JP/CN/EN, fungsinya di Live2D).\n\
 Tentukan: id, role (salah satu di atas, atau null jika aksesoris/parts/fisika),\n\
 group (\"Sudut (Angle)\"/\"Mata (Eye)\"/\"Alis (Eyebrow)\"/\"Mulut (Mouth)\"/\"Badan (Body)\"/\
-\"Rambut (Hair)\"/\"Aksesoris (Accessory)\"/\"Physics\"/\"Kustom\"), label ringkas, isAccessory (bool).\n\n\
+\"Rambut (Hair)\"/\"Aksesoris (Accessory)\"/\"Physics\"/\"Kustom\"), isAccessory (bool),\n\
+dan label: ringkas, NETRAL gaya teknis Cubism (bahasa Inggris umum, mis. \"Head X\",\n\
+\"Mouth Open\") — label hanya pelengkap ID param di UI, BUKAN terjemahan bebas\n\
+dan BUKAN kalimat deskriptif panjang.\n\n\
 KEMBALIKAN HANYA JSON array valid tanpa markdown.\n\
-Format:\n[\n  {{ \"id\": \"ParamX\", \"role\": \"angleX\", \"group\": \"Sudut (Angle)\", \"label\": \"Kepala X\", \"isAccessory\": false }}\n]",
+Format:\n[\n  {{ \"id\": \"ParamX\", \"role\": \"angleX\", \"group\": \"Sudut (Angle)\", \"label\": \"Head X\", \"isAccessory\": false }}\n]",
         roles = KNOWN_ROLES.join(", "),
     );
 

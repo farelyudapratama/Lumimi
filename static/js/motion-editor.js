@@ -315,7 +315,7 @@
     // Isi dropdown kategori sekali per daftar parameter.
     if (groupSel && groupSel.dataset.filled !== String(state.params.length)) {
       const groups = [...new Set(state.params.map(p => p.group).filter(Boolean))].sort();
-      groupSel.innerHTML = '<option value="">semua kategori</option>'
+      groupSel.innerHTML = '<option value="">' + __t('ms.allCats') + '</option>'
         + groups.map(g => '<option>' + g + '</option>').join('');
       groupSel.value = state.groupFilter;
       groupSel.dataset.filled = String(state.params.length);
@@ -347,7 +347,8 @@
     const rows = filtered.map(p => {
       const active = !!trackFor(p.id, false);
       const phys = physSet ? physSet.has(p.id) : false;
-      const nm = (p.label && p.label !== p.id) ? esc(p.label + '  (' + p.id + ')') : esc(p.id);
+      // ID param = teks utama; label (cdi3/AI) hanya pelengkap.
+      const nm = (p.label && p.label !== p.id) ? esc(p.id + '  —  ' + p.label) : esc(p.id);
       return '<button type="button" class="ms-param-item' + (active ? ' added' : '') + '"'
         + ' data-param="' + esc(p.id) + '"'
         + ' title="' + esc(p.id + '  (' + p.min + ' … ' + p.max + ', default ' + p.def + ')'
@@ -370,7 +371,7 @@
     }
 
     if (countEl) {
-      let txt = filtered.length + ' dari ' + state.params.length + ' parameter';
+      let txt = __t('ms.paramCount', { a: filtered.length, b: state.params.length });
       // Ringkasan analisis: konteks kualitas data di balik lint/konteks AI.
       if (state.analysis && state.analysis.hasReference) {
         const nPhys = Array.isArray(state.analysis.physicsOutputs) ? state.analysis.physicsOutputs.length : 0;
@@ -434,10 +435,10 @@
 
       const name = document.createElement('span');
       name.className = 'ms-track-name' + (avail ? '' : ' off');
-      name.textContent = tr.label || tr.param;
+      name.textContent = tr.param + (tr.label && tr.label !== tr.param ? '  —  ' + tr.label : '');
       name.title = avail
         ? tr.param
-        : tr.param + ' — tidak tersedia di model ini, track dilewati saat diputar';
+        : __t('ms.trackUnavailable', { param: tr.param });
       row.appendChild(name);
 
       const lane = document.createElement('div');
@@ -616,8 +617,9 @@
 
     enable(true);
     const avail = paramAvailable(sel.param);
-    lbl.textContent = (tr.label || sel.param) + ' — key ' + (sel.index + 1) + '/' + tr.keys.length
-      + (avail ? '' : '  — tidak ada di model ini');
+    lbl.textContent = sel.param + ' — key ' + (sel.index + 1) + '/' + tr.keys.length
+      + (tr.label && tr.label !== sel.param ? '  —  ' + tr.label : '')
+      + (avail ? '' : '  ' + __t('ms.notInModel'));
     tIn.value = String(key.t);
     vIn.value = String(key.v);
     if (vNum) vNum.value = String(key.v);
@@ -667,7 +669,7 @@
         const rng = document.createElement('input');
         rng.type = 'range'; rng.min = '0'; rng.max = '1'; rng.step = '0.1';
         rng.value = String((d.emotionCompatibility || {})[emo] || 0);
-        rng.setAttribute('aria-label', 'kecocokan emosi ' + emo);
+        rng.setAttribute('aria-label', __t('ms.emoFitAria', { emo }));
         const out = document.createElement('output');
         out.textContent = Number(rng.value).toFixed(1);
         rng.addEventListener('input', () => {
@@ -1038,7 +1040,7 @@
       if (a.source === 'user') {
         const edit = document.createElement('button');
         edit.className = 'mini-btn ms-icon';
-        edit.textContent = 'Edit';
+        edit.textContent = __t('ms.editBtn');
         edit.title = __t('ms.editTip');
         edit.addEventListener('click', async () => { await openStudio(); loadDraft(a.id); });
         card.appendChild(edit);
@@ -1184,9 +1186,9 @@
     loadDraft(state.userMotions.length ? state.userMotions[0].id : '');
     renderRegistryList();
     setStatus(state.params.length
-      ? (state.userMotions.length ? 'siap — ' + state.params.length + ' parameter tersedia'
-                                  : 'pilih parameter di tombol + untuk mulai')
-      : 'daftar parameter kosong — jalankan Inspeksi Model dulu');
+      ? (state.userMotions.length ? __t('ms.readyParams', { n: state.params.length })
+                                  : __t('ms.pickParamHint'))
+      : __t('ms.noParamsInspect'));
   }
 
   function closeStudio() {
@@ -1389,7 +1391,7 @@
     on('#ms-del', 'click', deleteDraft);
 
     on('#ms-play', 'click', () => { collectMeta(); renderAll(); playPreview(); });
-    on('#ms-stop', 'click', () => { stopPreview(); setStatus('dihentikan'); });
+    on('#ms-stop', 'click', () => { stopPreview(); setStatus(__t('ms.stopped')); });
     on('#ms-loop', 'change', (e) => {
       if (state.draft) state.draft.loop = e.target.checked;
       const m = $('#ms-loop-meta'); if (m) m.checked = e.target.checked;
@@ -1468,7 +1470,7 @@
       const sel = state.selected;
       const paramId = sel ? sel.param
         : (state.draft.tracks.find(t => t.kind === 'param') || {}).param;
-      if (!paramId) { setStatus('tambahkan track parameter dulu', 'err'); return; }
+      if (!paramId) { setStatus(__t('ms.needTrack'), 'err'); return; }
       pushUndo();
       const cur = sampleParam(paramId, state.scrubT);
       const r = rangeOf(paramId);
@@ -1478,7 +1480,7 @@
     });
     on('#ms-key-dupe', 'click', () => {
       const sel = state.selected;
-      if (!sel) { setStatus('pilih keyframe dulu'); return; }
+      if (!sel) { setStatus(__t('ms.needKeySel')); return; }
       const tr = trackFor(sel.param, false);
       const key = tr && tr.keys[sel.index];
       if (!key) return;
@@ -1491,27 +1493,27 @@
       const sel = state.selected;
       const tr = sel ? trackFor(sel.param, false) : null;
       const key = tr && tr.keys[sel.index];
-      if (!key) { setStatus('pilih keyframe dulu'); return; }
+      if (!key) { setStatus(__t('ms.needKeySel')); return; }
       state.clipboardKey = { v: key.v, easing: key.easing };
-      setStatus('keyframe dicopy (' + key.v + ')');
+      setStatus(__t('ms.keyCopied', { v: key.v }));
     });
     on('#ms-key-paste', 'click', () => {
-      if (!state.clipboardKey) { setStatus('belum ada yang dicopy'); return; }
+      if (!state.clipboardKey) { setStatus(__t('ms.nothingCopied')); return; }
       const sel = state.selected;
       const paramId = sel ? sel.param
         : (state.draft.tracks.find(t => t.kind === 'param') || {}).param;
-      if (!paramId) { setStatus('pilih track tujuan dulu', 'err'); return; }
+      if (!paramId) { setStatus(__t('ms.needTargetTrack'), 'err'); return; }
       pushUndo();
       // Nilai di-clamp ke range track TUJUAN: paste dari rig 0..100 ke param
       // 0..1 tanpa clamp akan menulis nilai di luar range dan pose rusak.
       const idx = addKey(paramId, state.scrubT, state.clipboardKey.v, state.clipboardKey.easing);
       state.selected = { param: paramId, index: idx };
       renderAll(); applyScrubPose();
-      setStatus('keyframe di-paste ke ' + paramId);
+      setStatus(__t('ms.keyPasted', { param: paramId }));
     });
     on('#ms-key-del', 'click', () => {
       const sel = state.selected;
-      if (!sel) { setStatus('pilih keyframe dulu'); return; }
+      if (!sel) { setStatus(__t('ms.needKeySel')); return; }
       pushUndo();
       removeKey(sel.param, sel.index);
       state.selected = null;
@@ -1555,7 +1557,7 @@
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (e.target && e.target.isContentEditable)) return;
       if (e.code === 'Space') {
         e.preventDefault();
-        if (state.playing) { stopPreview(); setStatus('dihentikan'); }
+        if (state.playing) { stopPreview(); setStatus(__t('ms.stopped')); }
         else { collectMeta(); renderAll(); playPreview(); }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selected) {
         e.preventDefault();

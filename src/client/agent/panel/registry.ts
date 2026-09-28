@@ -11,6 +11,7 @@
 
 import { changeFromTool } from "./diff";
 import type { FileChange } from "./diff";
+import { t } from "../../i18n/index";
 
 /** Entri Review: perubahan terukur atau sekadar "tersentuh" (dari server). */
 export type ReviewEntry =
@@ -93,7 +94,7 @@ export class TermLog {
       }
     }
     // hasil tanpa entri (mis. panel dibuka saat tool jalan) → catat saja
-    this.entries.push({ cmd: "(lanjutan)", result: text, error });
+    this.entries.push({ cmd: t("as.term.continued"), result: text, error });
     if (this.entries.length > TermLog.MAX) this.entries.shift();
   }
 

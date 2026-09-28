@@ -19,6 +19,7 @@
 import type { AsSseEvent } from "./stream";
 import { changeFromTool } from "./diff";
 import type { FileChange } from "./diff";
+import { t } from "../../i18n/index";
 
 export type ToolStatus = "running" | "done" | "error";
 
@@ -256,7 +257,7 @@ export class Transcript {
 
     if (ev.type === "done") {
       if (ev.ok === false) {
-        this.status(ev.error || "gagal", "err");
+        this.status(ev.error || t("as.bus.failed"), "err");
         return;
       }
       const reply = String(ev.reply || "").trim();
@@ -340,7 +341,7 @@ export class Transcript {
         kind: "tool",
         name: b.tool,
         args: b.args,
-        summary: byOtherClient ? "disetujui dari klien lain" : argsSummary(b.tool, b.args),
+        summary: byOtherClient ? t("as.bus.approvedOther") : argsSummary(b.tool, b.args),
         argsText: prettyArgs(b.args),
         result: null,
         status: "running",
@@ -359,7 +360,7 @@ export class Transcript {
 
     switch (ev.type) {
       case "thinking_start":
-        if (this.mode === "follow") this.status("▶ " + (ev.label || "berpikir…"));
+        if (this.mode === "follow") this.status("▶ " + (ev.label || t("as.status.thinking")));
         break;
       case "tool_call_start": {
         const { name, summary } = parseToolLabel(ev.label);
@@ -380,7 +381,7 @@ export class Transcript {
         const res = idx > 0 ? ev.label.slice(idx + 1).trim() : "";
         const card = this.findToolCard(name);
         if (card && !card.result) {
-          card.result = res || "(kosong)";
+          card.result = res || t("as.bus.empty");
           card.status = /^ERROR/.test(res) ? "error" : "done";
           this.touch(card);
         } else if (!card) {
@@ -390,21 +391,21 @@ export class Transcript {
             args: null,
             summary: "",
             argsText: null,
-            result: res || "(kosong)",
+            result: res || t("as.bus.empty"),
             status: /^ERROR/.test(res) ? "error" : "done",
           });
         }
         break;
       }
       case "permission_request":
-        this.status("⚠ butuh izin: " + (ev.label || "?"), "warn");
+        this.status(t("as.bus.needPermission", { label: ev.label || "?" }), "warn");
         signals.push("refresh-status");
         break;
       case "permission_resolved":
         signals.push("refresh-status");
         break;
       case "verification_start":
-        this.status("⟳ " + (ev.label || "verifikasi…"), "warn");
+        this.status("⟳ " + (ev.label || t("as.bus.verifying")), "warn");
         break;
       case "verification_result":
         this.status(
@@ -439,10 +440,10 @@ export class Transcript {
         break;
       }
       case "final_answer":
-        if (this.mode === "follow") this.status("✓ selesai", "ok");
+        if (this.mode === "follow") this.status("✓ " + t("as.bus.done"), "ok");
         break;
       case "error":
-        this.status("✗ " + (ev.label || "error"), "err");
+        this.status("✗ " + (ev.label || t("as.bus.error")), "err");
         break;
     }
     return signals;
@@ -518,9 +519,13 @@ export function argsSummary(name: string, args: any): string {
   if (args == null) return "";
   if (typeof args === "string") return args.slice(0, 120);
   const a = args as Record<string, unknown>;
+  const nTasks = Array.isArray(a.tasks) ? (a.tasks as any[]).length : undefined;
+  const nItems = Array.isArray(a.todos) ? (a.todos as any[]).length : undefined;
   const first =
-    a.path ?? a.command ?? a.query ?? a.key ?? (a.tasks ? (a.tasks as any[]).length + " task" : undefined) ??
-    (a.todos ? (a.todos as any[]).length + " item" : undefined) ?? Object.values(a)[0];
+    a.path ?? a.command ?? a.query ?? a.key ??
+    (nTasks != null ? t("as.bus.nTask", { n: nTasks }) : undefined) ??
+    (nItems != null ? t("as.bus.nItem", { n: nItems }) : undefined) ??
+    Object.values(a)[0];
   if (typeof first === "string") return first.slice(0, 120);
   if (first != null) return String(first).slice(0, 120);
   return "";

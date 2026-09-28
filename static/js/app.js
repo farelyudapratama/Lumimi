@@ -622,10 +622,11 @@
     try {
       if (typeof modelPath !== "string" || !modelPath) {
         modelPath = await resolveAnyModelPath();
-        if (!modelPath)
-          throw new Error(
-            "Belum ada model terpasang. Upload model lewat tab Model.",
-          );
+        if (!modelPath) {
+          const noModelErr = new Error(__t("sys.noModelInstalled"));
+          noModelErr.code = "no-model";
+          throw noModelErr;
+        }
       }
       state.modelPath = modelPath;
       hideNoModelState();
@@ -812,7 +813,12 @@
       const p = $("#loader p");
       if (p) p.textContent = __t("sys.errLoadModel", { msg: err.message });
 
-      if (String((err && err.message) || "").includes("Belum ada model"))
+      // code "no-model" = lemparan di atas; pencarian teks disimpan untuk
+      // sumber error lama yang pesannya masih literal.
+      if (
+        (err && err.code === "no-model") ||
+        String((err && err.message) || "").includes("Belum ada model")
+      )
         showNoModelState();
     }
   }
@@ -3567,7 +3573,7 @@
       connList.innerHTML = "";
       if (!conns.length) {
         connList.innerHTML =
-          '<div class="conn-hint">Belum ada connection. Klik ＋ untuk tambah.</div>';
+          '<div class="conn-hint">' + __t("conn.emptyHint") + "</div>";
         return;
       }
       for (const c of conns) {
@@ -3790,8 +3796,8 @@
       btn.textContent = __t("cfg.testBtn");
       alert(
         d.valid
-          ? "✓ Connection OK: " + (d.reply || "")
-          : "✕ " + (d.error || "gagal"),
+          ? __t("cfg.connTestOk", { reply: d.reply || "" })
+          : __t("cfg.connTestFail", { msg: d.error || __t("sys.failShort") }),
       );
       loadConns();
     }
@@ -3810,7 +3816,7 @@
         const models = d.models || [];
         if (!models.length) {
           modelList.innerHTML =
-            '<div class="conn-hint">Belum ada model. Upload lewat drop box di atas.</div>';
+            '<div class="conn-hint">' + __t("cfg.noModelsYet") + "</div>";
         }
         for (const name of models) {
           const item = document.createElement("div");
@@ -3920,7 +3926,7 @@
     }
 
     async function uploadFolder(files, name) {
-      if (!name) name = prompt("Nama model?", "MyModel") || "MyModel";
+      if (!name) name = prompt(__t("cfg.modelNamePrompt"), "MyModel") || "MyModel";
       name = name.trim().replace(/[^\w\-]+/g, "_");
       const payload = { name, files: [] };
       for (const f of files) {
@@ -3928,7 +3934,7 @@
         const buf = await f.arrayBuffer();
         payload.files.push({ path: rel, base64: abToBase64(buf) });
       }
-      showLoader("Mengupload " + payload.files.length + " file...");
+      showLoader(__t("sys.uploadingFiles", { n: payload.files.length }));
       const r = await fetch(API + "/api/model/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -4134,13 +4140,13 @@
               refreshSheetUI();
             } catch (e) {}
             alert(
-              `Character Sheet generated!\n\n` +
-                `${sheet.paramCount} parameter ditemukan\n` +
-                `${Object.keys(sheet.supportedEmotions).length} emosi didukung\n` +
-                `${sheet.accessories.length} aksesoris terdeteksi\n` +
-                `${sheet.nativeExpressions.length} expression bawaan\n` +
-                `${sheet.motionGroups.length} motion group\n\n` +
-                `Tersimpan di localStorage. AI akan pakai data ini saat chat.`,
+              __t("cfg.inspectOk", {
+                params: sheet.paramCount,
+                emotions: Object.keys(sheet.supportedEmotions).length,
+                accessories: sheet.accessories.length,
+                exprs: sheet.nativeExpressions.length,
+                groups: sheet.motionGroups.length,
+              }),
             );
           } else {
             alert(__t("cfg.inspectFail"));
@@ -5236,21 +5242,32 @@
       if (!sheet) {
         const p = document.createElement("p");
         p.className = "hint";
-        p.textContent =
-          "Belum ada sheet untuk model ini. Buka tab Model → Inspeksi Model.";
+        p.textContent = __t("sheet.emptySummary");
         box.appendChild(p);
         return;
       }
       const dl = document.createElement("dl");
       dl.className = "sheet-facts";
       const facts = [
-        ["Model", sheet.modelName || "(tanpa nama)"],
-        ["Parameter", String(sheet.paramCount || (sheet.params || []).length)],
-        ["Parts", String((sheet.parts || []).length)],
-        ["Emosi", String(Object.keys(sheet.supportedEmotions || {}).length)],
-        ["Expression", String((sheet.nativeExpressions || []).length)],
-        ["Motion group", String((sheet.motionGroups || []).length)],
-        ["Skema", "v" + (sheet.schemaVersion || 0)],
+        [__t("sheet.factModel"), sheet.modelName || __t("sheet.unnamed")],
+        [
+          __t("sheet.factParams"),
+          String(sheet.paramCount || (sheet.params || []).length),
+        ],
+        [__t("sheet.factParts"), String((sheet.parts || []).length)],
+        [
+          __t("sheet.factEmotions"),
+          String(Object.keys(sheet.supportedEmotions || {}).length),
+        ],
+        [
+          __t("sheet.factExprs"),
+          String((sheet.nativeExpressions || []).length),
+        ],
+        [
+          __t("sheet.factMotionGroups"),
+          String((sheet.motionGroups || []).length),
+        ],
+        [__t("sheet.factSchema"), "v" + (sheet.schemaVersion || 0)],
       ];
       for (const [k, v] of facts) {
         const dt = document.createElement("dt");
@@ -5265,10 +5282,9 @@
       if (sheet.rangesEstimated) {
         const w = document.createElement("p");
         w.className = "hint sheet-warn";
-        w.textContent =
-          "⚠ Rentang parameter masih taksiran (" +
-          (sheet.rangeSource || "estimated") +
-          "). Inspeksi ulang model agar nilai preset akurat.";
+        w.textContent = __t("sheet.rangesEstimated", {
+          source: sheet.rangeSource || "estimated",
+        });
         box.appendChild(w);
       }
     }
@@ -5286,7 +5302,7 @@
         const b = document.createElement("button");
         b.type = "button";
         b.className = "sheet-cat" + (cat === sheetCatFilter ? " active" : "");
-        b.textContent = cat + " (" + n + ")";
+        b.textContent = catLabel(cat) + " (" + n + ")";
         b.setAttribute("role", "tab");
         b.setAttribute(
           "aria-selected",
@@ -5313,9 +5329,8 @@
       resetBtn.type = "button";
       resetBtn.className = "mini-btn";
       resetBtn.style.cssText = "width:auto;padding:4px 12px;font-size:11px";
-      resetBtn.textContent = 'Reset Pose';
-      resetBtn.title =
-        "Lepas semua pose preset yang sedang menempel (param, part, ekspresi) dan kembalikan kendali ke animasi idle.";
+      resetBtn.textContent = __t("sheet.resetPose");
+      resetBtn.title = __t("sheet.resetPoseTip");
       resetBtn.addEventListener("click", () => {
         if (!state.model) {
           setSheetStatus(__t("sheet.loadFirstShort"), "err");
@@ -5324,8 +5339,8 @@
         const n = releasePresetPose();
         setSheetStatus(
           n
-            ? "pose dilepas (" + n + " target) — idle kembali"
-            : "tidak ada pose preset yang menempel",
+            ? __t("sheet.poseReleased", { n })
+            : __t("sheet.noPoseAttached"),
           n ? "ok" : "",
         );
       });
@@ -5340,7 +5355,7 @@
       if (!items.length) {
         const p = document.createElement("div");
         p.className = "preset-empty";
-        p.textContent = __t("sheet.catEmpty", { cat: sheetCatFilter });
+        p.textContent = __t("sheet.catEmpty", { cat: catLabel(sheetCatFilter) });
         box.appendChild(p);
         return;
       }
@@ -5417,7 +5432,7 @@
           delBtn.className = "p-act danger";
           delBtn.textContent = __t("sheet.del");
           delBtn.addEventListener("click", async () => {
-            if (!confirm(__t("sheet.delPresetConfirm", { name: p.name, cat: p.category })))
+            if (!confirm(__t("sheet.delPresetConfirm", { name: p.name, cat: catLabel(p.category) })))
               return;
             delBtn.disabled = true;
             setSheetStatus(__t("sys.deleting"));
@@ -5645,8 +5660,7 @@
       if (!params.length && !parts.length) {
         const p = document.createElement("div");
         p.className = "pn-empty";
-        p.textContent =
-          "Belum ada sheet. Buka tab Model → Inspeksi Model dulu.";
+        p.textContent = __t("pn.emptySheet");
         pnList.appendChild(p);
         return;
       }
@@ -5673,12 +5687,10 @@
         const members = byGroup.get(g);
         appendGroupHeader(pnList, g, members.length);
         for (const p of members) {
-          const shownLabel =
-            p.label && p.label !== p.id ? p.label + " · " + p.id : p.id;
           appendNoteRow(
             pnList,
             p.id,
-            shownLabel,
+            p.label || "",
             g,
             p.min,
             p.max,
@@ -5689,14 +5701,14 @@
         }
       }
       if (parts.length) {
-        appendGroupHeader(pnList, 'Bagian (Parts)', parts.length);
+        appendGroupHeader(pnList, __t("sheet.groupParts"), parts.length);
         for (const p of parts) {
           if (!p || !p.id) continue;
           appendNoteRow(
             pnList,
             p.id,
             p.id,
-            "Bagian (Parts)",
+            __t("sheet.groupParts"),
             0,
             1,
             typeof p.def === "number" ? p.def : 1,
@@ -5742,7 +5754,7 @@
           empty.className = "pn-empty pn-empty-search";
           pnList.prepend(empty);
         }
-        empty.textContent = 'Tidak ada param yang cocok dengan "' + q + '".';
+        empty.textContent = __t("pn.noMatch", { q });
       } else if (empty) empty.remove();
     }
 
@@ -5805,7 +5817,7 @@
       input.className = "pn-input";
       input.rows = 1;
       input.maxLength = 300;
-      input.placeholder = 'Jelaskan fungsi param ini, mis. "skala pupil kiri"';
+      input.placeholder = __t("pn.notePh");
       input.value = note;
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -5856,7 +5868,7 @@
 
     function buildParamSliderRow(opts) {
       const id = opts.id,
-        label = opts.label || id,
+        label = opts.label || "",
         group = opts.group || "";
       const min = opts.min,
         max = opts.max,
@@ -5868,12 +5880,20 @@
       const row = document.createElement("div");
       row.className = "pn-row";
 
+      // ID param = teks utama; label (cdi3/AI) hanya pelengkap — nama asli
+      // parameter tidak boleh tersembunyi di balik deskripsi bahasa apa pun.
       const head = document.createElement("div");
       head.className = "pn-head";
       const idEl = document.createElement("span");
       idEl.className = "pn-id";
-      idEl.textContent = label;
+      idEl.textContent = id;
       head.appendChild(idEl);
+      if (label && label !== id) {
+        const lEl = document.createElement("span");
+        lEl.className = "pn-group";
+        lEl.textContent = "· " + label;
+        head.appendChild(lEl);
+      }
       if (group) {
         const gEl = document.createElement("span");
         gEl.className = "pn-group";
@@ -5966,10 +5986,7 @@
       const sheet = state.lastSheet || loadCharacterSheet();
       if (!sheet || (!sheet.params && !sheet.parts)) {
         if (window.__addChat)
-          window.__addChat(
-            "agent",
-            "Belum ada sheet. Inspeksi model dulu (tab Model → Inspeksi Model).",
-          );
+          window.__addChat("agent", __t("sheet.emptyChatHint"));
         return;
       }
 
@@ -6017,8 +6034,7 @@
       if (!rows.length) {
         const p = document.createElement("div");
         p.className = "preset-empty";
-        p.textContent =
-          "Belum ada nilai. Geser slider di atas, atau tekan Ambil Pose Sekarang untuk memulai dari pose live.";
+        p.textContent = __t("pe.noValues");
         box.appendChild(p);
         return;
       }
@@ -6027,7 +6043,7 @@
         r.className = "pv-row";
         const a = document.createElement("span");
         a.textContent = (kind === "part" ? "◧ " : "") + id;
-        a.title = kind === "part" ? "Part (opacity)" : "Parameter";
+        a.title = kind === "part" ? __t("pe.partTip") : __t("pe.paramTip");
         const b = document.createElement("span");
         b.textContent = Number(v).toFixed(2);
         r.appendChild(a);
@@ -6076,7 +6092,7 @@
               : dflt;
         const { row } = buildParamSliderRow({
           id: p.id,
-          label: p.label && p.label !== p.id ? p.label + " · " + p.id : p.id,
+          label: p.label || "",
           group: resolveParamGroup(sheet, p.id, p.group),
           min: p.min,
           max: p.max,
@@ -6111,7 +6127,7 @@
         const { row } = buildParamSliderRow({
           id: p.id,
           label: p.id,
-          group: "Bagian (Parts)",
+          group: __t("sheet.groupParts"),
           min: 0,
           max: 1,
           def: dflt,
@@ -6136,9 +6152,9 @@
 
     function captureCurrentPose() {
       const sheet = state.lastSheet || loadCharacterSheet();
-      if (!sheet)
-        return { ok: false, message: "Belum ada sheet. Inspeksi model dulu." };
-      if (!state.model) return { ok: false, message: "Load model dulu." };
+      if (!sheet) return { ok: false, message: __t("sheet.emptyPlain") };
+      if (!state.model)
+        return { ok: false, message: __t("sheet.loadFirstShort") };
       const values = {};
       let skipped = 0;
       for (const p of sheet.params || []) {
@@ -6221,12 +6237,23 @@
           return;
         }
         const chk = checkGerakName(nm, state.lastSheet);
-        if (!chk.ok)
+        if (!chk.ok) {
+          // checkGerakName dijaga guard legacy (diekstrak via vm, tanpa i18n)
+          // — pesannya dilokalkan di sini berdasarkan code verdict.
+          const msg =
+            chk.code === "empty"
+              ? __t("pe.nameEmpty")
+              : chk.code === "motion-group"
+                ? __t("pe.nameTaken", {
+                    name: nm,
+                    conflict: chk.conflictWith || "",
+                  })
+                : chk.message;
           setPresetStatus(
-            chk.message + ' Usul: "' + chk.suggestion + '"',
+            msg + " " + __t("pe.suggest", { s: chk.suggestion }),
             "err",
           );
-        else setPresetStatus(__t("pe.nameOk"), "ok");
+        } else setPresetStatus(__t("pe.nameOk"), "ok");
       };
       shEls.name.addEventListener("input", preflight);
       shEls.cat.addEventListener("change", preflight);
@@ -6242,20 +6269,14 @@
         }
 
         if (category === "gerak") {
-          setPresetStatus(
-            "kategori gerak butuh keyframe (steps) — belum didukung editor ini",
-            "err",
-          );
+          setPresetStatus(__t("pe.gerakNeedsSteps"), "err");
           return;
         }
         if (
           !Object.keys(draft.values).length &&
           !Object.keys(draft.parts).length
         ) {
-          setPresetStatus(
-            "belum ada nilai — tekan Ambil Pose Sekarang",
-            "err",
-          );
+          setPresetStatus(__t("pe.noValuesCapture"), "err");
           return;
         }
         shEls.save.disabled = true;
@@ -6272,7 +6293,16 @@
           releasePresetPreview();
           refreshSheetUI();
         } catch (e) {
-          setPresetStatus(__t("sys.errGeneric", { msg: e.message }), "err");
+          const msg =
+            e.code === "motion-group"
+              ? __t("pe.nameTaken", {
+                  name: e.gerakName || "",
+                  conflict: e.conflictWith || "",
+                }) +
+                " " +
+                __t("pe.suggest", { s: e.suggestion || "" })
+              : e.message;
+          setPresetStatus(__t("sys.errGeneric", { msg }), "err");
         } finally {
           shEls.save.disabled = false;
         }
@@ -6294,18 +6324,20 @@
             const v = presets.value || { count: 0 };
             const n = v.count ? v.count : 0;
             parts.push(
-              n ? n + " saran preset (saran AI)" : "tidak ada saran preset baru",
+              n
+                ? __t("sheet.suggestCount", { n })
+                : __t("sheet.noNewSuggestions"),
             );
             if (v.note) parts.push(v.note);
           } else {
-            parts.push("preset gagal: " + presets.reason.message);
+            parts.push(__t("sheet.presetFail", { msg: presets.reason.message }));
           }
           if (labels.status === "fulfilled") {
             const n =
               labels.value && labels.value.count ? labels.value.count : 0;
-            if (n) parts.push(n + " parameter dilabeli");
+            if (n) parts.push(__t("sheet.labeled", { n }));
           } else {
-            parts.push("label gagal: " + labels.reason.message);
+            parts.push(__t("sheet.labelFail", { msg: labels.reason.message }));
           }
           const bad =
             presets.status === "rejected" || labels.status === "rejected";
@@ -6384,7 +6416,7 @@
       if (!adEls.list) return;
       const folder = currentModelFolder();
       if (!folder) {
-        setAdoptionMsg("Load model dulu.", "");
+        setAdoptionMsg(__t("sheet.loadFirstShort"), "");
         return;
       }
       try {
@@ -6398,7 +6430,7 @@
         const exprs = Array.isArray(info.expressions) ? info.expressions : [];
         adDisabled = new Set(Array.isArray(info.disabled) ? info.disabled : []);
         if (!exprs.length) {
-          setAdoptionMsg("Tidak ada .exp3 di folder ini.", "");
+          setAdoptionMsg(__t("sheet.noExp3"), "");
           return;
         }
         adEls.list.textContent = "";
@@ -6416,19 +6448,19 @@
           const lbl = document.createElement("label");
           lbl.className = "p-name";
           lbl.htmlFor = cb.id;
-          lbl.textContent = e.Name + (e.declared ? " (terdaftar)" : " (yatim)");
+          lbl.textContent =
+            e.Name + (e.declared ? __t("sheet.declaredSuffix") : __t("sheet.orphanSuffix"));
           row.appendChild(cb);
           row.appendChild(lbl);
 
           const testBtn = document.createElement("button");
           testBtn.type = "button";
           testBtn.className = "p-act";
-          testBtn.textContent = 'tes';
-          testBtn.title =
-            "Pasang ekspresi ini di model untuk melihat efeknya (ekspresi berikutnya otomatis menggantikan).";
+          testBtn.textContent = __t("sheet.testBtn");
+          testBtn.title = __t("sheet.testExprTip");
           testBtn.addEventListener("click", () => {
             if (!state.model) {
-              setAdoptionMsg("Load model dulu.", "err");
+              setAdoptionMsg(__t("sheet.loadFirstShort"), "err");
               return;
             }
             window.__live2dAgent.setExpression(e.Name, 1);
@@ -6438,7 +6470,7 @@
           adEls.list.appendChild(row);
         }
       } catch (e) {
-        setAdoptionMsg("Gagal muat: " + e.message, "err");
+        setAdoptionMsg(__t("sheet.loadFail", { msg: e.message }), "err");
       }
     }
 
@@ -6520,6 +6552,16 @@
   const USER_AUTHORED_FIELDS = ['userNote', 'config', 'paramGroups', 'presets'];
 
   const PRESET_CATEGORIES = ["emosi", "properti", "aksesoris", "gerak"];
+
+  // Label tampilan kategori dipisah dari nilai penyimpanan: kategori di sheet
+  // memakai key tetap (emosi/properti/...), teks tab/option mengikuti i18n.
+  const PRESET_CAT_LABELS = {
+    emosi: "sheet.cat.emosi",
+    properti: "sheet.cat.properti",
+    aksesoris: "sheet.cat.aksesoris",
+    gerak: "sheet.cat.gerak",
+  };
+  const catLabel = (cat) => __t(PRESET_CAT_LABELS[cat] || cat);
 
   // Bounds for the SEMANTIC pose fields used by a 'gerak' preset's steps.
   //
@@ -7066,9 +7108,9 @@
     if (!sheet) sheet = await fetchSheetFile();
     if (!sheet) {
       if (!state.model)
-        throw new Error("Load model dulu sebelum menyimpan preset.");
+        throw new Error(__t("pe.saveLoadFirst"));
       sheet = inspectModel();
-      if (!sheet) throw new Error("Gagal membuat character sheet.");
+      if (!sheet) throw new Error(__t("pe.sheetCreateFail"));
     }
     if (!sheet.presets) sheet.presets = { user: [], ai: [] };
     if (!Array.isArray(sheet.presets.user)) sheet.presets.user = [];
@@ -7110,7 +7152,7 @@
 
   async function saveUserPreset(input) {
     const p = normalizePreset(input, "user");
-    if (!p) throw new Error("Preset tidak valid (nama wajib ada).");
+    if (!p) throw new Error(__t("pe.presetInvalid"));
 
     const sheet = await sheetForWrite();
 
@@ -7120,6 +7162,8 @@
         const err = new Error(verdict.message);
         err.code = verdict.code;
         err.suggestion = verdict.suggestion;
+        err.conflictWith = verdict.conflictWith;
+        err.gerakName = p.name;
         throw err;
       }
     }
@@ -8502,7 +8546,7 @@
     let sheet = loadCharacterSheet();
     if (!sheet) {
       if (!state.model)
-        throw new Error("Load model dulu sebelum menyimpan pengaturan.");
+        throw new Error(__t("cfg.settingsLoadFirst"));
       sheet = inspectModel();
       if (!sheet)
         throw new Error(
@@ -8565,9 +8609,9 @@
     if (!sheet) sheet = await fetchSheetFile();
     if (!sheet) {
       if (!state.model)
-        throw new Error("Load model dulu sebelum menyimpan catatan.");
+        throw new Error(__t("cfg.notesLoadFirst"));
       sheet = inspectModel();
-      if (!sheet) throw new Error("Gagal membuat character sheet.");
+      if (!sheet) throw new Error(__t("pe.sheetCreateFail"));
     }
     sheet.userNote = note;
     sheet.schemaVersion = SHEET_SCHEMA_VERSION;
@@ -8977,7 +9021,7 @@
   async function triggerAIParamClassification(sheet, classified, roleIds) {
     if (!sheet) {
       sheet = state.lastSheet || loadCharacterSheet();
-      if (!sheet) throw new Error("Belum ada sheet. Inspeksi model dulu.");
+      if (!sheet) throw new Error(__t("sheet.emptyPlain"));
     }
     if (!Array.isArray(classified)) classified = sheet.params || [];
     if (!roleIds) roleIds = sheet.roleIds || {};
@@ -9010,7 +9054,8 @@
           currentRoles: roleIds,
         }),
       });
-      if (!res.ok) throw new Error("server menolak (HTTP " + res.status + ")");
+      if (!res.ok)
+        throw new Error(__t("sys.serverRejected", { code: res.status }));
       const data = await res.json();
       const items = data.classifications || [];
       if (!items.length) return { count: 0 };
@@ -9039,8 +9084,13 @@
           changed = true;
         }
         if (item.label) {
-          pObj.label = item.label;
-          changed = true;
+          // Label analyzer hanya melengkapi param TANPA nama rigger (cdi3):
+          // label === id berarti tidak ada cdi3. Nama asli rigger tidak boleh
+          // ditimpa terjemahan LLM.
+          if (pObj.label === pObj.id) {
+            pObj.label = item.label;
+            changed = true;
+          }
         }
         if (item.isAccessory && !sheet.accessories.includes(item.id)) {
           sheet.accessories.push(item.id);
@@ -9076,7 +9126,7 @@
   async function analyzeSheetPresets(sheet) {
     if (!sheet) {
       sheet = state.lastSheet || loadCharacterSheet();
-      if (!sheet) throw new Error("Belum ada sheet. Inspeksi model dulu.");
+      if (!sheet) throw new Error(__t("sheet.emptyPlain"));
     }
     if (!sheet.presets || typeof sheet.presets !== "object")
       sheet.presets = { user: [], ai: [] };
@@ -9110,7 +9160,8 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ params, parts, existingNames, notes }),
     });
-    if (!res.ok) throw new Error("server menolak (HTTP " + res.status + ")");
+    if (!res.ok)
+      throw new Error(__t("sys.serverRejected", { code: res.status }));
     const data = await res.json();
     if (data.warning) console.warn("[analyze-sheet]", data.warning);
 

@@ -124,7 +124,10 @@
     }
 
     function alert(ev) {
-      alertBox.textContent = ev.user + " donasi " + (ev.amount || "") + "!";
+      alertBox.textContent = __t("vtOv.alert", {
+        user: ev.user,
+        amount: ev.amount || "",
+      });
       alertBox.classList.remove("hidden");
       setTimeout(() => alertBox.classList.add("hidden"), 6000);
     }
@@ -194,12 +197,12 @@
       try {
         await post("/api/vtuber/start", body);
         running = true;
-        setStatus("AKTIF (" + provider + ")", "var(--mint)");
+        setStatus(__t("vt.statusActive", { provider }), "var(--mint)");
         reflectRunning(true);
         cursor = 0;
         feed.textContent = "";
       } catch (e) {
-        setStatus("gagal: " + e.message, "var(--coral)");
+        setStatus(__t("sys.errGeneric", { msg: e.message }), "var(--coral)");
         reflectRunning(false);
       }
     };
@@ -346,7 +349,9 @@
           throughOn = false;
         } else if (st.pet.shell) {
           status.textContent =
-            (st.pet.shell === "tauri" ? "shell Tauri" : "shell Chrome/Edge") +
+            (st.pet.shell === "tauri"
+              ? __t("pet.shellTauri")
+              : __t("pet.shellBrowser")) +
             (st.pet.clickThrough ? __t("pet.clickThroughOn") : "") +
             (st.pet.shell === "tauri" ? "" : __t("pet.noClickThrough"));
         } else {
@@ -368,13 +373,15 @@
         const d = await post("/api/pet/launch");
         status.textContent = d.how ? __t("pet.openedHow", { how: d.how }) : __t("pet.opened");
         checkStatus();
-      } catch (e) { status.textContent = "gagal: " + e.message; }
+      } catch (e) {
+        status.textContent = __t("sys.errGeneric", { msg: e.message });
+      }
     };
     const onClose = async () => {
       try { await post("/api/pet/close"); } catch (e) {}
       throughOn = false;
       paintThrough();
-      status.textContent = "ditutup";
+      status.textContent = __t("pet.closed");
     };
     // Klik-tembus hanya ada di shell Tauri; server mengabaikan bila shell
     // browser. Saat menyala, satu-satunya cara mematikan adalah dari sini —

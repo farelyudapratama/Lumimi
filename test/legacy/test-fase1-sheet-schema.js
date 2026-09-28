@@ -765,7 +765,7 @@ ok('the reason the lookup order is not flipped is documented',
   /INTRINSIC data, the same class as \.exp3/.test(appSrc));
 ok('saveUserPreset() rejects a colliding gerak name instead of writing it',
   /const verdict = checkGerakName\(p\.name, sheet\);/.test(appSrc) &&
-  /if \(!verdict\.ok\) \{[\s\S]{0,200}throw err;/.test(appSrc));
+  /if \(!verdict\.ok\) \{[\s\S]{0,400}throw err;/.test(appSrc));
 ok('saveUserPreset() writes only to the user branch',
   /const list = sheet\.presets\.user;/.test(appSrc) &&
   !/sheet\.presets\.ai\.push/.test(appSrc));

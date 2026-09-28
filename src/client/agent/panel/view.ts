@@ -599,7 +599,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     }
     for (const e of entries) {
       const row = el("div", "as-rev-row");
-      row.appendChild(el("span", "as-chg-kind", e.measured ? e.kind : "touched"));
+      row.appendChild(el("span", "as-chg-kind", e.measured ? e.kind : t("as.review.touched")));
       row.appendChild(el("span", "as-rev-path", e.path));
       const st = el("span", "as-diff-stat");
       st.appendChild(el("span", "add", "+" + e.added));
