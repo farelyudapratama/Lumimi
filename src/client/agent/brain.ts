@@ -91,6 +91,24 @@ function addChat(role: "user" | "agent", text: string): void {
     (window as any).__addChat?.(role, text);
   } catch {}
 }
+function thinkingBase(el: HTMLElement): string {
+  try {
+    const i18n = (window as any).__i18n;
+    if (i18n && typeof i18n.t === "function") {
+      const v: unknown = i18n.t("chat.thinking");
+      if (typeof v === "string" && v && v !== "chat.thinking") return v;
+    }
+  } catch {}
+  const raw =
+    el.getAttribute("data-i18n-text") ||
+    el.dataset.base ||
+    el.textContent ||
+    "Mikir...";
+  // Buang sisa timer sebelumnya (" 3s", " 3s 5s") — on bisa dipanggil
+  // berulang tanpa off dulu (merge chat saat masih mikir), dan off lama
+  // tidak mereset textContent sehingga base ikut tercemar.
+  return raw.replace(/(\s+\d+s)+\s*$/, "").trim() || "Mikir...";
+}
 function setThinking(on: boolean): void {
   const el = document.getElementById("thinking");
   if (!el) return;
@@ -101,13 +119,17 @@ function setThinking(on: boolean): void {
   if (!on) {
     el.classList.toggle("hidden", true);
     el.removeAttribute("data-since");
+    // Kembalikan teks ke dasar yang bersih supaya on berikutnya tidak
+    // membaca "Mikir... 5s" sebagai base (sumber bug tumpuk "(detik) (detik)").
+    if (el.dataset.base) el.textContent = el.dataset.base;
     return;
   }
   // Hitungan waktu berjalan — user tahu aplikasinya hidup, bukan mati
   // diam saat LLM/TTS lambat. Teks dasar ("Mikir...") menyusul via i18n
   // sweep; detik ditambahkan tiap detik.
   el.dataset.since = String(Date.now());
-  const base = el.getAttribute("data-i18n-text") || el.textContent || "Mikir...";
+  const base = thinkingBase(el);
+  el.dataset.base = base;
   const paint = () => {
     const since = Number(el.dataset.since || 0);
     const s = Math.round((Date.now() - since) / 1000);

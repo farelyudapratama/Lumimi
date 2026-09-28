@@ -8,23 +8,38 @@ import type { MotionAsset, MotionTrack, EasingMode } from "../../shared/types";
 import { ease as easeFn, clamp } from "./easing";
 
 // ── Field bounds (semantic role limits) ──────────────────────────
-// HARUS identik dengan js/motion-dsl.js v1: hanya 8 field kanonik. Nama gaya
-// SPEC (angleX/eyeX/...) diterima lewat ROLE_ALIASES lalu DIKANONISKAN ke
-// field internal — supaya dedup track, gating capability, dan format file
-// selalu satu kosakata, dan file motion v2 tetap terbaca runtime v1.
+// Kosakata kanonik diperluas dari 8 field v1 (keputusan 2026-09-29): tambah
+// az (tilt kepala), alis, senyum mata, dan buka mulut — semuanya role yang
+// SUDAH dipetakan role-mapping.ts, jadi analisis disk/validator/rolesToParam
+// otomatis mengikutinya lewat ROLE_FOR_FIELD. Nama gaya SPEC (angleZ/eyeX/…)
+// diterima lewat ROLE_ALIASES lalu DIKANONISKAN ke field internal — supaya
+// dedup track, gating capability, dan format file selalu satu kosakata.
+// Dua kategori semantik nilai:
+//   - simetris (default): 0 = netral, ±bound = ekstrem (ax/ay/az/ex/ey/…).
+//   - NORM_DEF_FIELDS: 0 = default milik model, +1 = max, −1 = min
+//     (smileL/smileR/mouthOpen — deviasi dari pose istirahat).
 export const FIELD_BOUNDS: Record<string, number> = {
-  ax: 30, ay: 30, bodyX: 30, bodyY: 30, bodyZ: 30,
+  ax: 30, ay: 30, az: 30, bodyX: 30, bodyY: 30, bodyZ: 30,
   ex: 1, ey: 1, mouthForm: 1,
+  browLY: 1, browRY: 1, browLF: 1, browRF: 1,
+  smileL: 1, smileR: 1, mouthOpen: 1,
 };
+
+// Field bernilai deviasi-dari-default (lihat komentar FIELD_BOUNDS).
+export const NORM_DEF_FIELDS: ReadonlySet<string> = new Set([
+  "smileL", "smileR", "mouthOpen",
+]);
 
 export const ROLE_ALIASES: Record<string, string> = {
-  angleX: "ax", angleY: "ay",
+  angleX: "ax", angleY: "ay", angleZ: "az",
   eyeX: "ex", eyeY: "ey",
   bodyX: "bodyX", bodyY: "bodyY", bodyZ: "bodyZ",
-  mouthForm: "mouthForm",
+  mouthForm: "mouthForm", mouthOpenY: "mouthOpen",
+  eyeLSmile: "smileL", eyeRSmile: "smileR",
+  browLForm: "browLF", browRForm: "browRF",
 };
 
-export const KNOWN_REQUIRES = ["head", "eyes", "mouth", "body"];
+export const KNOWN_REQUIRES = ["head", "eyes", "mouth", "body", "brow"];
 
 export const LIMITS = {
   idLen: 60, nameLen: 60, descLen: 400,
@@ -72,9 +87,10 @@ export function evalTrack(track: MotionTrack, t: number): number {
 }
 
 export function fieldCapability(field: string): string {
-  if (field === "ax" || field === "ay") return "head";
-  if (field === "ex" || field === "ey") return "eyes";
-  if (field === "mouthForm") return "mouth";
+  if (field === "ax" || field === "ay" || field === "az") return "head";
+  if (field === "ex" || field === "ey" || field === "smileL" || field === "smileR") return "eyes";
+  if (field === "mouthForm" || field === "mouthOpen") return "mouth";
+  if (field === "browLY" || field === "browRY" || field === "browLF" || field === "browRF") return "brow";
   return "body";
 }
 
@@ -275,10 +291,12 @@ export function sanitizeMotionAsset(raw: any, opts?: any): { ok: true; asset: Mo
 }
 
 export const ROLE_FOR_FIELD: Record<string, string> = {
-  ax: "angleX", ay: "angleY",
+  ax: "angleX", ay: "angleY", az: "angleZ",
   ex: "eyeBallX", ey: "eyeBallY",
   bodyX: "bodyAngleX", bodyY: "bodyAngleY", bodyZ: "bodyAngleZ",
-  mouthForm: "mouthForm",
+  mouthForm: "mouthForm", mouthOpen: "mouthOpenY",
+  smileL: "eyeLSmile", smileR: "eyeRSmile",
+  browLY: "browLY", browRY: "browRY", browLF: "browLForm", browRF: "browRForm",
 };
 
 export function rolesToParamTracks(asset: MotionAsset, roleMap: Record<string, string>, ranges: Record<string, { min: number; max: number; def: number }>): MotionAsset {

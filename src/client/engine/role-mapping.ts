@@ -248,6 +248,26 @@ export function normToRange(
   return r.min + clamp(t, 0, 1) * (r.max - r.min);
 }
 
+/**
+ * v deviasi-dari-default (0 = pose istirahat, +1 = max, −1 = min) → nilai
+ * aktual. Dipakai role yang semantiknya "efek" (senyum mata, buka mulut):
+ * 0 wajib berarti diam-diam di default MILIK model, bukan midpoint — rig
+ * dengan default non-nol tetap berhenti di pose aslinya saat track pulang
+ * ke 0 (MODEL-AGNOSTIC-RULES: jangan asumsikan 0 sebagai tengah).
+ * Tanda tangan disimetrikan dengan toActual supaya wrapper app.js seragam.
+ */
+export function devToActual(
+  role: string,
+  v: number,
+  r: ParamRange | null | undefined,
+): number {
+  void role;
+  if (!r) return clamp(v, -1, 1);
+  const def = roleDefaultOf(r);
+  const span = v >= 0 ? r.max - def : def - r.min;
+  return def + v * (span || 0);
+}
+
 /** Nilai istirahat = default MILIK model, bukan 0. */
 export function roleDefaultOf(r: ParamRange | null | undefined): number {
   return r && typeof r.def === "number" ? r.def : 0;

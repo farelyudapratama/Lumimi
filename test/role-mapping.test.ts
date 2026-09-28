@@ -21,6 +21,7 @@ import {
   normToRange,
   roleDefaultOf,
   writeRef,
+  devToActual,
   detectAccessories,
   type ParamRange,
 } from "../src/client/engine/role-mapping";
@@ -304,5 +305,42 @@ describe("param scaling — skala referensi tidak bocor asumsi model", () => {
     expect(refHalfFor("bodyAngleZ")).toBe(30);
     expect(refHalfFor("breath")).toBe(1);
     expect(pickFromGroup(["ParamMouthOpenY"], GROUP_PATTERNS.mouthOpenY)).toBe("ParamMouthOpenY");
+  });
+});
+
+// ── K. devToActual — deviasi-dari-default untuk field ekspresi v2 ──
+describe("devToActual — 0 = default milik model, bukan midpoint", () => {
+  const rig = (role: string, r: ParamRange | null) => ({
+    dev: (v: number) => devToActual(role, v, r),
+  });
+
+  test("rig default non-nol: 0 diam di default, +1 max, -1 min", () => {
+    // Senyum mata 0..100, default 80 — midpoint (50) akan melihat mata
+    // "setengah senyum permanen" saat track pulang ke 0. Default yang benar.
+    const R = rig("eyeLSmile", { min: 0, max: 100, def: 80 });
+    expect(R.dev(0)).toBe(80);
+    expect(R.dev(1)).toBe(100);
+    expect(R.dev(-1)).toBe(0);
+    expect(R.dev(0.5)).toBe(90);
+    expect(R.dev(-0.5)).toBe(40);
+  });
+
+  test("rig default nol simetris: identik dengan peta midpoint", () => {
+    const R = rig("mouthOpenY", { min: 0, max: 1, def: 0 });
+    expect(R.dev(0)).toBe(0);
+    expect(R.dev(1)).toBe(1);
+    expect(R.dev(-1)).toBe(0); // def == min → sisi bawah runtuh (aman)
+  });
+
+  test("tanpa range → degradasi clamp ±1, tidak liar", () => {
+    const B = rig("mouthOpenY", null);
+    expect(B.dev(3)).toBe(1);
+    expect(B.dev(-3)).toBe(-1);
+  });
+
+  test("invarian rename: role lain dengan range sama menghasilkan nilai sama", () => {
+    const a = devToActual("mouthOpenY", 0.8, { min: 0, max: 50, def: 5 });
+    const b = devToActual("m_001", 0.8, { min: 0, max: 50, def: 5 });
+    expect(a).toBe(b);
   });
 });

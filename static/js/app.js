@@ -884,6 +884,10 @@
       const talkHead = state.talking ? Math.sin(t * 9.0) * 2 : 0;
 
       let bAx, bAy, bEx, bEy, bMf, bBx, bBy, bBz;
+      // Field ekspresi tambahan (kosakata motion v2). Semua 0 kecuali layer
+      // motion (atau aiPose sisa directive) yang membawanya — tanpa sway
+      // liveliness supaya alis/senyum tetap kalem saat idle.
+      let bAz, bBly, bBry, bBlf, bBrf, bSl, bSr, bMo;
       // Saat layer motion aktif (motionRuntime), POSE DIMILIKI motion:
       // baca langsung aiPose (yang membawa delta motion via applyPoseDelta).
       // Cabang lama hanya punya dua mode (look / aiLock+easing) — di mode
@@ -910,6 +914,14 @@
         bBx = P.bodyX || 0;
         bBy = P.bodyY || 0;
         bBz = P.bodyZ || 0;
+        bAz = P.az || 0;
+        bBly = P.browLY || 0;
+        bBry = P.browRY || 0;
+        bBlf = P.browLF || 0;
+        bBrf = P.browRF || 0;
+        bSl = P.smileL || 0;
+        bSr = P.smileR || 0;
+        bMo = P.mouthOpen || 0;
       } else if (!state.aiLock) {
         bAx = A1 * 0.5;
         bAy = A2 * 0.5;
@@ -919,6 +931,14 @@
         bBx = bodyLeanLife * 0.4;
         bBy = 0;
         bBz = tiltLife * 0.4;
+        bAz = 0;
+        bBly = 0;
+        bBry = 0;
+        bBlf = 0;
+        bBrf = 0;
+        bSl = 0;
+        bSr = 0;
+        bMo = 0;
       } else {
         const frozen = !!state.frozen;
         const P = state.aiPose;
@@ -945,6 +965,14 @@
         bBz =
           P.bodyZ +
           (frozen ? 0 : Math.sin(ft * 0.33 + 0.7) * 5 * amp + tiltLife);
+        bAz = P.az || 0;
+        bBly = P.browLY || 0;
+        bBry = P.browRY || 0;
+        bBlf = P.browLF || 0;
+        bBrf = P.browRF || 0;
+        bSl = P.smileL || 0;
+        bSr = P.smileR || 0;
+        bMo = P.mouthOpen || 0;
       }
 
       const mGain = MOTION && MOTION.enabled ? MOTION.gain || 1 : 1;
@@ -956,6 +984,14 @@
       bBx *= mGain;
       bBy *= mGain;
       bBz *= mGain;
+      bAz *= mGain;
+      bBly *= mGain;
+      bBry *= mGain;
+      bBlf *= mGain;
+      bBrf *= mGain;
+      bSl *= mGain;
+      bSr *= mGain;
+      bMo *= mGain;
 
       const CLIP_IN_MS = 200,
         CLIP_OUT_MS = 350;
@@ -998,6 +1034,16 @@
         const cur = readParam(id);
         pokeParam(id, cur + (actual - cur) * ease * poseAuthority, 1);
       };
+      // Penulis deviasi-dari-default: ADITIF (offset dari default model), bukan
+      // SET — 0 berarti tak menulis apa pun, jadi blink/lipsync/pose framework
+      // tetap pemilik baseline param-nya dan tidak ada akumulasi antar-frame.
+      const targetDev = (role, v) => {
+        if (!v) return;
+        const id = roleId(role);
+        if (!id || !owned(id) || poseAuthority <= 0.001) return;
+        const offset = devToActual(role, v) - roleDefault(role);
+        if (offset) pokeAddParam(id, offset * poseAuthority, 1);
+      };
       if (state.caps.hasHead) {
         target("angleX", bAx);
         target("angleY", bAy);
@@ -1005,15 +1051,37 @@
       if (state.caps.hasEyes) {
         target("eyeBallX", clamp(bEx, -1, 1));
         target("eyeBallY", clamp(bEy, -1, 1));
+        // Senyum mata = deviasi dari default (targetDev aditif) — bukan SET,
+        // supaya blink/pose framework tetap pemilik basenya.
+        targetDev("eyeLSmile", clamp(bSl, -1, 1));
+        targetDev("eyeRSmile", clamp(bSr, -1, 1));
       }
       if (roleId("mouthForm")) target("mouthForm", clamp(bMf, -1, 1));
+      if (roleId("mouthOpenY")) targetDev("mouthOpenY", clamp(bMo, -1, 1));
+
+      // Alis: capability "brow". Sumber: caps.hasBrow (sheet/role map) atau
+      // role map langsung — sheet bisa basi, role map selalu dihitung ulang.
+      const RI = state.caps.ids || {};
+      if (
+        state.caps.hasBrow ||
+        RI.browLY ||
+        RI.browRY ||
+        RI.browLForm ||
+        RI.browRForm
+      ) {
+        target("browLY", bBly);
+        target("browRY", bBry);
+        target("browLForm", bBlf);
+        target("browRForm", bBrf);
+      }
 
       if (state.caps.hasBody) {
         target("bodyAngleX", bBx);
         target("bodyAngleY", bBy);
         target("bodyAngleZ", bBz);
+        if (roleId("angleZ")) target("angleZ", bAz);
       } else if (roleId("angleZ")) {
-        target("angleZ", tiltLife + (state.aiLock ? bBz * 0.5 : 0));
+        target("angleZ", tiltLife + bAz + (state.aiLock ? bBz * 0.5 : 0));
       }
 
       // Breath: framework yang menambah napas (aditif, gate
@@ -1668,6 +1736,18 @@
     return mid + (vRef / RH) * (half || RH);
   }
 
+  // Deviasi-dari-default (0 = pose istirahat milik model, +1 = max, −1 = min)
+  // → nilai absolut. Untuk role "efek" (senyum mata, buka mulut) yang 0-nya
+  // WAJIB default milik model, bukan midpoint range.
+  function devToActual(role, v) {
+    const r = roleRange(role);
+    if (RM) return RM.devToActual(role, v, r);
+    if (!r) return clamp(v, -1, 1);
+    const def = roleDefault(role);
+    const span = v >= 0 ? r.max - def : def - r.min;
+    return def + v * (span || 0);
+  }
+
   function roleClampActual(role, v) {
     const r = roleRange(role);
     if (RM) return RM.roleClampActual(role, v, r);
@@ -2000,7 +2080,12 @@
     );
     state.caps.hasMouth = !!(R.mouthOpenY || R.mouthForm);
     state.caps.hasBody = !!(R.bodyAngleX || R.bodyAngleY || R.bodyAngleZ);
-    state.caps.hasBrow = !!(R.browLForm || R.browRForm);
+    state.caps.hasBrow = !!(
+      R.browLForm ||
+      R.browRForm ||
+      R.browLY ||
+      R.browRY
+    );
     state.hasBreath = !!R.breath;
     console.log("[cap] role ids:", JSON.stringify(R));
 
@@ -4459,8 +4544,10 @@
     ];
     // Provider yang butuh endpoint (gradio/openai/custom) vs cukup apiKey
     // (elevenlabs/gemini — endpoint bawaan). browser tak butuh apa pun.
+    // openai: key OPSIONAL (resmi OpenAI / server auth → Bearer; lokal → kosong).
     const TTS_NEEDS_ENDPOINT = { gradio: 1, openai: 1, custom: 1 };
     const TTS_NEEDS_KEY = { elevenlabs: 1, gemini: 1 };
+    const TTS_OPT_KEY = { openai: 1 };
 
     function readTTSForm() {
       return {
@@ -4498,6 +4585,8 @@
       if (!p || p === "browser") return false;
       if (TTS_NEEDS_ENDPOINT[p]) return !!cfgEls.ttsEndpoint?.value.trim();
       if (TTS_NEEDS_KEY[p]) return !!cfgEls.ttsKey?.value.trim() || !!(TTS_CFG && TTS_CFG.apiKey);
+      // supertonic/native: tes lewat server (tanpa prasyarat) — bukan browser.
+      if (p === "supertonic" || p === "native") return true;
       return false;
     }
 
@@ -4509,10 +4598,11 @@
       const remote = p !== "browser" && p !== "gradio" && p !== "custom";
       const needKey = !!TTS_NEEDS_KEY[p];
       // key yang dimask dipertahankan: kirim tanda supaya server pakai
-      // yang tersimpan.
+      // yang tersimpan. openai: key opsional ikut dikirim bila diketik
+      // (server auth / resmi OpenAI).
       const keyDraft = cfgEls.ttsKey ? cfgEls.ttsKey.value.trim() : "";
       const q = new URLSearchParams({ provider: p });
-      if (needKey && keyDraft) q.set("apiKey", keyDraft);
+      if ((needKey || p === "openai") && keyDraft) q.set("apiKey", keyDraft);
       if (p === "openai" && cfgEls.ttsEndpoint)
         q.set("endpoint", cfgEls.ttsEndpoint.value.trim());
       let d = { voices: [], models: [], styles: [] };
@@ -4639,11 +4729,14 @@
       const p = cfgEls.ttsProvider ? cfgEls.ttsProvider.value : "browser";
       const remote = p !== "browser";
       const needKey = !!TTS_NEEDS_KEY[p];
+      // openai: kolom key tampil sebagai opsional (resmi/auth butuh,
+      // server lokal tidak) — endpoint tetap tampil.
+      const showKey = needKey || !!TTS_OPT_KEY[p];
       $$(".tts-remote-row").forEach((el) =>
         el.classList.toggle("hidden", !remote),
       );
       $$(".tts-key-row").forEach((el) =>
-        el.classList.toggle("hidden", !needKey),
+        el.classList.toggle("hidden", !showKey),
       );
       // Gemini & ElevenLabs pakai alamat resmi masing-masing; SuperTonic
       // native jalan in-process di core (tanpa endpoint) — endpoint disembunyikan
@@ -6437,12 +6530,20 @@
   const STEP_FIELD_BOUNDS = {
     ax: 30,
     ay: 30,
+    az: 30,
     bodyX: 30,
     bodyY: 30,
     bodyZ: 30,
     ex: 1,
     ey: 1,
     mouthForm: 1,
+    browLY: 1,
+    browRY: 1,
+    browLF: 1,
+    browRF: 1,
+    smileL: 1,
+    smileR: 1,
+    mouthOpen: 1,
   };
 
   const STEP_MS_MIN = 40;
@@ -6569,12 +6670,20 @@
   const POSE_FIELDS = {
     ax: 1,
     ay: 1,
+    az: 1,
     ex: 1,
     ey: 1,
     bodyX: 1,
     bodyY: 1,
     bodyZ: 1,
     mouthForm: 1,
+    browLY: 1,
+    browRY: 1,
+    browLF: 1,
+    browRF: 1,
+    smileL: 1,
+    smileR: 1,
+    mouthOpen: 1,
   };
   function unwindMotionDelta() {
     const P = state.aiPose;
@@ -6591,12 +6700,20 @@
           return {
             ax: P.ax || 0,
             ay: P.ay || 0,
+            az: P.az || 0,
             ex: P.ex || 0,
             ey: P.ey || 0,
             bodyX: P.bodyX || 0,
             bodyY: P.bodyY || 0,
             bodyZ: P.bodyZ || 0,
             mouthForm: P.mouthForm || 0,
+            browLY: P.browLY || 0,
+            browRY: P.browRY || 0,
+            browLF: P.browLF || 0,
+            browRF: P.browRF || 0,
+            smileL: P.smileL || 0,
+            smileR: P.smileR || 0,
+            mouthOpen: P.mouthOpen || 0,
           };
         },
         getSupports: () => {
@@ -6605,6 +6722,15 @@
           if (state.caps.hasEyes) s.add("eyes");
           if (state.caps.hasMouth) s.add("mouth");
           if (state.caps.hasBody) s.add("body");
+          const RI = state.caps.ids || {};
+          if (
+            state.caps.hasBrow ||
+            RI.browLY ||
+            RI.browRY ||
+            RI.browLForm ||
+            RI.browRForm
+          )
+            s.add("brow");
           return s;
         },
 

@@ -10,9 +10,20 @@ describe("FIELD_BOUNDS parity with js/motion-dsl.js", () => {
     expect(FIELD_BOUNDS.ex).toBe(1);
     expect(FIELD_BOUNDS.mouthForm).toBe(1);
   });
-  it("only canonical keys exist (legacy parity — no alias entries)", () => {
+  it("only canonical keys exist (no alias entries)", () => {
     expect(FIELD_BOUNDS.angleX).toBeUndefined();
-    expect(FIELD_BOUNDS.mouthOpen).toBeUndefined();
+    expect(FIELD_BOUNDS.eyeLSmile).toBeUndefined();
+    expect(FIELD_BOUNDS.browLForm).toBeUndefined();
+  });
+  it("v2 expressive fields exist (kosakata diperluas 2026-09-29)", () => {
+    expect(FIELD_BOUNDS.az).toBe(30);
+    expect(FIELD_BOUNDS.mouthOpen).toBe(1);
+    expect(FIELD_BOUNDS.smileL).toBe(1);
+    expect(FIELD_BOUNDS.smileR).toBe(1);
+    expect(FIELD_BOUNDS.browLY).toBe(1);
+    expect(FIELD_BOUNDS.browRY).toBe(1);
+    expect(FIELD_BOUNDS.browLF).toBe(1);
+    expect(FIELD_BOUNDS.browRF).toBe(1);
   });
   it("SPEC-style alias names are canonicalized to internal fields (legacy parity)", () => {
     expect(normalizeTarget("angleX")).toBe("ax");
@@ -21,7 +32,11 @@ describe("FIELD_BOUNDS parity with js/motion-dsl.js", () => {
     expect(normalizeTarget("eyeY")).toBe("ey");
     expect(normalizeTarget("ax")).toBe("ax");
     expect(normalizeTarget("bodyAngleX")).toBe(null);
-    expect(normalizeTarget("mouthOpen")).toBe(null);
+    expect(normalizeTarget("mouthOpen")).toBe("mouthOpen");
+    expect(normalizeTarget("mouthOpenY")).toBe("mouthOpen");
+    expect(normalizeTarget("angleZ")).toBe("az");
+    expect(normalizeTarget("eyeLSmile")).toBe("smileL");
+    expect(normalizeTarget("browLForm")).toBe("browLF");
   });
   it("sanitize canonicalizes alias target and clamps to bounds", () => {
     const r = sanitizeMotionAsset({ id: "t", duration: 1, tracks: [{ target: "angleX", keys: [{ t: 0, v: 999 }] }] } as any, { requireTracks: true });

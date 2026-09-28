@@ -2,7 +2,7 @@
 // Menjaga:
 // - dev/browser: derivasi origin (http/https → location.origin; selain itu →
 //   fallback literal 8310) — kontrak guard test-api-origin.js.
-// - embedded (shell Companion): loopback proses-sendiri (port via IPC
+// - embedded (shell Lumimi): loopback proses-sendiri (port via IPC
 //   server_port, default 8310) + domain termigrasi via IPC (modeGet/modeSet,
 //   coreVersion) dengan jembatan HTTP sementara.
 import { test, expect, afterEach } from "bun:test";

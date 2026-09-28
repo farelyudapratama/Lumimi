@@ -147,7 +147,7 @@ pub fn validate_asset(draft: &Value, analysis: Option<&Value>) -> Value {
                     "error",
                     "unknown_target",
                     Some(ti),
-                    format!("track target tidak dikenal: {raw_target} (hanya role semantik: ax/ay/bodyX/bodyY/bodyZ/ex/ey/mouthForm)"),
+                    format!("track target tidak dikenal: {raw_target} (hanya role semantik: ax/ay/az/bodyX/bodyY/bodyZ/ex/ey/mouthForm/mouthOpen/browLY/browRY/browLF/browRF/smileL/smileR)"),
                 ),
                 Some(t) => {
                     let bound = field_bound(&t).unwrap_or(1.0);

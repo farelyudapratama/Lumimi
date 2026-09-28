@@ -1,117 +1,128 @@
 <p align="center">
-  <img src="assets/lumimi-logo.svg" width="128" alt="Logo Lumimi">
+  <img src="assets/lumimi-logo.svg" width="128" alt="Lumimi logo">
 </p>
 
 # Lumimi
 
-> Teman Live2D di desktop-mu: dia mengobrol, bergerak, bersuara, dan tetap hidup saat kamu sibuk.
+> Your Live2D friend on the desktop: she chats, moves, speaks, and stays alive while you're busy.
+>
+> 🇮🇩 Versi Bahasa Indonesia: [`README-ID.md`](README-ID.md).
 
-Lumimi menghidupkan model Live2D jadi teman yang bisa diajak bicara. Kamu ketik atau bicara,
-dia menjawab dengan suara sambil menggerakkan badan, dan saat kamu
-pergi dia tetap melakukan sesuatu: bergumam sendiri, menyapa saat kamu kembali. Semua jalan di satu aplikasi kecil di mesinmu sendiri.
+Lumimi turns a Live2D model into a friend you can talk to. You type or speak,
+she answers out loud while moving her body, and when you walk away she keeps
+doing things: mumbling to herself, greeting you when you're back. Everything
+runs in one small app on your own machine.
 
-## Apa yang bikin Lumimi berbeda
+## What makes Lumimi different
 
-**Model Live2D apa pun jadi.** Punya file `.model3.json` Cubism 4 atau 5? Impor foldernya,
-Lumimi yang cari tahu kemampuan modelmu sendiri. Tidak ada penyetelan per model, tidak ada
-daftar nama yang didukung.
+**Any Live2D model works.** Have a Cubism 4 or 5 `.model3.json` file? Import its
+folder and Lumimi figures out the model's capabilities on her own. No per-model
+tuning, no list of supported names.
 
-**Aktingnya ikut isi obrolan.** Jawabannya bukan teks datar. Kalau dia bilang senang, badannya
-ikut senang; kalau malu, tatapannya kabur. Kamu bisa atur seberapa ekspresif dia per sendi.
+**Her acting follows the conversation.** Her replies aren't flat text. When she
+says she's happy, her body is happy too; when she's shy, her gaze drifts away.
+You can tune how expressive she is per joint group.
 
-**Dia benar-benar bisa bertindak.** Selain jadi teman ngobrol, Lumimi punya mode asisten yang
-boleh membaca file, mencari kode, sampai menjalankan perintah di komputermu. Yang bersifat
-mengubah selalu minta izinmu dulu lewat kartu persetujuan, dan setiap langkah bisa dibatalkan.
+**She can actually do things.** Beyond chatting, Lumimi has an assistant mode
+that may read files, search code, and run commands on your computer. Anything
+mutating always asks your permission first through an approval card, and every
+step can be undone.
 
-**Suaranya lokal.** Dia bicara lewat mesin suara bawaan yang jalan di prosesmu sendiri, dan
-mendengar lewat pengenalan suara yang sama-sama lokal. Tidak ada butuh langganan cloud khusus
-buat bisa diajak ngobrol pakai suara.
+**Her voice is local.** She speaks through a built-in voice engine running in
+her own process, and listens through equally local speech recognition. No
+special cloud subscription needed to talk to her by voice.
 
-**Kameramu tetap milikmu.** Deteksi mood dari webcam dihitung sepenuhnya di browser. Frame
-kamera dan suara mic tidak pernah dikirim ke mana pun.
+**Your camera stays yours.** Webcam mood detection is computed entirely in the
+browser. Camera frames and mic audio are never sent anywhere.
 
-## Tiga cara pakai
+## Three ways to use her
 
-- **AI VTuber.** Sambungkan ke chat Twitch atau YouTube Live, dan Lumimi jadi pembawa acara
-  yang membaca komentar dan membalas sambil akting. Ada overlay untuk OBS.
-- **Asisten.** Panel kerja ala agentic: dia menyusun rencana, memakai tool, dan melaporkan
-  hasilnya. Kamu mengawasi dan menyetujui langkah yang berisiko.
-- **Desktop pet.** Jendela transparan yang selalu di atas. Dia cuma
-  duduk manis di pojok layar.
+- **AI VTuber.** Connect to Twitch or YouTube Live chat and Lumimi becomes a host
+  that reads comments and replies while acting. Includes an overlay for OBS.
+- **Assistant.** An agentic work panel: she makes plans, uses tools, and reports
+  results. You supervise and approve the risky steps.
+- **Desktop pet.** A transparent always-on-top window. She just sits
+  pretty in the corner of your screen.
 
-Satu aplikasi, pindah peran cukup sekali klik, tanpa restart.
+One app; switching roles takes one click, no restart.
 
-## Cara kerjanya
+## How it works
 
-Semua hidup di **satu file aplikasi**: panggung Live2D dan server otaknya dalam satu proses,
-tanpa instal runtime lain. Server itu menghubungkan tiga hal: model Live2D pilihanmu, provider
-AI yang kamu tentukan sendiri (OpenAI-compatible, Gemini, Anthropic, Groq), dan perangkat
-kamu: keyboard, mic, kamera. Koneksi keluar cuma ke tempat yang kamu izinkan.
+Everything lives in **one application binary**: the Live2D stage and her brain
+server in a single process, no extra runtime to install. That server connects
+three things: the Live2D model of your choice, the AI provider you pick yourself
+(OpenAI-compatible, Gemini, Anthropic, Groq), and your devices: keyboard, mic,
+camera. Outbound connections only go where you allow.
 
 ```mermaid
 flowchart LR
-    KAMU["Kamu\nteks · suara · webcam"]
-    LUMI["Lumimi\nsatu exe di desktop:\npanggung Live2D + server lokal"]
-    OTAK["Provider AI pilihanmu\nOpenAI-compatible · Gemini ·\nAnthropic · Groq"]
-    MODEL["Model Live2D-mu\nCubism 4/5 apa pun"]
+    YOU["You\ntext · voice · webcam"]
+    LUMI["Lumimi\none desktop exe:\nLive2D stage + local server"]
+    BRAIN["AI provider of your choice\nOpenAI-compatible · Gemini ·\nAnthropic · Groq"]
+    MODEL["Your Live2D model\nany Cubism 4/5"]
     LIVE["Twitch · YouTube Live"]
 
-    KAMU <--> LUMI
-    LUMI --> OTAK
+    YOU <--> LUMI
+    LUMI --> BRAIN
     LUMI --> MODEL
     LUMI --> LIVE
 ```
 
-Pengaturan, model, sheet, dan motion-mu tersimpan di folder `data/` milikmu. Pindah
-komputer? Copy foldernya, selesai.
+Your settings, models, sheets, and motions live in your own `data/` folder.
+Switching computers? Copy the folder, done.
 
-## Dapatkan Lumimi
+## Get Lumimi
 
-Saat ini Lumimi tersedia untuk **Windows**. Cara termudah: bangun folder portable sendiri
-sekali, lalu pakai atau bagikan hasilnya.
+Lumimi is currently available for **Windows**. The easiest way: build the
+portable folder yourself once, then use or share the result.
 
 ```bash
 bun install
-bun run build          # siapkan aset + bundle aplikasi
-bun run dist           # hasil: folder portable di dist/ + installer opsional
+bun run build          # prepare assets + app bundle
+bun run dist           # output: portable folder in dist/ + optional installer
 ```
 
-`bun run dist` menghasilkan folder portable berisi satu `Lumimi.exe` plus installer
-per-user tanpa admin bila Inno Setup 6 terpasang. Aplikasi butuh WebView2, yang
-biasanya sudah ada di Windows 10/11.
+`bun run dist` produces a portable folder with a single `Lumimi.exe`, plus a
+per-user no-admin installer when Inno Setup 6 is installed. The app needs
+WebView2, which is usually already on Windows 10/11.
 
-## Jalankan dari source
+## Run from source
 
-Butuh [Bun](https://bun.sh) dan Rust toolchain.
+Requires [Bun](https://bun.sh) and the Rust toolchain.
 
 ```bash
 bun install
 bun run build
-bun run dev            # buka http://127.0.0.1:8310 di browser
+bun run dev            # open http://127.0.0.1:8310 in a browser
 ```
 
-Build pertama mengunduh Cubism Core resmi dari CDN Live2D (kode proprietary mereka, diatur
-lisensinya sendiri, tidak ikut di-commit).
+The first build downloads the official Cubism Core from the Live2D CDN (their
+proprietary code, under its own license, never committed).
 
-## Privasi, garis besarnya
+## Privacy, in short
 
-- Semua koneksi default terikat ke loopback; tidak ada port yang terbuka ke jaringan.
-- Frame webcam tidak pernah di-upload; deteksinya jalan lokal.
-- Suara mic diproses lokal; layanan cloud cuma dipakai kalau kamu memilihnya sendiri.
-- API key-mu tersimpan lokal dan tidak pernah disajikan lewat HTTP.
-- Langkah asisten yang mengubah file atau menjalankan perintah selalu butuh persetujuan.
+- All default connections bind to loopback; no port is exposed to the network.
+- Webcam frames are never uploaded; detection runs locally.
+- Mic audio is processed locally; cloud services are only used if you opt in.
+- Your API keys are stored locally and never served over HTTP.
+- Assistant steps that modify files or run commands always need approval.
 
-## Lisensi
+## License
 
-| Komponen | Lisensi |
+| Component | License |
 |---|---|
-| Kode Lumimi | mengikuti ketentuan pemilik repo |
+| Lumimi code | per the repo owner's terms |
 | PixiJS 8 | MIT |
-| Cubism Core | Live2D Proprietary, diunduh terpisah saat build |
+| Cubism Core | Live2D Proprietary, downloaded separately at build |
 | Cubism Framework | Live2D Open Software License |
-| Model Live2D | milik pembuat masing-masing model |
+| Live2D models | belong to their respective creators |
 
-## Buat kontributor
+## For contributors
 
-Panduan kerja untuk manusia maupun AI agent ada di [`AGENTS.md`](AGENTS.md), dan aturan-aturan
-mengikat lainnya di folder [`docs/`](docs/). Baca di sana sebelum menyentuh kode.
+The working guide for humans and AI agents is in [`AGENTS.md`](AGENTS.md), with
+further binding rules in [`docs/`](docs/). Read them before touching code.
+
+> **A note on language:** the working docs (`AGENTS.md`, `docs/`) are written in
+> Indonesian — that is the maintainer's working language. English issues,
+> discussions, and PRs are welcome; machine translation is perfectly fine for
+> reading the docs.

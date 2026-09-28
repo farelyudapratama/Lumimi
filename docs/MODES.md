@@ -233,15 +233,19 @@ tak ada mode CLI `pet` lagi.
       `setIgnoreCursorEvents`. Saat menyala, klik menembus ke desktop; satu-
       satunya jalan keluar adalah toggle yang sama di app utama.
 2. **Fallback (hanya bila core jalan TANPA shell — dev `cargo run -p
-   live2d-core`)**: spawn `Lumimi.exe` sebagai proses pet (transparan),
-   lalu Chrome/Edge `--app` (opaque, always-on-top via PowerShell
-   `SetWindowPos`, tanpa klik-tembus).
+   live2d-core`)**: spawn `Lumimi.exe` + Chrome/Edge `--app` (opaque,
+   always-on-top via PowerShell `SetWindowPos`, tanpa klik-tembus).
+   Catatan jujur: argumen `pet` diabaikan shell (`parse_args` di
+   `agent-shell/src/main.rs`) — exe yang di-spawn membuka jendela UTAMA
+   kedua (`index.html`), BUKAN overlay pet transparan. Jadi fallback ini
+   dev-only, bukan jalur produksi.
 3. `pet.html` — adapter view stack baru (importmap pixi8.mjs +
    `js/live2d-view.mjs`; model lewat `__live2dView.loadModel`). Blink/breath
    diputar framework; gaze kursor via `setLookTarget(±1)` — semua sendi
    (kepala/mata/badan) ikut, ter-skala range model, tanpa id param hardcode.
    Sapaan berkala, tombol Sapa/Bicara/Klik-tembus/Tutup (`POST /api/pet/close`
-   mematikan proses). Esc juga menutup. Bar bawah memakai
+   menutup jendela; di jalur fallback mematikan proses yang di-spawn).
+   Esc juga menutup. Bar bawah memakai
    `data-tauri-drag-region` (bisa dipindah di shell Tauri).
 4. Pindah mode dari app utama otomatis menutup jendela pet (`petClose()` di
    teardown).

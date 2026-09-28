@@ -13,11 +13,13 @@
 
 use serde_json::{json, Map, Value};
 
-/// Batas nilai per field kanonik (semantic role limits).
+/// Batas nilai per field kanonik (semantic role limits). HARUS identik dengan
+/// FIELD_BOUNDS `src/client/animation/motion-dsl.ts` (test server-parity).
 pub(crate) fn field_bound(field: &str) -> Option<f64> {
     match field {
-        "ax" | "ay" | "bodyX" | "bodyY" | "bodyZ" => Some(30.0),
-        "ex" | "ey" | "mouthForm" => Some(1.0),
+        "ax" | "ay" | "az" | "bodyX" | "bodyY" | "bodyZ" => Some(30.0),
+        "ex" | "ey" | "mouthForm" | "browLY" | "browRY" | "browLF" | "browRF"
+        | "smileL" | "smileR" | "mouthOpen" => Some(1.0),
         _ => None,
     }
 }
@@ -27,17 +29,23 @@ fn role_alias(name: &str) -> Option<&'static str> {
     match name {
         "angleX" => Some("ax"),
         "angleY" => Some("ay"),
+        "angleZ" => Some("az"),
         "eyeX" => Some("ex"),
         "eyeY" => Some("ey"),
         "bodyX" => Some("bodyX"),
         "bodyY" => Some("bodyY"),
         "bodyZ" => Some("bodyZ"),
         "mouthForm" => Some("mouthForm"),
+        "mouthOpenY" => Some("mouthOpen"),
+        "eyeLSmile" => Some("smileL"),
+        "eyeRSmile" => Some("smileR"),
+        "browLForm" => Some("browLF"),
+        "browRForm" => Some("browRF"),
         _ => None,
     }
 }
 
-const KNOWN_REQUIRES: &[&str] = &["head", "eyes", "mouth", "body"];
+const KNOWN_REQUIRES: &[&str] = &["head", "eyes", "mouth", "body", "brow"];
 const INTERP_MODES: &[&str] = &["linear", "ease-in", "ease-out", "ease-in-out", "stepped"];
 const PARAM_ABS_MAX: f64 = 1e6;
 
@@ -370,6 +378,37 @@ mod tests {
         assert_eq!(normalize_target("angleX").as_deref(), Some("ax"));
         assert_eq!(normalize_target("ax").as_deref(), Some("ax"));
         assert!(normalize_target("ParamAngleX").is_none());
+    }
+
+    #[test]
+    fn field_ekspresi_v2() {
+        // Kosakata diperluas 2026-09-29: alias SPEC dikanoniskan, bound sesuai.
+        assert_eq!(normalize_target("angleZ").as_deref(), Some("az"));
+        assert_eq!(normalize_target("az").as_deref(), Some("az"));
+        assert_eq!(normalize_target("browLY").as_deref(), Some("browLY"));
+        assert_eq!(normalize_target("browLForm").as_deref(), Some("browLF"));
+        assert_eq!(normalize_target("eyeLSmile").as_deref(), Some("smileL"));
+        assert_eq!(normalize_target("mouthOpenY").as_deref(), Some("mouthOpen"));
+        assert_eq!(normalize_target("mouthOpen").as_deref(), Some("mouthOpen"));
+        assert_eq!(field_bound("az"), Some(30.0));
+        assert_eq!(field_bound("mouthOpen"), Some(1.0));
+        assert!(normalize_target("ParamEyeLOpen").is_none(), "kedip tetap di luar kosakata (milik blink framework)");
+    }
+
+    #[test]
+    fn sanitize_field_ekspresi_clamp() {
+        let raw = json!({
+            "id": "kaget", "duration": 1.0,
+            "tracks": [
+                { "target": "browLY", "keys": [{ "t": 0, "v": 0 }, { "t": 0.4, "v": 5 }, { "t": 1.0, "v": 0 }] },
+                { "target": "mouthOpenY", "keys": [{ "t": 0, "v": 0 }, { "t": 0.4, "v": 3 }, { "t": 1.0, "v": 0 }] }
+            ]
+        });
+        let a = sanitize_motion_asset(&raw, &SanitizeOpts { require_tracks: true, ..Default::default() }).unwrap();
+        assert_eq!(a["tracks"][0]["target"], "browLY");
+        assert_eq!(a["tracks"][0]["keys"][1]["v"], 1.0); // clamp 5 → 1
+        assert_eq!(a["tracks"][1]["target"], "mouthOpen");
+        assert_eq!(a["tracks"][1]["keys"][1]["v"], 1.0); // clamp 3 → 1
     }
 
     #[test]

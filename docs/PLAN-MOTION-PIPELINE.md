@@ -309,9 +309,10 @@ Approval user tetap pintu terakhir sebelum save (§17 tidak berubah).
 
 Tanpa ini, "berhasil" cuma perasaan:
 
-1. **2–3 model uji dengan gaya rig berbeda** (yang sudah ada: lumine, ren,
-   神宫白子) dengan **label manual sebagai kunci jawaban** — fixture di
-   `test/`, bukan menulis di `data/` produksi.
+1. **2–3 model uji dengan gaya rig berbeda** (contoh lokal: lumine, ren,
+   神宫白子 — TIDAK ikut repo, contributor memakai model sendiri) dengan
+   **label manual sebagai kunci jawaban** — fixture di `test/`, bukan
+   menulis di `data/` produksi.
 2. **Akurasi probe**: label benar **dan tanda `sign`/`side` benar** vs kunci
    manual — diprose sebagai persentase dalam test.
 3. **Critic naik-turun vs turun**: pada gerakan uji, skor critic **wajib
@@ -345,7 +346,8 @@ Tanpa ini, "berhasil" cuma perasaan:
   `test/i18n.test.ts`).
 - **Docs**: entri pipeline baru di `MOTION-SYSTEM-SPEC.md` §16–17 +
   kebijakan layering + ukuran sukses; catatan provenance/notes & definisi
-  `side` = karakter di `MODEL-AGNOSTIC-RULES.md`; entri STATUS sesi.
+   `side` = karakter di `MODEL-AGNOSTIC-RULES.md`; progres dicatat di handoff
+   lokal (di-gitignore, bukan acuan contributor).
 - **Gate akhir**: `bun run build` + `bunx tsc --noEmit` + `bun run test` +
   `cargo test --workspace` semua hijau.
 

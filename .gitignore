@@ -45,4 +45,7 @@ agent-shell/gen/
 .DS_Store
 tmp-hist*.json
 
+# artifact blackbox test manual (screenshot, backup config, catatan sesi)
+blackbox-artifacts/
+
 docs/STATUS-CUBISM5-EFEK.md

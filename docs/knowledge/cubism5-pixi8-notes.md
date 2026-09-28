@@ -1,9 +1,11 @@
 # Catatan: Cubism 5.3 (SDK Web 5-r.5 / Core 6.0.1) + PixiJS 8 (Pendahuluan → Fase 2 terkunci)
 
-> Wajib sebelum Fase 0. Sumber SDK lokal `F:\CubismSdkForWeb-5-r.5.zip` diekstrak ke
-> `C:\Users\Admin\AppData\Local\Temp\opencode\lumi-cubism5r5-research-20260917`.
+> Wajib sebelum Fase 0. SDK diunduh dari situs resmi Live2D
+> (`CubismSdkForWeb-5-r.5.zip`) dan diekstrak ke direktori temp lokal.
 > Tidak ada kode aplikasi yang diubah di fase ini; hanya riset + spike terisolasi.
-> Fase 2 (2026-09-18): versi di atas dikunci sebagai target; hack `static/js/app.js:8` `patchCubismCore` tetap utuh (v5 stamp + v6 fail-loud, tidak dihapus sampai Fase 7).
+> Fase 2 (2026-09-18): versi di atas dikunci sebagai target.
+> (Catatan historis: hack `patchCubismCore` + stack Pixi 6 sudah DIHAPUS total
+> pasca-migrasi — tidak ada MOC-version-hack di kode sekarang.)
 
 ## 1. Versi yang dipakai + alasan
 
@@ -68,7 +70,9 @@ Alasan: pipeline offscreen/blend 5.3 terlalu dalam untuk di-reimplementasi di me
 
 - Shader load asinkron: sampai `isShaderLoaded` true, frame pertama hitam — fase berikut butuh guard/polling log `[W]Shader program is not initialized`.
 - Offscreen `blendModeEnabled=true` membuat 3 `modelRenderTargets` ukuran viewport — butuh ukuran benar di `createRenderer`/`startUp`.
-- Spike sekarang hanya model SDK Ren; model bundel (`data/model/lumine`, `tesmodel/ren`) belum diuji fase 5.
+- Spike fase awal hanya memakai model SDK Ren; verifikasi multi-model
+  (termasuk model user di `data/model/`) menyusul di fase migrasi dan sudah
+  lolos sebelum stack lama dipensiunkan.
 - Pixi 8 headless (swiftshader) tidak bisa screenshot Playwright deterministik; bukti pakai `canvas.toDataURL` + `readPixels` grid.
 
 ## 6. Referensi

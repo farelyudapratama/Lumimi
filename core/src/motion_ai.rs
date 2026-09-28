@@ -71,8 +71,9 @@ pub async fn analyze_motion(config_path: &Path, body: &Value) -> (u16, String) {
 Data gerakan (peran semantik, bukan parameter mentah):\n\
 durasi: {duration} detik\n{track_lines}\n\n\
 Nama track bisa peran singkat atau nama parameter rig:\n\
-ax=kepala kiri/kanan, ay=kepala atas/bawah, bodyZ=badan miring, bodyX/bodyY=badan geser,\n\
-ex/ey=arah bola mata, mouthForm=bentuk mulut. Nama lain = parameter rig (tebak dari namanya).\n\
+ax=kepala kiri/kanan, ay=kepala atas/bawah, az=kepala miring, bodyZ=badan miring, bodyX/bodyY=badan geser,\n\
+ex/ey=arah bola mata, mouthForm=bentuk mulut, mouthOpen=bukaan mulut, smileL/smileR=senyum mata,\n\
+browLY/browRY=alis naik-turun, browLF/browRF=bentuk alis. Nama lain = parameter rig (tebak dari namanya).\n\
 Baca rentang tiap track, jangan asumsikan derajat.\n\n\
 TUGAS: tebak gerakan ini menyampaikan apa, lalu balas JSON:\n\
 {{\n  \"description\": \"satu kalimat Indonesia, maks 120 karakter\",\n  \"tags\": [\"3-5 tag Indonesia satu kata\"],\n  \"emotionCompatibility\": {{ \"<emosi>\": 0.0-1.0 }}\n}}\n\
@@ -198,20 +199,28 @@ Kamu HANYA boleh memakai nama track berikut. Ini nama PERAN, bukan nama paramete
 model — klien yang akan menerjemahkannya ke parameter rig yang sesuai:\n\
 ax    = kepala kiri(-)/kanan(+), derajat, batas ±30\n\
 ay    = kepala atas(-)/bawah(+), derajat, batas ±30\n\
+az    = kepala miring (tilt), derajat, batas ±30\n\
 bodyZ = badan miring, derajat, batas ±30\n\
 bodyX = badan geser kiri/kanan, derajat, batas ±30\n\
 bodyY = badan naik/turun, derajat, batas ±30\n\
 ex    = bola mata kiri(-)/kanan(+), −1..1\n\
 ey    = bola mata atas(-)/bawah(+), −1..1\n\
-mouthForm = bentuk mulut, −1..1\n\n\
-JANGAN menyebut nama parameter model seperti ParamAngleX atau ParamHairFront —\n\
-kamu tidak tahu nama parameter rig ini dan menebaknya akan ditolak.\n\n\
+mouthForm = bentuk mulut, −1..1\n\
+mouthOpen = bukaan mulut, 0 = diam (default model), 1 = terbuka penuh\n\
+smileL / smileR = senyum mata kiri/kanan, 0 = netral, 1 = senyum penuh\n\
+browLY / browRY = alis kiri/kanan turun(-)/naik(+), −1..1\n\
+browLF / browRF = bentuk alis kiri/kanan, -1 = mengernyut, +1 = terangkat\n\n\
+Semua field mulai dan PULANG ke 0 (0 selalu pose istirahat, termasuk mouthOpen\n\
+dan senyum mata). JANGAN menyebut nama parameter model seperti ParamAngleX\n\
+atau ParamHairFront — kamu tidak tahu nama parameter rig ini dan menebaknya\n\
+akan ditolak.\n\n\
 Aturan:\n\
 - Maksimal 4 track, maksimal 6 keyframe per track.\n\
 - t dalam detik, mulai 0, tidak melebihi durasi.\n\
 - Durasi 0.6 sampai 3 detik.\n\
 - Gerakan yang bagus PULANG ke 0 di keyframe terakhir supaya tidak nyangkut.\n\
-- Nilai realistis: ±5..15 derajat untuk kepala, ±0.2..0.6 untuk mata.\n\n\
+- Nilai realistis: ±5..15 derajat untuk kepala/badan, ±0.2..0.6 untuk bola mata,\n\
+  0.2..0.8 untuk mulut/senyum mata, ±0.2..0.7 untuk alis.\n\n\
 Balas JSON persis format ini:\n\
 {{\n  \"id\": \"nama_id_snake_case\",\n  \"name\": \"Nama Singkat\",\n  \"description\": \"satu kalimat bahasa Indonesia\",\n  \"tags\": [\"dua-empat tag\"],\n  \"duration\": 1.4,\n  \"emotionCompatibility\": {{ \"<emosi>\": 0.0-1.0 }},\n  \"tracks\": [\n    {{ \"target\": \"ay\", \"keys\": [{{ \"t\": 0, \"v\": 0 }}, {{ \"t\": 0.4, \"v\": 8 }}, {{ \"t\": 1.4, \"v\": 0 }}] }}\n  ]\n}}\n\
 Emosi yang boleh dipakai HANYA: [{emo}]\n\
@@ -373,7 +382,9 @@ async fn refine_with_validator(config_path: &Path, draft: Value, analysis: Optio
         "Draft motion buatanmu diperiksa validator independen dan ada yang perlu diperbaiki.\n\n\
 Draft sekarang (JSON):\n{draft_str}\n\n\
 Masalah yang ditemukan:\n{issues}\n\n\
-Perbaiki HANYA masalah di atas. Tetap pakai nama track PERAN (ax, ay, bodyX, bodyY, bodyZ, ex, ey, mouthForm) — \
+Perbaiki HANYA masalah di atas. Tetap pakai nama track PERAN (ax, ay, az, bodyX,\n\
+bodyY, bodyZ, ex, ey, mouthForm, mouthOpen, smileL, smileR, browLY, browRY,\n\
+browLF, browRF) — \
 JANGAN menyebut nama parameter rig. Jaga nilai realistis (±5..15 derajat kepala/badan, ±0.2..0.6 mata) dan \
 PULANG ke 0 di keyframe terakhir tiap track supaya gerakan tidak nyangkut. Emosi yang boleh HANYA: [{emo}].\n\
 Balas HANYA objek JSON motion lengkap (id, name, description, tags, duration, emotionCompatibility, tracks) — \
@@ -428,6 +439,12 @@ mod tests {
         assert!(p0.contains("Emosi yang boleh dipakai HANYA: [senang, sedih]"));
         assert!(p0.ends_with("JANGAN mengulang instruksi ini."));
         assert!(!p0.contains("Konteks model"));
+        // Kosakata v2 (field ekspresi) wajib ada di prompt.
+        assert!(p0.contains("az    = kepala miring"));
+        assert!(p0.contains("mouthOpen = bukaan mulut"));
+        assert!(p0.contains("smileL / smileR"));
+        assert!(p0.contains("browLY / browRY"));
+        assert!(p0.contains("Semua field mulai dan PULANG ke 0"));
 
         // Dengan konteks: blok disisipkan sebelum "Aturan:", aturan tetap utuh.
         let ctx = "Konteks model ini (diukur engine dari motion milik model ini):\n- amplitudo teramati: ax -30..20";

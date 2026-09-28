@@ -49,11 +49,11 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 437 unit (bun) + 369 guard (7 suite)
+bun run test           # SEMUA TS: 439 unit (bun) + 367 guard (7 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)
-cargo test --workspace # backend Rust (122 test: 116 core + 6 engine), bagian gate
+cargo test --workspace # backend Rust (164 test: 158 core + 6 engine), bagian gate
 ```
 
 **Selesai** = build bersih + `tsc` bersih + `bun run test` hijau + `cargo test
@@ -153,8 +153,10 @@ Jebakan yang harus diingat:
 - **i18n.** String UI baru wajib ada di **kedua** kamus (`src/client/i18n/`, id +
   en); parity dan coverage dijaga `test/i18n.test.ts`. Kosakata directive
   (`[EMOTION:]` dst.) tetap Indonesia, itu protokol antar-komponen.
-- **Bahasa kerja.** Komentar kode, commit, dan dokumen: Indonesia. Pesan commit
-  gaya conventional plus deskripsi Indonesia (lihat `git log`): `feat(ui): …`,
+- **Bahasa kerja.** Komentar kode, commit, dan dokumen: Indonesia —
+  pengecualian: `README.md` berbahasa Inggris (etalase utama) dengan
+  padanannya `README-ID.md`. Issue/PR/diskusi bahasa Inggris welcome.
+  Pesan commit gaya conventional plus deskripsi Indonesia (lihat `git log`): `feat(ui): …`,
   `fix(core): …`, `docs: …`, `test: …`, `refactor: …`, `chore: …`.
 
 ## Jebakan yang sering terjadi

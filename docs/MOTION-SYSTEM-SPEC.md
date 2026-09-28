@@ -47,10 +47,31 @@ motion ID · description · tags · emotion compatibility · duration · intensi
 
 ❌ `{"ParamAngleX": -12, ...}` — ✅ `{"type":"motion","id":"think","intensity":0.7}`
 
-Layer semantik memakai nama role (`angleX angleY eyeX eyeY bodyX bodyY bodyZ
-mouthForm`); resolusi role → parameter ID dilakukan sistem role-mapping model
+Layer semantik memakai nama field kanonik. Kosakata v1: `ax ay ex ey bodyX
+bodyY bodyZ mouthForm`; **diperluas 2026-09-29** (field ekspresi, semua role
+yang SUDAH dipetakan `role-mapping.ts`): `az` (tilt kepala), `browLY/browRY`
+(alis naik-turun), `browLF/browRF` (bentuk alis), `smileL/smileR` (senyum
+mata), `mouthOpen` (bukaan mulut). Dua kategori semantik nilai:
+
+- **Simetris** (default): 0 = netral, ±bound = ekstrem — `az` ±30 derajat,
+  sisanya ±1.
+- **Deviasi-dari-default** (`NORM_DEF_FIELDS`: `smileL/smileR/mouthOpen`):
+  0 = **default milik model** (pose istirahat), +1 = max, −1 = min — dipetakan
+  `devToActual` (`role-mapping.ts`), bukan midpoint, supaya rig dengan default
+  non-nol tidak tersenyum permanen saat track pulang ke 0. Konversi role→param
+  (`rolesToParamTracks`, harness, preview) sudah def-true sejak awal dan
+  otomatis benar untuk kedua kategori.
+
+Playback (app.js): field simetris ikut jalur `applyPoseDelta`→`POSE_FIELDS`
+seperti v1; field deviasi ditulis **aditif** (`targetDev` = offset dari
+default model) sehingga blink/lipsync/pose framework tetap pemilik baseline —
+bukan SET yang menimpanya. Capability baru `brow` (dari `caps.hasBrow` + role
+map); model tanpa alis melewatkan track-nya dengan anggun.
+
+Resolusi role → parameter ID dilakukan sistem role-mapping model
 (`static/js/app.js`, lihat `MODEL-AGNOSTIC-RULES.md`). Jangan pernah berasumsi
-dua model memakai parameter ID yang sama.
+dua model memakai parameter ID yang sama. Kedip sengaja TIDAK masuk kosakata
+(`eyeLOpen/eyeROpen` milik blink updater framework).
 
 # 4–5. UI Editor
 
@@ -226,6 +247,12 @@ output physics (dilarang), atau catatan "belum ada motion referensi". Tanpa
 `model`/`roleMap`, prompt byte-per-byte sama seperti semula (backward compat).
 Angka konteks murni engine (dari disk) — LLM hanya MENERIMA konteks, balasan
 LLM tetap tanpa range, clamp server tetap `FIELD_BOUNDS`.
+
+**Kosakata diperluas (revisi 2026-09-29).** Prompt generate, legend analyze,
+dan daftar fix memuat 16 field (v1 8 field + `az/mouthOpen/smileL/smileR/
+browLY/browRY/browLF/browRF`). Karena `roleMap` klien dibangun dari iterasi
+`ROLE_FOR_FIELD`, konteks amplitudo per field baru ikut terisi otomatis dari
+analisis disk — tanpa perubahan `motion_analysis`.
 
 # 17a. Analisis Model & Validasi Independen (revisi 2026-09-26)
 
