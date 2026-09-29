@@ -17,6 +17,7 @@
  */
 import type {} from "./window-contract";
 import * as MotionDSL from "./animation/motion-dsl";
+import { toMotion3, motion3ToAsset } from "./animation/motion-io";
 import { MotionRegistry } from "./animation/motion-registry";
 import { MotionRuntime } from "./animation/motion-runtime";
 import * as MotionTaxonomy from "./engine/motion-taxonomy";
@@ -55,6 +56,9 @@ if (typeof window !== "undefined") {
     build: buildNativeClips,
     buildFromCounts: buildNativeClipsFromCounts,
   };
+  // Konversi dua arah Motion Asset ↔ .motion3.json — dipakai Motion Studio
+  // (tombol Ekspor + Impor). Murni; role→param di-resolve pemanggil.
+  window.__motionIO = { toMotion3, motion3ToAsset };
   // Rumus framing panggung (murni) — dipakai legacy frameModel. upper/full
   // hanya fungsi TINGGI stage (anti-gepeng saat splitter didrag).
   window.__framing = Framing;

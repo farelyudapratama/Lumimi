@@ -172,6 +172,10 @@
     modelManifest: null,
     // Klip native model aktif (window.__nativeClips.build) — id → (grup,index).
     nativeClips: [],
+    // Overlay rename klip native (File → nama; server: native-aliases.json)
+    // + meta durasi hasil scan terakhir — dipakai rebuild daftar saat rename.
+    nativeAliases: {},
+    nativeClipMeta: {},
 
     clipUntil: 0,
     clipName: null,
@@ -579,11 +583,13 @@
       // termasuk) — sumber registrasi registry native per-klip di
       // initMotionRegistry. In-memory saja, tidak pernah ke disk.
       state.modelManifest = settings;
+      state.nativeClipMeta = clipMeta;
       state.nativeClips =
         typeof window !== "undefined" && window.__nativeClips
           ? window.__nativeClips.build(
               settings.FileReferences.Motions,
               clipMeta,
+              state.nativeAliases,
             )
           : [];
 
@@ -699,6 +705,9 @@
           window.__agent.invalidateCapabilityProfile();
       } catch (e) {}
 
+      // Alias klip native dimuat SEBELUM manifest dibangun supaya id/nama
+      // registry langsung memakai rename; gagal = map kosong (garnish).
+      state.nativeAliases = await fetchNativeAliases();
       const settings = await buildModelSettings(modelPath);
       // View Pixi 8 memuat model lewat adapter src/live2d (moc native).
       // Manifest hasil adopsi .exp3 yatim (buildModelSettings) DITERUSKAN
@@ -6840,7 +6849,9 @@
     const build = window.__nativeClips;
     if (!build) return [];
     const fr = state.modelManifest && state.modelManifest.FileReferences;
-    let clips = fr ? build.build(fr.Motions) : [];
+    let clips = fr
+      ? build.build(fr.Motions, state.nativeClipMeta, state.nativeAliases)
+      : [];
     if (!clips.length) {
       try {
         const im =
@@ -6851,6 +6862,22 @@
       } catch (e) {}
     }
     return clips;
+  }
+
+  /** Muat overlay alias klip native (rename non-destruktif, file model tidak
+   * disentuh). Gagal = map kosong — alias garnish, tak boleh mematikan load. */
+  async function fetchNativeAliases() {
+    try {
+      const key = characterSheetKey().replace("live2d_sheet_", "");
+      const r = await fetch(
+        API + "/api/motions/native-alias?model=" + encodeURIComponent(key),
+      );
+      if (!r.ok) return {};
+      const d = await r.json();
+      return d && d.aliases && typeof d.aliases === "object" ? d.aliases : {};
+    } catch (e) {
+      return {};
+    }
   }
 
   async function initMotionRegistry() {
@@ -7897,6 +7924,59 @@
     removeUserMotion: (id) =>
       haveMotionSystem ? motionRegistry.remove(id, "user") : false,
     listRegistryMotions: () => (haveMotionSystem ? motionRegistry.list() : []),
+
+    /** Rename klip native via overlay alias (file model TIDAK disentuh).
+     * name kosong = hapus alias (kembali ke nama asli). Setelah sukses:
+     * daftar klip + registry dibangun ulang, katalog LLM di-refresh. */
+    renameNativeMotion: async (file, name) => {
+      const f = String(file || "");
+      if (!f || f.split(/[\\/]/).includes(".."))
+        return { ok: false, error: "path klip tidak valid" };
+      try {
+        const key = characterSheetKey().replace("live2d_sheet_", "");
+        const r = await fetch(API + "/api/motions/native-alias", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: key, file: f, name: String(name || "") }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return { ok: false, error: d.error || "HTTP " + r.status };
+        state.nativeAliases = d.aliases || {};
+        const fr = state.modelManifest && state.modelManifest.FileReferences;
+        if (fr && window.__nativeClips) {
+          state.nativeClips = window.__nativeClips.build(
+            fr.Motions,
+            state.nativeClipMeta,
+            state.nativeAliases,
+          );
+        }
+        await initMotionRegistry();
+        try {
+          window.__agent &&
+            window.__agent.invalidateCapabilityProfile &&
+            window.__agent.invalidateCapabilityProfile();
+        } catch (e) {}
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    },
+
+    /** Ambil isi file klip native (untuk impor ke Motion Studio). Path File
+     * relatif folder model3.json — URL dirakit dari path model aktif. */
+    fetchNativeMotionText: async (file) => {
+      const f = String(file || "");
+      const mp = String(state.modelPath || "");
+      if (!f || !mp || f.split(/[\\/]/).includes(".."))
+        throw new Error("path klip tidak valid");
+      const dir = mp.split("/").slice(0, -1).join("/");
+      const rel = f.startsWith("model/") ? f : dir ? dir + "/" + f : f;
+      const r = await fetch(
+        API + "/" + rel.split("/").map(encodeURIComponent).join("/"),
+      );
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.text();
+    },
 
     modelKey: currentModelKey,
 

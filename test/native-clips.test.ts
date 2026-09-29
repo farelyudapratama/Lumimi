@@ -114,3 +114,51 @@ describe("native-clips", () => {
     expect(clips[0].name).toBe("m_001");
   });
 });
+
+describe("native-clips — alias rename (overlay non-destruktif)", () => {
+  const motions = {
+    Idle: [{ File: "motions/mtn_01.motion3.json" }],
+    TapBody: [
+      { File: "motions/tap_a.motion3.json" },
+      { File: "motions/tap_b.motion3.json" },
+    ],
+  };
+
+  it("alias per-file mengganti nama + basis id; grup & index tetap asli", () => {
+    const clips = buildNativeClips(motions, undefined, {
+      "motions/tap_a.motion3.json": "Lambaikan Tangan",
+    });
+    const a = clips.find((c) => c.file === "motions/tap_a.motion3.json");
+    expect(a).toMatchObject({
+      id: "motion_Lambaikan_Tangan",
+      name: "Lambaikan Tangan",
+      group: "TapBody",
+      index: 0,
+    });
+    // Klip lain tidak tersentuh.
+    const b = clips.find((c) => c.file === "motions/tap_b.motion3.json");
+    expect(b).toMatchObject({ id: "motion_tap_b", name: "tap_b" });
+  });
+
+  it("alias menimpa basis id grup 1-klip yang biasanya motion_<grup>", () => {
+    const clips = buildNativeClips(motions, undefined, {
+      "motions/mtn_01.motion3.json": "Diam Santai",
+    });
+    const idle = clips.find((c) => c.file === "motions/mtn_01.motion3.json");
+    expect(idle).toMatchObject({ id: "motion_Diam_Santai", name: "Diam Santai", group: "Idle" });
+  });
+
+  it("alias kosong/whitespace diabaikan (nama asli)", () => {
+    const clips = buildNativeClips(motions, undefined, {
+      "motions/tap_a.motion3.json": "   ",
+    });
+    const a = clips.find((c) => c.file === "motions/tap_a.motion3.json");
+    expect(a).toMatchObject({ id: "motion_tap_a", name: "tap_a" });
+  });
+
+  it("tanpa alias = perilaku persis seperti sebelumnya", () => {
+    const withUndef = buildNativeClips(motions);
+    const withEmpty = buildNativeClips(motions, undefined, {});
+    expect(withUndef).toEqual(withEmpty);
+  });
+});

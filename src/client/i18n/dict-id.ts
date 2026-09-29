@@ -768,4 +768,23 @@ export const DICT_ID: Record<string, string> = {
   "as.bus.nItem": "{n} item",
   "as.term.continued": "(lanjutan)",
   "as.review.touched": "tersentuh",
+
+  // ── motion IO (ekspor/impor/rename native) — audit 2026-09-29 ──
+  "ms.exportTip": "Ekspor draft ke .motion3.json (format native Live2D — unduh)",
+  "ms.exportEmpty": "tidak ada track untuk diekspor",
+  "ms.exported": "\"{name}.motion3.json\" diekspor",
+  "ms.exportSkipped": "diekspor — {n} track role tidak terpetakan ke model ini, dilewati",
+  "ms.importTip": "Impor .motion3.json (native) ke editor — native asli tidak diubah",
+  "ms.importFail": "gagal impor: {msg}",
+  "ms.importedOk": "\"{name}\" diimpor — periksa lalu Simpan",
+  "ms.importedWarn": "\"{name}\" diimpor dengan {n} peringatan — periksa lalu Simpan",
+  "ms.importNativeTip": "Buka klip native ini di editor (jadi draft milikmu)",
+  "ms.renameNativeTip": "Rename klip native (alias — file model tidak diubah)",
+  "ms.renameNativePrompt": "Nama baru untuk \"{name}\" (kosong = hapus alias):",
+  "ms.renameOk": "dinamai ulang: {name}",
+  "ms.renameReset": "alias dihapus — nama asli dipakai",
+  "ms.renameFail": "gagal rename: {msg}",
+  "ms.srcBuiltin": "bawaan",
+  "ms.srcNative": "model",
+  "ms.srcUser": "milikmu",
 };

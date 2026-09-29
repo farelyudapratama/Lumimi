@@ -182,6 +182,82 @@ pub fn delete_motion(motions_root: &Path, model_key: &str, id: &str) -> (u16, St
     (400, json!({ "error": "not found" }).to_string())
 }
 
+// ── Alias klip native (rename non-destruktif) ───────────────────────────
+// Nama tampilan klip .motion3.json milik model dioverlay lewat file
+// `native-aliases.json` di folder motion user — file model TIDAK PERNAH
+// ditulis (paritas prinsip adopsi in-memory; lihat MODEL-AGNOSTIC-RULES.md
+// "in-memory saja, jangan tulis ke file model"). Key map = path File klip
+// persis seperti di manifest (relatif folder model3.json, forward-slash).
+
+const NATIVE_ALIASES_FILE: &str = "native-aliases.json";
+
+fn native_aliases_file_for(motions_root: &Path, model_key: &str) -> Option<PathBuf> {
+    let dir = motions_dir_for(motions_root, model_key)?;
+    if !dir.starts_with(motions_root) {
+        return None;
+    }
+    Some(dir.join(NATIVE_ALIASES_FILE))
+}
+
+/// Key alias = path File klip. Traversal ("..") dan karakter kontrol ditolak —
+/// key dipakai klien untuk lookup, tapi jangan jadi lubang penulisan sembarangan.
+fn valid_alias_key(file: &str) -> bool {
+    !file.is_empty()
+        && file.len() <= 300
+        && !file.split(['\\', '/']).any(|seg| seg == "..")
+        && file.chars().all(|c| !c.is_control())
+}
+
+/// GET helper — baca overlay alias. File absen/rusak = map kosong (bukan error):
+/// alias adalah garnish, kegagalannya tidak boleh mematikan daftar klip.
+pub fn get_native_aliases(motions_root: &Path, model_key: &str) -> Value {
+    let empty = json!({ "version": 1, "aliases": {} });
+    let Some(f) = native_aliases_file_for(motions_root, model_key) else {
+        return empty;
+    };
+    match std::fs::read_to_string(&f) {
+        Ok(txt) => serde_json::from_str::<Value>(txt.strip_prefix('\u{feff}').unwrap_or(&txt))
+            .unwrap_or(empty),
+        Err(_) => empty,
+    }
+}
+
+/// POST helper — set satu alias; `name` kosong = hapus alias (kembali ke nama
+/// asli klip). Return (status, body JSON string).
+pub fn set_native_alias(motions_root: &Path, model_key: &str, file: &str, name: &str) -> (u16, String) {
+    if !valid_alias_key(file) {
+        return (400, json!({ "error": "file key tidak valid" }).to_string());
+    }
+    let Some(f) = native_aliases_file_for(motions_root, model_key) else {
+        return (400, json!({ "error": "model key tidak valid" }).to_string());
+    };
+    let mut doc = get_native_aliases(motions_root, model_key);
+    let Some(obj) = doc.as_object_mut() else {
+        return (400, json!({ "error": "dokumen alias tidak valid" }).to_string());
+    };
+    let aliases = obj.entry("aliases").or_insert_with(|| json!({}));
+    let Some(amap) = aliases.as_object_mut() else {
+        return (400, json!({ "error": "dokumen alias tidak valid" }).to_string());
+    };
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        amap.remove(file);
+    } else {
+        if trimmed.len() > 80 || trimmed.chars().any(|c| c.is_control()) {
+            return (400, json!({ "error": "nama alias tidak valid" }).to_string());
+        }
+        amap.insert(file.to_string(), json!(trimmed));
+    }
+    if let Some(dir) = f.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let aliases_now = obj.get("aliases").cloned().unwrap_or(json!({}));
+    match crate::sheet::write_json_atomic(&f, &doc) {
+        Ok(()) => (200, json!({ "ok": true, "aliases": aliases_now }).to_string()),
+        Err(e) => (400, json!({ "error": e.to_string() }).to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +334,31 @@ mod tests {
         assert!(body.contains("sudah ada"));
         // PUT (write) tetap bisa timpa.
         assert_eq!(write_motion(&root, "hana", "jump", &asset).0, 200);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn alias_native_set_get_hapus() {
+        let root = std::env::temp_dir().join(format!("l2dmota-{}-{}", std::process::id(), now()));
+        // Awal: kosong (file absen bukan error).
+        assert_eq!(get_native_aliases(&root, "hana")["aliases"].as_object().unwrap().len(), 0);
+        // Set dua alias.
+        let (st, _) = set_native_alias(&root, "hana", "motions/a.motion3.json", "Lambaikan");
+        assert_eq!(st, 200);
+        let (st, _) = set_native_alias(&root, "hana", "motions/b.motion3.json", "Kedip");
+        assert_eq!(st, 200);
+        let doc = get_native_aliases(&root, "hana");
+        assert_eq!(doc["aliases"]["motions/a.motion3.json"], "Lambaikan");
+        // Nama kosong = hapus alias; file lain tetap.
+        let (st, _) = set_native_alias(&root, "hana", "motions/a.motion3.json", "  ");
+        assert_eq!(st, 200);
+        let doc = get_native_aliases(&root, "hana");
+        assert!(doc["aliases"].get("motions/a.motion3.json").is_none());
+        assert_eq!(doc["aliases"]["motions/b.motion3.json"], "Kedip");
+        // Traversal ditolak.
+        assert_eq!(set_native_alias(&root, "hana", "../evil.json", "x").0, 400);
+        // Nama dengan karakter kontrol ditolak.
+        assert_eq!(set_native_alias(&root, "hana", "motions/b.motion3.json", "a\nb").0, 400);
         let _ = std::fs::remove_dir_all(&root);
     }
 

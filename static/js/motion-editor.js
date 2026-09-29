@@ -1003,6 +1003,102 @@
     setStatus(__t('ms.dupMade'));
   }
 
+  // ── Ekspor / impor .motion3.json (konversi via window.__motionIO) ──
+  // Ekspor = unduh file native dari draft (metadata semantik tetap tinggal
+  // di .motion.json sumber). Impor = klip native dibuka jadi draft milikmu;
+  // native asli tidak pernah ditulis ulang.
+  function roleNamesForModel() {
+    // Map NAMA ROLE (angleX, …) → param id — bentuk yang dimakan
+    // rolesToParamTracks di motion-dsl (bukan map per-field).
+    const dsl = DSL();
+    const l2d = L2D();
+    const out = {};
+    if (!dsl || !dsl.ROLE_FOR_FIELD || !l2d || !l2d.roleIdFor) return out;
+    for (const field in dsl.ROLE_FOR_FIELD) {
+      const role = dsl.ROLE_FOR_FIELD[field];
+      const id = l2d.roleIdFor(role);
+      if (id) out[role] = id;
+    }
+    return out;
+  }
+
+  function exportDraftToMotion3() {
+    collectMeta();
+    const d = state.draft;
+    const io = window.__motionIO;
+    if (!io || !io.toMotion3) { setStatus(__t('ms.importFail', { msg: 'motion IO tidak termuat' }), 'err'); return; }
+    if (!d || !d.tracks || !d.tracks.length) { setStatus(__t('ms.exportEmpty'), 'err'); return; }
+    const ranges = {};
+    for (const p of state.params) ranges[p.id] = { min: p.min, max: p.max, def: p.def };
+    const res = io.toMotion3(d, { roleMap: roleNamesForModel(), ranges });
+    if (!res.json) { setStatus(__t('ms.importFail', { msg: (res.errors || []).join('; ') }), 'err'); return; }
+    const blob = new Blob([JSON.stringify(res.json, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (d.id || 'motion') + '.motion3.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    if (res.skipped.length) setStatus(__t('ms.exportSkipped', { n: res.skipped.length }));
+    else setStatus(__t('ms.exported', { name: d.id || 'motion' }), 'ok');
+  }
+
+  async function importMotion3Text(text, fallbackName) {
+    const io = window.__motionIO;
+    if (!io || !io.motion3ToAsset) { setStatus(__t('ms.importFail', { msg: 'motion IO tidak termuat' }), 'err'); return; }
+    let json;
+    try { json = JSON.parse(text); } catch (e) { setStatus(__t('ms.importFail', { msg: e.message }), 'err'); return; }
+    const res = io.motion3ToAsset(json, { id: fallbackName, name: fallbackName, sourceModelId: modelKey() });
+    if (!res.asset) { setStatus(__t('ms.importFail', { msg: (res.errors || []).join('; ') }), 'err'); return; }
+    state.draft = res.asset;
+    state.selected = null;
+    state.scrubT = 0;
+    state.undoStack.length = 0; state.redoStack.length = 0;
+    state.dirty = true;
+    renderAll();
+    applyScrubPose();
+    runLint();
+    if (res.warnings && res.warnings.length) setStatus(__t('ms.importedWarn', { name: res.asset.name, n: res.warnings.length }));
+    else setStatus(__t('ms.importedOk', { name: res.asset.name }), 'ok');
+  }
+
+  async function importNativeClip(a) {
+    const l2d = L2D();
+    if (!l2d || !l2d.fetchNativeMotionText) { setStatus(__t('ms.importFail', { msg: 'bridge tidak termuat' }), 'err'); return; }
+    try {
+      const text = await l2d.fetchNativeMotionText(a.file);
+      await importMotion3Text(text, (a.name || a.id || '').replace(/^motion_/, ''));
+    } catch (e) {
+      setStatus(__t('ms.importFail', { msg: e.message }), 'err');
+    }
+  }
+
+  async function renameNativeClip(a) {
+    const l2d = L2D();
+    if (!l2d || !l2d.renameNativeMotion || !a.file) return;
+    const name = prompt(__t('ms.renameNativePrompt', { name: a.name || a.id }), a.name || a.id);
+    if (name === null) return;
+    const res = await l2d.renameNativeMotion(a.file, name.trim());
+    if (!res.ok) { setStatus(__t('ms.renameFail', { msg: res.error }), 'err'); return; }
+    renderRegistryList();
+    setStatus(name.trim() ? __t('ms.renameOk', { name: name.trim() }) : __t('ms.renameReset'), 'ok');
+  }
+
+  function pickImportFile() {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.json,application/json';
+    inp.addEventListener('change', async () => {
+      const f = inp.files && inp.files[0];
+      if (!f) return;
+      const text = await f.text();
+      await importMotion3Text(text, (f.name || '').replace(/\.motion3\.json$/i, '').replace(/\.json$/i, ''));
+    });
+    inp.click();
+  }
+
   // ── Daftar gerakan di tab Motion (semua sumber) ──────────────────
   function renderRegistryList() {
     const host = $('#motion-registry-list');
@@ -1017,7 +1113,7 @@
       host.appendChild(p);
       return;
     }
-    const LABEL = { builtin: 'bawaan', native: 'model', user: 'milikmu' };
+    const LABEL = { builtin: __t('ms.srcBuiltin'), native: __t('ms.srcNative'), user: __t('ms.srcUser') };
     for (const a of list.slice().sort((x, y) => (x.source + x.id).localeCompare(y.source + y.id))) {
       if (a.id === PREVIEW_ID || /^preset_/.test(a.id)) continue;
       const card = document.createElement('div');
@@ -1044,6 +1140,22 @@
         edit.title = __t('ms.editTip');
         edit.addEventListener('click', async () => { await openStudio(); loadDraft(a.id); });
         card.appendChild(edit);
+      }
+      if (a.source === 'native' && a.file) {
+        // Impor = salin isi klip native jadi draft milikmu (file model tidak
+        // disentuh); rename = overlay alias di data/, bukan edit model3.json.
+        const imp = document.createElement('button');
+        imp.className = 'mini-btn ms-icon';
+        imp.textContent = '⤓';
+        imp.title = __t('ms.importNativeTip');
+        imp.addEventListener('click', () => importNativeClip(a));
+        card.appendChild(imp);
+        const ren = document.createElement('button');
+        ren.className = 'mini-btn ms-icon';
+        ren.textContent = '✎';
+        ren.title = __t('ms.renameNativeTip');
+        ren.addEventListener('click', () => renameNativeClip(a));
+        card.appendChild(ren);
       }
       host.appendChild(card);
     }
@@ -1389,6 +1501,8 @@
     });
     on('#ms-dup', 'click', duplicateDraft);
     on('#ms-del', 'click', deleteDraft);
+    on('#ms-export', 'click', exportDraftToMotion3);
+    on('#ms-import', 'click', pickImportFile);
 
     on('#ms-play', 'click', () => { collectMeta(); renderAll(); playPreview(); });
     on('#ms-stop', 'click', () => { stopPreview(); setStatus(__t('ms.stopped')); });

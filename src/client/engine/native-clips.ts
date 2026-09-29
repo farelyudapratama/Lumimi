@@ -52,6 +52,7 @@ function assignIds(
     duration?: number;
     loop?: boolean;
   }[],
+  aliases?: Record<string, string>,
 ): NativeClip[] {
   const countByGroup = new Map<string, number>();
   for (const c of clips)
@@ -59,14 +60,20 @@ function assignIds(
   const used = new Set<string>();
   const out: NativeClip[] = [];
   for (const c of clips) {
+    // Alias (rename via overlay) mengganti basis id + nama tampilan; grup &
+    // index native TETAP asli — playback exact tidak ikut berubah.
+    const alias =
+      c.file && aliases && Object.prototype.hasOwnProperty.call(aliases, c.file)
+        ? String(aliases[c.file]).trim()
+        : "";
     // Grup bernama 1-klip memakai id berbasis grup (paritas registerNativeGroups lama);
     // sisanya berbasis stem — lebih bermakna dan tetap unik lewat dedupe.
     const single = c.group !== "" && (countByGroup.get(c.group) || 0) === 1;
-    const base = single ? c.group : c.stem;
+    const base = alias || (single ? c.group : c.stem);
     let id = "motion_" + sanitizeClipId(base);
     for (let n = 2; used.has(id); n++) id = "motion_" + sanitizeClipId(base) + "_" + n;
     used.add(id);
-    const entry: NativeClip = { id, name: c.stem, group: c.group, index: c.index };
+    const entry: NativeClip = { id, name: alias || c.stem, group: c.group, index: c.index };
     if (c.file !== undefined) entry.file = c.file;
     if (typeof c.duration === "number" && c.duration > 0) entry.duration = c.duration;
     if (c.loop) entry.loop = true;
@@ -92,10 +99,13 @@ function clipMetaOf(
 }
 
 /** Bangun daftar klip dari FileReferences.Motions (objek grup → klip[]).
- * metaByFile (opsional) = File → {duration, loop} dari discovery server. */
+ * metaByFile (opsional) = File → {duration, loop} dari discovery server.
+ * aliases (opsional) = File → nama tampilan (overlay rename non-destruktif:
+ * file model tidak pernah disentuh, hanya id/nama registry yang mengikuti). */
 export function buildNativeClips(
   motions: unknown,
   metaByFile?: Record<string, { duration?: number; loop?: boolean }>,
+  aliases?: Record<string, string>,
 ): NativeClip[] {
   if (!motions || typeof motions !== "object" || Array.isArray(motions)) return [];
   const clips: {
@@ -119,7 +129,7 @@ export function buildNativeClips(
       clips.push({ group, index: i, stem, file, duration: meta.duration, loop: meta.loop });
     }
   }
-  return assignIds(clips);
+  return assignIds(clips, aliases);
 }
 
 /** Fallback tanpa manifest: definitions facade ({grup: array-dummy} dari

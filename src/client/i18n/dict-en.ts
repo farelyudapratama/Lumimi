@@ -760,4 +760,23 @@ export const DICT_EN: Record<string, string> = {
   "as.bus.nItem": "{n} items",
   "as.term.continued": "(continued)",
   "as.review.touched": "touched",
+
+  // ── motion IO (ekspor/impor/rename native) — audit 2026-09-29 ──
+  "ms.exportTip": "Export draft to .motion3.json (native Live2D format — download)",
+  "ms.exportEmpty": "no tracks to export",
+  "ms.exported": "\"{name}.motion3.json\" exported",
+  "ms.exportSkipped": "exported — {n} role track(s) unmapped on this model, skipped",
+  "ms.importTip": "Import a native .motion3.json into the editor — the original stays untouched",
+  "ms.importFail": "import failed: {msg}",
+  "ms.importedOk": "\"{name}\" imported — review then Save",
+  "ms.importedWarn": "\"{name}\" imported with {n} warning(s) — review then Save",
+  "ms.importNativeTip": "Open this native clip in the editor (as your own draft)",
+  "ms.renameNativeTip": "Rename native clip (alias — model files untouched)",
+  "ms.renameNativePrompt": "New name for \"{name}\" (empty = remove alias):",
+  "ms.renameOk": "renamed: {name}",
+  "ms.renameReset": "alias removed — original name restored",
+  "ms.renameFail": "rename failed: {msg}",
+  "ms.srcBuiltin": "builtin",
+  "ms.srcNative": "model",
+  "ms.srcUser": "yours",
 };

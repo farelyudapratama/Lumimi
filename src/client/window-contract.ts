@@ -16,6 +16,7 @@ import type {
   buildNativeClips,
   buildNativeClipsFromCounts,
 } from "./engine/native-clips";
+import type { toMotion3, motion3ToAsset } from "./animation/motion-io";
 import type * as I18n from "./i18n/index";
 
 export type Destroy = () => void;
@@ -54,6 +55,11 @@ declare global {
     __nativeClips?: {
       build: typeof buildNativeClips;
       buildFromCounts: typeof buildNativeClipsFromCounts;
+    };
+    /** Konversi dua arah Motion Asset ↔ .motion3.json (Motion Studio). */
+    __motionIO?: {
+      toMotion3: typeof toMotion3;
+      motion3ToAsset: typeof motion3ToAsset;
     };
     __i18n?: typeof I18n;
     /** Seam transport (Stage 1a) — titik tunggal komunikasi ke backend. */

@@ -12,6 +12,9 @@ export interface RegistryEntry extends MotionAsset {
    * meneruskannya ke bridge.playNative (grup + index exact). loop = klip
    * Meta.Loop, tidak pernah selesai sendiri di framework. */
   native?: { group: string; index: number; loop?: boolean };
+  /** Path file klip native (relatif folder model3.json) — dipakai Motion
+   * Studio untuk impor/preview isi klip. */
+  file?: string;
 }
 
 export class MotionRegistry {
@@ -71,7 +74,9 @@ export class MotionRegistry {
       if(!c || !c.id || typeof c.group !== "string" || !(c.index >= 0)) continue;
       const nat: { group: string; index: number; loop?: boolean } = { group:c.group, index:c.index };
       if(c.loop) nat.loop = true;
-      this.register({ version:1, id:c.id, name:c.name||c.id, source:"native", type:"motion3", description:"Motion bawaan model: "+(c.name||c.id), tags:(tagsByClip&&tagsByClip[c.name])||[], duration:c.duration||2, loop:false, intensity:{min:0.3,max:1.0,default:0.8} as any, emotionCompatibility:{}, cooldown:0, priority:90, aiEnabled:true, requires:[], tracks:[], native:nat } as any, {overwrite:true});
+      const entry: any = { version:1, id:c.id, name:c.name||c.id, source:"native", type:"motion3", description:"Motion bawaan model: "+(c.name||c.id), tags:(tagsByClip&&tagsByClip[c.name])||[], duration:c.duration||2, loop:false, intensity:{min:0.3,max:1.0,default:0.8}, emotionCompatibility:{}, cooldown:0, priority:90, aiEnabled:true, requires:[], tracks:[], native:nat };
+      if(c.file) entry.file = c.file;
+      this.register(entry, {overwrite:true});
       n++;
     }
     return n;

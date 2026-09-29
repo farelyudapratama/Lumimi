@@ -109,6 +109,22 @@ berbasis parameter mentah **terikat ke model asalnya**: dibuka di model lain,
 parameter yang tidak ada dilewati dengan aman (track abu-abu "tidak ada di
 model ini") — tidak error, tidak merusak data.
 
+**Konversi dua arah `.motion3.json` (`motion-io.ts`, revisi 2026-09-29).**
+
+- **Ekspor** (`toMotion3`) — unduh draft sebagai `.motion3.json` native
+  (tombol ⤒ Motion Studio): track role di-resolve lewat roleMap + range model
+  aktif (`rolesToParamTracks`), role tak terpetakan dilaporkan (bukan
+  ditebak); easing DSL → segmen native (linear/stepped langsung, ease-* →
+  bezier kontrol setara cubic-bezier CSS); `Meta` dihitung dari isi kurva.
+  Metadata semantik tidak punya padanan di native — `.motion.json` tetap
+  sumber kebenaran, hasil ekspor artefak turunan.
+- **Impor** (`motion3ToAsset`) — klip native (tombol ⤓ di daftar, atau file
+  picker) dibuka jadi draft milikmu; native asli tidak pernah ditulis ulang.
+  Kurva linear/stepped 1:1; bezier bentuk ease dikenali, sisanya disubdividi
+  linear; `PartOpacity` dilewati (editor belum punya track part); inverse-
+  stepped diemulasi lompatan awal ruas. Gerbang `sanitize` tetap berlaku —
+  durasi > 20 dtk/keyframe lebih dari 64/track dipotong DENGAN warning.
+
 # 8. Motion Registry
 
 ```js
@@ -157,6 +173,15 @@ penemuan/klasifikasi klip native; native clips masuk registry sebagai entri
 `source:"native"`. Kalau preset user punya nama semantik yang sama, berlaku
 precedence sheet (`user` > `ai`; lihat `SHEET-SYSTEM.md` aturan #3) — tidak
 pernah timpan diam-diam.
+
+**Rename via overlay alias (revisi 2026-09-29).** Nama tampilan klip native
+bisa diganti tanpa menyentuh file model: overlay `data/motions/<key>/
+native-aliases.json` (key = path `File` klip persis di manifest) dipakai
+`buildNativeClips` saat membangun id/nama registry — `native:{group,index}`
+untuk playback tetap asli, jadi alamat exact tidak bergeser. API:
+`GET/POST /api/motions/native-alias`. Nama kosong = hapus alias. Sesuai
+MODEL-AGNOSTIC-RULES: pelengkap manifest itu in-memory/user-data, bukan
+tulis-balik ke file model.
 
 # 11. Motion Runtime
 
@@ -377,6 +402,7 @@ generate ID aman (server: 409 duplicate). Data versi lama kompatibel: copy
 GET    /api/motions?model=<key>        GET    /api/motions/<id>
 POST   /api/motions                    PUT    /api/motions/<id>
 DELETE /api/motions/<id>
+GET    /api/motions/native-alias       POST   /api/motions/native-alias
 POST   /api/motions/analyze            POST   /api/motions/generate
 POST   /api/motions/validate           POST   /api/motions/verify
 GET    /api/model/motion-analysis

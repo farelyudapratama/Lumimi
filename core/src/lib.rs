@@ -161,6 +161,10 @@ pub fn router(paths: AppPaths) -> Router {
         )
         .route("/api/model/{name}", axum::routing::delete(delete_model_h))
         .route("/api/motions", get(get_motions_list).post(post_motions_h))
+        .route(
+            "/api/motions/native-alias",
+            get(get_native_alias_h).post(post_native_alias_h),
+        )
         .route("/api/motions/{id}", get(get_motion_h).put(put_motion_h).delete(del_motion_h))
         // Adapter HTTP = eksternal/bridge (CLI, OBS, dev browser, + domain yang
         // belum migrasi IPC). Loopback saja; CORS permisif supaya frontend
@@ -1186,6 +1190,27 @@ async fn get_motions_list(
 ) -> Response {
     let model = q.get("model").map(String::as_str).unwrap_or("default");
     json_status(StatusCode::OK, motions::list_motions(&paths.motions_dir, model))
+}
+
+/// GET /api/motions/native-alias?model=X — overlay rename klip native
+/// (non-destruktif; file model tidak pernah ditulis).
+async fn get_native_alias_h(
+    State(paths): State<AppPaths>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let model = q.get("model").map(String::as_str).unwrap_or("default");
+    json_status(StatusCode::OK, motions::get_native_aliases(&paths.motions_dir, model))
+}
+
+/// POST /api/motions/native-alias {model, file, name} — set/hapus satu alias
+/// (name kosong = hapus). Return {ok, aliases} terbaru.
+async fn post_native_alias_h(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let model = v.get("model").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).unwrap_or("default");
+    let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("");
+    let (status, out) = motions::set_native_alias(&paths.motions_dir, model, file, name);
+    json_raw(status, out)
 }
 
 /// GET /api/motions/:id?model=X — satu motion.
