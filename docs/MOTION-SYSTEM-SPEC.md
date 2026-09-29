@@ -8,13 +8,17 @@
 
 ```text
 src/client/animation/motion-dsl.ts        Format Motion Asset + evaluator keyframe + sanitize
-src/client/animation/motion-registry.ts   Registry 3 sumber gerakan
+src/client/animation/motion-io.ts         Konversi dua arah Motion Asset ↔ .motion3.json (ekspor/impor)
+src/client/animation/motion-registry.ts   Registry 2 sumber gerakan
 src/client/animation/motion-runtime.ts    Satu-satunya pemutar animasi (scheduler + blending)
 src/client/engine/motion-taxonomy.ts      Klasifikasi klip .motion3.json (dipakai server & bundle)
+src/client/engine/native-clips.ts         Daftar klip native per-file + overlay alias rename
+src/client/engine/role-mapping.ts         Inferensi role → parameter id milik model
 src/client/agent/brain.ts                 AI Motion Director (prompt, directive, arbitrase)
 static/js/motion-editor.js                UI Motion Studio (timeline, metadata, preview)
 static/js/app.js                          Bridge runtime ↔ render loop ↔ state.aiPose
-POST /api/motions, /api/motions/analyze, /api/motions/generate   (core/src/motions.rs + motion_ai.rs)
+POST /api/motions (+ /native-alias), /api/motions/analyze, /api/motions/generate, /api/motions/validate, /api/motions/verify
+GET /api/model/motions, /api/model/motion-analysis, /api/model/motion-taxonomy   (core/src/motions.rs + motion_ai.rs + motion_files.rs + motion_analysis.rs + motion_validation.rs + motion_vision.rs + motion_dsl.rs + motion_taxonomy.rs)
 ```
 
 Semua di-bundle/di-bridge lewat `window.MotionDSL / MotionRegistry /
@@ -36,8 +40,8 @@ menterjemahkan tindakan semantik menjadi animasi model.
 # 2. Core Design Principle: Motion Asset
 
 Motion Asset = definisi animasi semantik yang independent dari model.
-Bisa berupa: keyframe buatan user, `.motion3.json` native, gesture prosedural,
-atau hasil AI. Semuanya tampak sama bagi LLM:
+Bisa berupa: keyframe buatan user, `.motion3.json` native, atau hasil AI.
+Semuanya tampak sama bagi LLM:
 
 ```text
 motion ID · description · tags · emotion compatibility · duration · intensity range · availability
@@ -128,7 +132,7 @@ model ini") — tidak error, tidak merusak data.
 # 8. Motion Registry
 
 ```js
-MotionRegistry.createRegistry()  // static/js/bundle.js → window.MotionRegistry
+MotionRegistry.createRegistry()  // src/build.ts → window.MotionRegistry
 register(asset) · get(id) · has(id) · list() · remove(id, source) · search({tags, emotion})
 ```
 
@@ -147,7 +151,7 @@ Registry menggabungkan DUA sumber tanpa menyalin datanya:
 Setiap entri: `id, name, description, source, tags, duration,
 emotionCompatibility, intensityRange, cooldown, priority, capabilities`.
 
-# 9–10. Native & Gesture Integration
+# 9–10. Native Integration
 
 **Discovery & adopsi (revisi 2026-09-25).** Klip native ditemukan dua jalur
 yang bertemu di manifest in-memory (`buildModelSettings` app.js):
@@ -195,14 +199,14 @@ runtime menghitung gabungan semua layer dan menerapkannya dalam SATU
 `applyPoseDelta` + `applyParamDrive` (bridge app.js unwind-then-apply, jadi
 tidak ada dua penulis per frame). Bagian lain aplikasi tidak boleh memanipulasi
 state motion secara langsung — app.js men-bridge hasil evaluasi runtime ke
-`state.aiPose` tiap frame (8 POSE_FIELDS), plus delegasi `motion_<group>` untuk
-klip native.
+`state.aiPose` tiap frame (16 POSE_FIELDS, v2 ekspresi), plus delegasi
+`motion_<id>` untuk klip native.
 
 # 12. Scheduler / Prioritas
 
 ```text
-100  manual user control          60  gesture          20  idle/fidget
- 90  native motion clip           40  emotion          10  breathing
+100  manual user control          60  preset 'gerak'    20  idle/fidget
+ 90  native motion clip           40  emotion           10  breathing
  80  explicit LLM motion
 ```
 
@@ -212,8 +216,8 @@ BERJALAN BERSAMA layer prioritas lebih tinggi. Field/param hanya ditulis layer
 prioritas tertinggi yang menganimasikannya; klaim ownership tetap berlaku walau
 nilai sedang 0 (track yang melintasi nol tidak melepas kepemilikan). Cap 4
 layer: play yang lebih rendah ditolak saat penuh — band sama tetap bisa
-menggantikan. Konsekuensi yang diinginkan: gesture kini menyusun DI BAWAH
-`[MOTION:id]` (brain memainkan keduanya; field benturan otomatis ditekan,
+menggantikan. Konsekuensi yang diinginkan: preset 'gerak' kini menyusun DI
+BAWAH `[MOTION:id]` (brain memainkan keduanya; field benturan otomatis ditekan,
 sisa field seperti mata/badan tetap bergerak). Native clip tidak menyentuh
 layer DSL — app.js punya guard `clipUntil` sendiri selama klip main. Cooldown
 lewat registry (`canPlay`/`markPlayed`; dari LLM dihormati, manual bypass).
@@ -351,8 +355,8 @@ dengan emosi. Hormati cooldown dan availability.
 
 # 20. LLM Tidak Punya Kebebasan Tanpa Batas
 
-ID motion yang tidak ada → **ditolak server, dibuang runtime, jatuh ke gesture
-biasa**. Validasi: motion exists, enabled, model support, intensity dalam
+ID motion yang tidak ada → **ditolak server, dibuang runtime, jatuh ke preset
+gerak biasa**. Validasi: motion exists, enabled, model support, intensity dalam
 range, duration valid, target valid, nilai keyframe dalam batas aman
 (`sanitizeMotionAsset`). Cegah NaN/Infinity/timestamp invalid/duration
 negatif/target asing.
@@ -367,7 +371,7 @@ runtime = executor deterministik.**
 
 # 22. Idle System
 
-Micro-gesture/idle tetap ada, sebagai layer motion prioritas TERENDAH. Idle
+Micro-motion/idle tetap ada, sebagai layer motion prioritas TERENDAH. Idle
 otomatis mundur saat motion prioritas lebih tinggi memegang parameter
 relevan (`lockAI()` membekukan fidget & interaksi selama playback segmen;
 unlock kini terjadi SEKALI di akhir chain — selesai alami atau chain
@@ -399,13 +403,14 @@ generate ID aman (server: 409 duplicate). Data versi lama kompatibel: copy
 # 27. API
 
 ```text
-GET    /api/motions?model=<key>        GET    /api/motions/<id>
-POST   /api/motions                    PUT    /api/motions/<id>
-DELETE /api/motions/<id>
+GET    /api/motions?model=<key>        GET    /api/motions/{id}
+POST   /api/motions                    PUT    /api/motions/{id}
+DELETE /api/motions/{id}
 GET    /api/motions/native-alias       POST   /api/motions/native-alias
 POST   /api/motions/analyze            POST   /api/motions/generate
 POST   /api/motions/validate           POST   /api/motions/verify
-GET    /api/model/motion-analysis
+GET    /api/model/motions              GET    /api/model/motion-analysis
+GET    /api/model/motion-taxonomy
 ```
 
 API key tetap hanya di server — jangan pindah ke browser. (Semua endpoint di
@@ -422,15 +427,15 @@ Minimal: registry (register/get/remove/search/duplicate), parser (valid,
 invalid, missing fields, keyframe invalid, target asing), runtime
 (play/stop/blend/intensity/cooldown/priority/ownership), LLM (motion valid,
 ID asing, intensity invalid, format lama + baru), capability (full model,
-head-only, tanpa mata, tanpa body). Status: `bun run test` — unit TS (directive parser,
-DSL, registry, taxonomy, dispatcher server, voice-input) + guard legacy
-`test/legacy/` (role-mapping, param-scaling, sheet schema, exp3-adoption,
-api-origin). Guard runtime motion belum ada — tulis bersamaan saat modul
-runtime disentuh.
+head-only, tanpa mata, tanpa body). Status: `bun run test` — unit TS
+(`test/motion-{dsl,registry,runtime,taxonomy,io}.test.ts`, directive parser,
+voice-input), guard legacy `test/legacy/` (api-origin, core6-compat,
+exp3-adoption, fase1-sheet-schema, param-notes-ui), dan guard invarian nama
+di `test/role-mapping.test.ts`.
 
 # 30. Implementation Strategy (status)
 
-Fase 1 (core tanpa UI) — ✅. Fase 2 (sambungkan gesture/taxonomy/native) — ✅.
+Fase 1 (core tanpa UI) — ✅. Fase 2 (sambungkan preset/native/taxonomy) — ✅.
 Fase 3 (Motion Studio UI) — ✅. Fase 4 (metadata editor) — ✅.
 Fase 5 (integrasi LLM, dua format) — ✅. Fase 6 (AI analyze) — ✅.
 Fase 7 (AI generation) — ✅ (`/api/motions/generate`).
@@ -443,7 +448,7 @@ Tepat SATU pipeline konseptual eksekusi motion:
 Motion Asset → Registry → Scheduler → Runtime → Live2D
 ```
 
-Jangan membuat engine motion kedua. `app.js`, agent, gesture system, editor,
+Jangan membuat engine motion kedua. `app.js`, agent, preset 'gerak', editor,
 idle system — semuanya lewat Motion Runtime, bukan menulis parameter sendiri.
 
 # 32. Quality Bar
@@ -453,7 +458,7 @@ Berhasil bila: user bisa buat motion visual → edit keyframe → preview → sa
 menemukan motion, memilih yang tepat, mengatur intensity, menggabungkan
 dengan emosi, dan TIDAK PERNAH mengarang ID. Runtime bisa blend, mencegah
 penulis parameter bertabrakan, hormati prioritas & cooldown, degrade sesuai
-kemampuan model. Aplikasi lama tetap jalan utuh (gestures, native motions,
+kemampuan model. Aplikasi lama tetap jalan utuh (preset 'gerak', native motions,
 sheets, format LLM lama).
 
 # 33. Final Principle

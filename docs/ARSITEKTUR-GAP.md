@@ -13,10 +13,10 @@
   sudah ada di `static/vtuber.html` (loadModel + setLipsyncProvider; ekspresi native
   aman no-op bila model tak punya yang cocok). Yang belum tercatat: menjalankan
   verifikasi runtime penuh model + TTS + overlay OBS bersamaan. (§7)
-- **`CapabilityAnalyzer.ts` masih orphan.** Hanya dipakai unit test
-  (`test/live2d-pipeline.test.ts`), belum di-tap ke produksi; produksi memakai
-  `detectModelCapabilities` + `getCapabilityProfile` di `app.js`. Putuskan: jadikan
-  boundary produksi, atau buang.
+- **`CapabilityAnalyzer.ts` — SELESAI: DIHAPUS (2026-09-29).** Orphan sejak
+  audit ini (produksi memakai `detectModelCapabilities` di `app.js` +
+  `getCapabilityProfile` di `Live2DView.ts`); file beserta blok testnya
+  dibuang sebagai kode mati terverifikasi.
 - **Expression semantik cocok native by-name saja (tanpa alias).** Nama emosi
   seperti "happy" tidak otomatis cocok dengan `.exp3` bernama "smile". (§21)
 

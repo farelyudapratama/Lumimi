@@ -5,8 +5,10 @@ membongkar inti lama.
 
 ## Aturan inti (terkunci)
 
-1. **Satu mode aktif.** `POST /api/mode {mode}` satu-satunya pintu pindah mode.
-   Mode yang sah: `stage` (default) / `vtuber` / `assistant` / `pet`.
+1. **Satu mode aktif.** `POST /api/mode {mode}` pintu pindah mode di jalur
+   HTTP; di shell Tauri pintu yang sama tersedia sebagai IPC `set_mode`
+   (helper `modeSet` di `src/client/transport/`, HTTP sebagai jembatan
+   transisi). Mode yang sah: `stage` (default) / `vtuber` / `assistant` / `pet`.
 2. **Pindah mode = teardown dulu.** `handleModePost` memanggil `teardownMode(modeLama)`
    **sebelum** mengaktifkan mode baru: vtuber → `vtuberStop()` (WS/interval server),
    assistant → `assistantStop()` (riwayat & approval dibuang), pet → `petClose()`
@@ -147,11 +149,12 @@ Cubism 5) memutar sendiri versinya saat on-air.
   (aktif → cancel kooperatif + pendingReplacement; paused → langsung;
   antrean → in-place). Slot kosong → drain otomatis (replacement dulu,
   lalu antrean FIFO). Status mengekspos `activeTask`/`parkedTasks`.
-- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **21 tool**; level = data,
+- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **25 tool**; level = data,
   bukan if-else di loop): 12 tool coding (`list_dir`, `read_file`, `search_code`,
   `git_diff`, `write_file`, `edit_file`, `delete_file`, `run_command`,
   `update_plan`, `remember`, `recall`, `spawn_subagent`) + 9 tool browser CDP
-  (`browser_status/open/navigate/inspect/click/type/history/close/grant_private`).
+  (`browser_status/open/navigate/inspect/click/type/history/close/grant_private`)
+  + 4 tool motion (`motion_analyze/validate/save/verify`).
   Level `safe` jalan otomatis; `mutating` ditahan server sampai approval user.
 - Protokol LLM: system prompt memerintahkan tool call; balasan model dideteksi
   dengan `detect()` — cari **nama tool yang dikenal** di teks (model memformat

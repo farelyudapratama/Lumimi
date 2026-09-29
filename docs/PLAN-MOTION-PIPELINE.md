@@ -1,8 +1,9 @@
 # RENCANA — Pipeline Motion Studio: Rig Report → Probe → Planner/Compiler/Critic
 
-> **Status: SEBAGIAN TERIMPLEMENTASI.** Rencana diarsipkan 2026-09-24;
-> dimulai 2026-09-26 dengan urutan adaptif (fondasi + vision dulu, bukan
-> Fase 1 penuh). Yang SUDAH dibangun:
+> **Status: ARSIP + BACKLOG (2026-09-29). Rencana ini TIDAK mengikat — yang
+> mengikat = `MOTION-SYSTEM-SPEC.md` (+ §17a/§17b untuk fondasi yang sudah
+> dibangun).** Diarsipkan 2026-09-24; dimulai 2026-09-26 dengan urutan adaptif
+> (fondasi + vision dulu, bukan Fase 1 penuh). Yang SUDAH dibangun:
 > - **Fondasi analisis & validasi** (`core/src/motion_analysis.rs` +
 >   `motion_validation.rs` + endpoint `/api/model/motion-analysis` &
 >   `/api/motions/validate`) — meng cover sebagian kebutuhan Fase 1
@@ -20,15 +21,14 @@
 >   ter-occlude mematikan rAF & kompositor → capture WAJIB render eksplisit
 >   (`pixiApp.render()` + `renderer.draw()`) lalu `canvas.toDataURL()` sinkron.
 >
-> Yang BELUM: Fase 1 rig report penuh (provenance, hash cache), Fase 2 probe,
-> Fase 3 panel approve, Fase 4a-b planner 2-langkah + compiler, 4c critic
-> persentil penuh, 4e refine loop terpetakan, 4f kebijakan layering, Fase 5
-> ukuran keberhasilan.
+> Yang BELUM (backlog, dikerjakan hanya bila diminta eksplisit): Fase 1 rig
+> report penuh (provenance, hash cache), Fase 2 probe, Fase 3 panel approve,
+> Fase 4a-b planner 2-langkah + compiler, 4c critic persentil penuh, 4e refine
+> loop terpetakan, 4f kebijakan layering, Fase 5 ukuran keberhasilan.
 >
-> Dokumen ini **mengikat** begitu implementasi dimulai, mengikuti pola
-> `docs/` lain: kalau dokumen dan kode bertentangan, kode yang benar;
-> perbaiki dokumennya. Baca bersama `MOTION-SYSTEM-SPEC.md` (pipeline eksekusi
-> yang ada) dan `MODEL-AGNOSTIC-RULES.md` (pagar model-agnostic).
+> Detail fase di bawah dipertahankan sebagai backlog; kalau dokumen dan kode
+> bertentangan, kode yang benar. Baca bersama `MOTION-SYSTEM-SPEC.md` (pipeline
+> eksekusi yang ada) dan `MODEL-AGNOSTIC-RULES.md` (pagar model-agnostic).
 
 ## Sasaran
 
@@ -55,7 +55,7 @@ Tiga prinsip yang tidak boleh dilanggar sepanjang pipeline ini:
   per param, cap 300 char), guard `test/legacy/test-param-notes-ui.js`.
   Rencana ini **meng-upgrade** jalur itu ke field terstruktur — bukan
   menggantinya dari nol; format lama kompatibel dibiarkan baca.
-- `core/src/motion_taxonomy.ts` / `src/client/engine/motion-taxonomy.ts`:
+- `core/src/motion_taxonomy.rs` / `src/client/engine/motion-taxonomy.ts`:
   `decodeCurve`, `curveFeatures`, `buildRoleMap` (cdi3), `classifyClip` —
   sumber provenance & statistik.
 - `src/client/animation/motion-dsl.ts`: sanitize satu pintu, `evaluateAsset`,
@@ -353,7 +353,7 @@ Tanpa ini, "berhasil" cuma perasaan:
 
 ## Risiko
 
-- `static/js/motion-editor.js` legacy (±1.455 baris, belum dijaga guard) —
+- `static/js/motion-editor.js` legacy (±1.700 baris, belum dijaga guard) —
   UI panel di sana tapi **logika baru di modul TS yang teruji**.
 - Prompt planner lebih panjang dari sekarang → dua-langkah (4a) membatasi
   ukuran; echo-retry + fallback jalur 8-role lama bila JSON gagal.

@@ -37,11 +37,6 @@ fn dirs_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// True bila model TTS sudah ada di disk (siap dipakai in-process).
-pub fn tts_model_ready(paths: &AppPaths) -> bool {
-    tts_model_dir(paths).join("onnx").join("vocoder.onnx").exists()
-}
-
 /// Sintesis TTS in-process (SuperTonic). Return (WAV bytes, mime) atau error.
 /// Blocking di-offload ke spawn_blocking.
 pub async fn synth_tts(paths: &AppPaths, text: &str, voice: &str, lang: &str) -> Result<(Vec<u8>, &'static str), String> {
@@ -72,15 +67,6 @@ pub async fn synth_tts(paths: &AppPaths, text: &str, voice: &str, lang: &str) ->
     })
     .await
     .map_err(|e| format!("task TTS gagal: {e}"))?
-}
-
-/// Voice + lang default dari config.tts (fallback F1 / id).
-pub fn tts_voice_lang(config_path: &Path) -> (String, String) {
-    let cfg = config::load(config_path);
-    let tts = cfg.get("tts").cloned().unwrap_or_default();
-    let voice = tts.get("voice").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("F1").to_string();
-    let lang = tts.get("lang").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("id").to_string();
-    (voice, lang)
 }
 
 // ── STT in-process (whisper) — di belakang feature engine-stt (cmake+LLVM) ──

@@ -236,7 +236,7 @@ ${note}
       : "";
 
     const nm = this.characterName();
-    // TOPOLOGI (§104): ekspresi dimiliki Animation Director (role "motion";
+      // TOPOLOGI (MOTION-SYSTEM-SPEC §1 + ARSITEKTUR-TARGET §4): ekspresi dimiliki Animation Director (role "motion";
     // /api/animate-text) — chat LLM cukup menulis TEKS. Dulu prompt ini
     // menyuntikkan daftar emosi/gesture/aksesoris + format [EMOTION:]/[GESTURE:]
     // dsb.; itu dead code sejak think() SELALU lewat director & strip directive.
@@ -343,7 +343,7 @@ bila memang pas.
             // Model "minim aset ekspresi" = tak punya emosi bawaan / .exp3 /
             // gesture / klip motion. Saat true, director DIWAJIBKAN memakai
             // param-drive untuk menghidupkan wajah/badan (pengganti pose emosi
-            // hardcode yang dicabut §106) — asal ada params yang dikirim.
+            // hardcode yang dicabut 2026-09-28) — asal ada params yang dikirim.
             expressionAssetsPoor:
               !((profile?.emotions?.length || 0) > 0) &&
               !(((profile as any)?.nativeExpressions?.length || 0) > 0) &&
@@ -721,9 +721,9 @@ bila memang pas.
     } = {};
     const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-    // Pose eksplisit head/eyes/body dipakai bila ada (mis. jalur directive
-    // legacy). Pose emosi HARDCODE (inferMovementFromEmotion) sudah DICABUT
-    // (§106): untuk model tanpa aset ekspresi, kehidupan datang dari param-drive
+      // Pose eksplisit head/eyes/body dipakai bila ada (mis. jalur directive
+      // legacy). Pose emosi HARDCODE (inferMovementFromEmotion) sudah DICABUT
+      // (2026-09-28): untuk model tanpa aset ekspresi, kehidupan datang dari param-drive
     // Director (param mentah nyata milik model), bukan pose kaleng generik.
     if (actions.head) {
       pose.head = {
@@ -763,17 +763,17 @@ bila memang pas.
     // Property / Expression
     if (actions.property) agent.setExpression(actions.property);
 
-    // Gesture verb — played AFTER the pose target above, so its deltas
+    // Motion verb — played AFTER the pose target above, so its deltas
     // compose on top of whatever HEAD/EMOTION just set for this segment.
     //
-    // [MOTION:id] dari Motion Studio didahulukan bila ada: itu gerakan yang
-    // user rancang sendiri dan beri deskripsi, jadi lebih spesifik daripada
-    // gesture generik (priority 80, SPEC §12). Gesture/emotion-fallback kini
-    // TETAP dimainkan sebagai LAPISAN 60 di bawahnya (runtime multi-layer):
+      // [MOTION:id] dari Motion Studio didahulukan bila ada: itu gerakan yang
+      // user rancang sendiri dan beri deskripsi, jadi lebih spesifik daripada
+      // preset 'gerak' biasa (priority 80 = "explicit LLM motion", SPEC §12).
+      // Motion user TETAP dimainkan sebagai LAPISAN 80 di atas preset (runtime
     // ownership per field menekan parameter yang sudah dipegang motion, jadi
-    // tidak pernah ada dua penulis satu parameter — gesture mengisi sisa
+    // tidak pernah ada dua penulis satu parameter — preset mengisi sisa
     // field (mata, badan) yang tidak disentuh motion user. Bila id motion
-    // asing (playMotion false) gesture tetap jalan sendirian seperti dulu.
+    // asing (playMotion false) preset tetap jalan sendirian seperti dulu.
     if (actions.motion && agent.playMotion) {
       const handledByMotion = agent.playMotion(actions.motion, {
         fromLLM: true,

@@ -16,7 +16,7 @@ import { ease as easeFn, clamp } from "./easing";
 // dedup track, gating capability, dan format file selalu satu kosakata.
 // Dua kategori semantik nilai:
 //   - simetris (default): 0 = netral, ±bound = ekstrem (ax/ay/az/ex/ey/…).
-//   - NORM_DEF_FIELDS: 0 = default milik model, +1 = max, −1 = min
+//   - deviasi-dari-default: 0 = default milik model, +1 = max, −1 = min
 //     (smileL/smileR/mouthOpen — deviasi dari pose istirahat).
 export const FIELD_BOUNDS: Record<string, number> = {
   ax: 30, ay: 30, az: 30, bodyX: 30, bodyY: 30, bodyZ: 30,
@@ -25,10 +25,9 @@ export const FIELD_BOUNDS: Record<string, number> = {
   smileL: 1, smileR: 1, mouthOpen: 1,
 };
 
-// Field bernilai deviasi-dari-default (lihat komentar FIELD_BOUNDS).
-export const NORM_DEF_FIELDS: ReadonlySet<string> = new Set([
-  "smileL", "smileR", "mouthOpen",
-]);
+// Kategori deviasi-dari-default tidak punya konstanta terprogram di sini:
+// daftarnya hidup di sisi Rust (motion_dsl.rs) + pemakaiannya di app.js
+// (targetDev) — konstanta TS yang dulu ada tidak pernah diimpor siapa pun.
 
 export const ROLE_ALIASES: Record<string, string> = {
   angleX: "ax", angleY: "ay", angleZ: "az",
@@ -51,7 +50,6 @@ export const LIMITS = {
 };
 
 export const INTERP_MODES: EasingMode[] = ["linear", "ease-in", "ease-out", "ease-in-out", "stepped"];
-export const TRACK_KINDS = ["role", "param"] as const;
 export const PARAM_ABS_MAX = 1e6;
 
 function isFiniteNum(v: unknown): boolean { return typeof v === "number" && Number.isFinite(v); }
@@ -167,20 +165,6 @@ export function stepsToTracks(steps: any[]): any[] {
     }
   }
   return Object.keys(keysByField).map(target => ({ target, interp: "linear" as EasingMode, keys: keysByField[target] }));
-}
-
-export function tracksToSteps(asset: MotionAsset, sampleMs?: number): any[] {
-  const step = Math.max(40, sampleMs || 100);
-  const dur = assetDurationMs(asset);
-  const out: any[] = [];
-  const fields = ((asset.tracks || []) as any[]).map((tr: any) => normalizeTarget(tr.target)).filter((t): t is string => !!t);
-  for (let t = 0; t < dur; t += step) {
-    const vals: any = evaluateAsset(asset, t / 1000, 1, null);
-    const d: Record<string, number> = {};
-    for (const f of fields) if (vals[f] != null) d[f] = +vals[f].toFixed(2);
-    out.push({ d, ms: Math.min(step, dur - t) });
-  }
-  return out.length ? out : [{ d: {}, ms: step }];
 }
 
 // ── sanitizeMotionAsset (single entrypoint for all motion writes) ──

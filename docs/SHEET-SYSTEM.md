@@ -70,9 +70,11 @@ v4  + params[].userNote, paramGroups{user,ai}, presets{user,ai}
 
 Preset punya 4 kategori: `emosi`, `properti`, `aksesoris`, `gerak`.
 Batas struktural steps gerak: `STEP_MS_MIN` 40, `STEP_MS_MAX` 3000,
-`STEP_COUNT_MAX` 12, `STEP_TOTAL_MS_MAX` 8000. Field delta hanya 8 nama semantik
-(`ax ay bodyX bodyY bodyZ ex ey mouthForm`) — paramId mentah sengaja di-DROP
-supaya preset gerak tetap model-agnostic.
+`STEP_COUNT_MAX` 12, `STEP_TOTAL_MS_MAX` 8000. Field delta preset `gerak`
+memakai kosakata field semantik motion yang sama dengan
+`MOTION-SYSTEM-SPEC.md` §3 (16 field v2: `ax ay az ex ey bodyX bodyY bodyZ
+mouthForm` + `browLY browRY browLF browRF smileL smileR mouthOpen`) — paramId
+mentah sengaja di-DROP supaya preset gerak tetap model-agnostic.
 
 Penyimpanan: `localStorage['live2d_sheet_' + currentModelKey()]` **dan**
 `data/sheets/<key>.json` di server (atomic tmp+rename via
@@ -103,11 +105,13 @@ dedupe terhadap `existingNames`, params kosong → 200 + warning (bukan 500).
 
 ## Adopsi `.exp3` yatim
 
-Masalahnya di bundle `pixi-live2d-display@0.4.0`: ExpressionManager **hanya**
-dibuat kalau `settings.expressions` truthy. lumine punya 19 file `.exp3.json`
-di disk dan `model3.json`-nya mendaftarkan **nol**, jadi manager tidak pernah
-lahir dan 19 aset mati **tanpa satu pun error** — persis kelas kegagalan senyap
-yang jadi alasan `MODEL-AGNOSTIC-RULES.md` ada.
+Kegagalan senyap klasik: ExpressionManager framework **hanya** dibuat kalau
+manifest mendaftarkan ekspresi. lumine punya 19 file `.exp3.json` di disk
+dan `model3.json`-nya mendaftarkan **nol**, jadi 19 aset mati **tanpa satu
+pun error** — persis kelas kegagalan yang jadi alasan
+`MODEL-AGNOSTIC-RULES.md` ada. (Stack renderer pra-migrasi yang dulu
+memperparah ini sudah dipensiunkan; adopsi in-memory di bawah tetap berlaku
+untuk renderer kini.)
 
 Dua bagian:
 
@@ -174,8 +178,7 @@ bun run test:guards   # hanya guard legacy
 Guard schema v4 (`test/legacy/test-fase1-sheet-schema.js`)
 mengekstrak `migrateSheet()` dll. langsung dari `static/js/app.js` via `vm` —
 menguji fungsi **asli** yang jalan di aplikasi, bukan salinan, jadi perubahan
-`migrateSheet` yang melanggar kontrak langsung memerah. Saat mem-port `app.js`
-ke TS, guard ini dikonversi ke bun test bersama modulnya — bukan dibuang.
+`migrateSheet` yang melanggar kontrak langsung memerah.
 
 ## Utang teknis / catatan
 

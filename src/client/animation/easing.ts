@@ -22,23 +22,3 @@ export function ease(t: number, mode: EasingMode): number {
 export function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
-
-/**
- * Linear interpolation between two values.
- */
-export function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-/**
- * Smooth damping for natural motion (spring-like).
- */
-export function smoothDamp(current: number, target: number, velocity: { value: number }, smoothTime: number, dt: number): number {
-  const omega = 2 / smoothTime;
-  const x = omega * dt;
-  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
-  const change = current - target;
-  const temp = (velocity.value + omega * change) * dt;
-  velocity.value = (velocity.value - omega * temp) * exp;
-  return target + (change + temp) * exp;
-}

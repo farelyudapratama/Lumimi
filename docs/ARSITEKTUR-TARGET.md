@@ -1,16 +1,18 @@
-# Arsitektur, Alur, dan Behavioral Modes — Project Live2D AI Companion
+# Arsitektur, Alur, dan Behavioral Modes — Kontrak Perilaku
 
-> **Status:** Baseline arsitektur untuk memulai ulang integrasi View → Engine.
+> **Status (2026-09-29): KONTRAK PERILAKU BEKU — bukan target, bukan tutorial.**
+> Rework Fase 2–6 selesai 2026-09-19; integrasi ulang View → Engine sudah
+> jalan. Dokumen yang dulu 48 seksi (±1.746 baris) dipadatkan ke kontrak yang
+> masih dirujuk kode: §§1–18 (mental model + policy) dan §§32–34 (§36
+> checklist pindah mode, dengan koreksi: pengecualian teardown penuh =
+> `MODES.md`). Yang dibuang: tutorial contoh debug, fase integrasi yang sudah
+> lewat, golden rules/meta sesi lama, dan seksi yang otoritasnya sudah pindah
+> (engine motion/parameter → `MOTION-SYSTEM-SPEC.md` + `MODEL-AGNOSTIC-RULES.md`).
 >
-> **Penting:** Dokumen ini adalah *target architecture / mental model*. Mungkin kamu perlu audit by code lagi biar sesuai karena dokumentasi yang saat ini agak berbeda.
->
-> **Catatan repo (2026-09-19):** ini dokumen TARGET, bukan deskripsi kode
-> aktual. Hasil audit gap target-vs-kode ada di
-> [`docs/ARSITEKTUR-GAP.md`](ARSITEKTUR-GAP.md) — kerja implementasi
-> mengikuti fase di sana, satu boundary per waktu. Diketahui bertentangan
-> dengan `MODES.md` (aturan teardown penuh saat pindah mode) di bagian
-> §35–36 context switching — rekonsiliasi dilakukan per fase, jangan
-> melanggar docs binding diam-diam.
+> **Aturan baca:** dokumen ini mengikat HANYA untuk kontrak perilaku di bawah.
+> Untuk motion baca `MOTION-SYSTEM-SPEC.md`, untuk makna parameter baca
+> `MODEL-AGNOSTIC-RULES.md`, untuk mode baca `MODES.md`. Kalau bertentangan,
+> tiga dokumen itu yang menang.
 
 ---
 
@@ -755,376 +757,88 @@ Companion proactive tidak berjalan.
 
 ---
 
-# 19. Engine Layer
+# 19. Engine Layer — DICABUT (2026-09-29)
 
-Engine adalah boundary antara behavior dan Live2D.
-
-Contoh output behavior:
-
-```text
-{
-  text: "Hai!",
-  emotion: "happy",
-  motion: "nod",
-  expression: "smile",
-  speech: true
-}
-```
-
-Engine mengubahnya menjadi aksi:
-
-```text
-emotion
-   ↓
-expression mapping
-
-motion
-   ↓
-motion mapping
-
-lookAtUser
-   ↓
-parameter mapping
-
-speech
-   ↓
-speech adapter
-```
-
-Engine tidak perlu mengetahui detail View.
+Tutorial boundary behavior → aksi; otoritasnya kini di `MOTION-SYSTEM-SPEC.md`
++ `MODEL-AGNOSTIC-RULES.md`. Riwayat lengkap ada di git.
 
 ---
 
-# 20. Semantic Motion
+# 20. Semantic Motion — DICABUT (2026-09-29)
 
-AI/Behavior sebaiknya menggunakan semantic action:
-
-```text
-nod
-wave
-greet
-think
-happy
-sad
-```
-
-bukan langsung:
-
-```text
-motion_01
-motion_02
-```
-
-Motion catalog dapat menyediakan:
-
-- semantic verb;
-- compatible emotions;
-- duration;
-- native motion ID.
-
-Engine kemudian melakukan mapping ke model yang sedang digunakan.
+Duplikat `MOTION-SYSTEM-SPEC.md` §2 (Motion Asset). Riwayat lengkap ada di git.
 
 ---
 
-# 21. Expression
+# 21. Expression — DICABUT (2026-09-29)
 
-Expression juga menggunakan semantic abstraction:
-
-```text
-happy
-sad
-surprised
-angry
-neutral
-```
-
-Jika model hanya mempunyai ID opaque:
-
-```text
-exp_01
-exp_02
-```
-
-jangan mengarang arti ID tersebut tanpa metadata/evidence.
+Duplikat `MOTION-SYSTEM-SPEC.md` (registry emosi) + `MODEL-AGNOSTIC-RULES.md`
+(jangan mengarang arti id opaque). Riwayat lengkap ada di git.
 
 ---
 
-# 22. Parameter API
+# 22. Parameter API — DICABUT (2026-09-29)
 
-Semantic role dipetakan ke parameter model:
-
-```text
-Semantic Role
-     ↓
-Model-specific mapping
-     ↓
-Parameter API
-     ↓
-Cubism parameter
-```
-
-Contoh:
-
-```text
-headYaw
-   ↓
-AngleX
-
-bodyYaw
-   ↓
-BodyAngleX
-```
-
-Behavior tidak boleh hard-code semua ID model.
+Duplikat `MODEL-AGNOSTIC-RULES.md` (role space). Riwayat lengkap ada di git.
 
 ---
 
-# 23. Parameter Arbitration
+# 23. Parameter Arbitration — DICABUT (2026-09-29)
 
-Banyak sumber dapat memengaruhi parameter:
-
-```text
-Native Motion
-Idle
-Mouse Follow
-AI Override
-Eye Blink
-Breath
-Physics
-```
-
-Harus ada ownership/ordering yang jelas:
-
-```text
-Sources
-   ↓
-Parameter Arbitration
-   ↓
-Final parameter state
-   ↓
-Cubism Core
-```
-
-Jangan membiarkan banyak writer menulis parameter yang sama tanpa aturan.
+Inti ownership multi-writer kini hidup di `MOTION-SYSTEM-SPEC.md` §12 +
+runtime. Riwayat lengkap ada di git.
 
 ---
 
-# 24. Mouse Follow
+# 24. Mouse Follow — DICABUT (2026-09-29)
 
-Flow:
-
-```text
-Pointer
-   ↓
-Normalize x/y
-   ↓
-Mouse Follow Gain
-   ↓
-Semantic target
-   ↓
-Role Clamp
-   ↓
-Parameter API
-   ↓
-Arbitration / final write
-   ↓
-Cubism
-```
-
-Gain dapat dikonfigurasi:
-
-```text
-DEFAULT
-STRONG
-WILD
-CUSTOM
-```
-
-Gain hanya mengatur respons; normalization, clamp, dan safety boundary tetap dipertahankan.
+Tutorial pipeline gain/normalize/clamp. Riwayat lengkap ada di git.
 
 ---
 
-# 25. Idle Motion vs Mouse Follow
+# 25. Idle Motion vs Mouse Follow — DICABUT (2026-09-29)
 
-Keduanya berbeda:
-
-```text
-Mouse Follow
-= response terhadap pointer
-
-Idle Motion
-= autonomous baseline movement
-```
-
-Keduanya dapat aktif bersamaan, tetapi ownership/prioritas harus jelas.
+Tutorial definisi; bukan kontrak. Riwayat lengkap ada di git.
 
 ---
 
-# 26. Framework Effects
+# 26. Framework Effects — DICABUT (2026-09-29)
 
-Contoh:
-
-- EyeBlink;
-- Breath;
-- Physics.
-
-Jangan membuat duplicate implementation jika framework sudah menyediakan effect.
-
-Jika engine membutuhkan kontrol:
-
-```text
-Engine
- ↓
-effect configuration / enable
- ↓
-Framework effect
-```
+Prinsip "jangan duplikat efek framework" kini bagian arsitektur satu jalur
+render (`AGENTS.md`). Riwayat lengkap ada di git.
 
 ---
 
-# 27. Eye Blink Ownership
+# 27. Eye Blink Ownership — DICABUT (2026-09-29)
 
-Idle blink tidak boleh mempunyai dua writer independen:
-
-```text
-Framework EyeBlink
-       +
-Custom idle-blink
-```
-
-Jika dua writer aktif, dapat terjadi:
-
-- frequency doubling;
-- phase collision;
-- hasil blink tidak natural.
-
-Ownership harus eksplisit.
+Satu-writer blink kini digate di runtime. Riwayat lengkap ada di git.
 
 ---
 
-# 28. Breath dan Update Order
+# 28. Breath dan Update Order — DICABUT (2026-09-29)
 
-Breath dapat dipengaruhi urutan update.
-
-Contoh masalah:
-
-```text
-Breath
-  ↓
-Engine absolute write
-  ↓
-Breath effect tertimpa
-```
-
-Karena itu update order harus diverifikasi secara runtime.
-
-Target konseptual:
-
-```text
-Load parameters
-    ↓
-Motion
-    ↓
-Framework effects
-    ↓
-Engine overrides / arbitration
-    ↓
-Late additive effects jika diperlukan
-    ↓
-Core.update()
-```
-
-Urutan final harus mengikuti implementasi aktual yang telah diverifikasi, bukan asumsi dokumen.
+Tutorial urutan update; yang berlaku = implementasi aktual terverifikasi.
+Riwayat lengkap ada di git.
 
 ---
 
-# 29. Live2D Runtime
+# 29. Live2D Runtime — DICABUT (2026-09-29)
 
-Target stack:
-
-```text
-Engine
-  ↓
-Live2D Adapter
-  ↓
-Cubism Framework
-  ↓
-Cubism Core
-  ↓
-PixiJS 8 / WebGL
-  ↓
-Canvas
-```
-
-Runtime bertanggung jawab terhadap:
-
-- model loading;
-- capability;
-- parameter;
-- motion;
-- expression;
-- physics;
-- framework effects;
-- texture;
-- mask;
-- blend;
-- rendering;
-- compositing.
+Daftar tanggung jawab runtime era pra-migrasi; arsitektur kini di `AGENTS.md`
++ `ARCHITECTURE-TAURI-RUST.md`. Riwayat lengkap ada di git.
 
 ---
 
-# 30. Renderer Responsibility
+# 30. Renderer Responsibility — DICABUT (2026-09-29)
 
-Renderer bertanggung jawab terhadap:
-
-- GPU resource;
-- texture;
-- mesh;
-- draw order;
-- opacity;
-- mask;
-- blend;
-- shader;
-- compositing;
-- WebGL/canvas.
-
-Renderer tidak bertanggung jawab terhadap:
-
-- personality;
-- conversation intent;
-- VTuber event policy;
-- Worker queue;
-- proactive decision;
-- task semantics.
+Prinsip umum GPU vs AI; bukan kontrak perilaku. Riwayat lengkap ada di git.
 
 ---
 
-# 31. Model Capability
+# 31. Model Capability — DICABUT (2026-09-29)
 
-Setiap model dapat mempunyai capability berbeda:
-
-```text
-Model
-├── Parameters
-├── Motions
-├── Expressions
-├── Physics
-├── Drawables
-├── Textures
-└── Version metadata
-```
-
-Engine/AI sebaiknya melihat abstraction:
-
-```text
-Model Capability
-      ↓
-Engine-safe Capability
-      ↓
-Behavior
-```
-
-Bukan detail renderer seperti drawable index atau texture slot.
+Duplikat `MODEL-AGNOSTIC-RULES.md` (ukur dari disk). Riwayat lengkap ada di
+git.
 
 ---
 
@@ -1207,34 +921,11 @@ Stale resource milik A boleh perlu dibersihkan, tetapi jangan mengubah state mod
 
 ---
 
-# 35. Context Switching
+# 35. Context Switching — DICABUT (2026-09-29)
 
-Saat pindah View:
-
-```text
-Chat
- ↓
-VTuber
-```
-
-idealnya yang berubah terutama:
-
-- input source;
-- behavior context;
-- event producers;
-- policy;
-- speech policy;
-- proactive policy.
-
-Tidak otomatis berarti:
-
-```text
-destroy renderer
-destroy model
-destroy engine
-```
-
-Jika runtime dapat tetap digunakan, pertahankan.
+Bagian ini bertentangan dengan `MODES.md` (teardown penuh saat pindah mode)
+dan konflik itu sudah diputuskan: **yang menang = `MODES.md`**. Jangan
+menghidupkan kembali isi lama bagian ini dari history git.
 
 ---
 
@@ -1255,158 +946,35 @@ Jangan menyelesaikan semua pertanyaan dengan satu `resetEverything()`.
 
 ---
 
-# 37. Data Flow
+# 37. Data Flow — DICABUT (2026-09-29)
 
-Control flow:
-
-```text
-View
- ↓
-Behavior
- ↓
-Engine
- ↓
-Runtime
-```
-
-Observation flow dapat kembali:
-
-```text
-Runtime
- ↓
-Engine
- ↓
-Behavior
-```
-
-Contoh observation:
-
-- model capability;
-- available motions;
-- available expressions;
-- parameter ranges.
-
-Jangan mengirim seluruh internal renderer ke AI tanpa kebutuhan.
+Tutorial aliran View → Behavior → Engine → Runtime; tidak ada kontrak yang
+tidak sudah tercakup §§1–18. Riwayat lengkap ada di git.
 
 ---
 
-# 38. Debugging Principle
+# 38. Debugging Principle — DICABUT (2026-09-29)
 
-Selalu cari **titik pertama** di mana expected state berbeda dari actual state.
-
-```text
-USER ACTION
-    ↓
-VIEW
-    ↓
-EVENT
-    ↓
-BEHAVIOR
-    ↓
-DECISION
-    ↓
-ENGINE
-    ↓
-MOTION / PARAMETER
-    ↓
-CUBISM
-    ↓
-RENDER
-```
-
-Jika behavior salah, audit Behavior.
-
-Jika motion salah, audit Engine/Motion.
-
-Jika parameter salah, audit Mapping/API/Arbitration.
-
-Jika visual salah, audit Runtime/Renderer.
-
-Jangan langsung mengubah renderer untuk masalah AI.
+Tutorial "cari titik pertama expected vs actual"; bukan kontrak perilaku.
+Riwayat lengkap ada di git.
 
 ---
 
-# 39. Contoh Debug Mouse Follow
+# 39. Contoh Debug Mouse Follow — DICABUT (2026-09-29)
 
-```text
-Pointer event
- ↓
-Canvas hit?
- ↓
-Normalization
- ↓
-Gain
- ↓
-Target
- ↓
-Role mapping
- ↓
-Clamp
- ↓
-Arbitration
- ↓
-Cubism
- ↓
-Render
-```
-
-Cari titik pertama yang salah.
+Contoh tutorial; bukan kontrak. Riwayat lengkap ada di git.
 
 ---
 
-# 40. Contoh Debug Companion Speech
+# 40. Contoh Debug Companion Speech — DICABUT (2026-09-29)
 
-```text
-User input
- ↓
-Companion accepted?
- ↓
-Thinking?
- ↓
-LLM response?
- ↓
-Directive?
- ↓
-Engine command?
- ↓
-Speech producer?
- ↓
-Speech policy?
- ↓
-TTS?
- ↓
-Audio?
-```
-
-Jangan langsung menyalahkan TTS jika request belum mencapai speech stage.
+Contoh tutorial; bukan kontrak. Riwayat lengkap ada di git.
 
 ---
 
-# 41. Contoh Debug Worker
+# 41. Contoh Debug Worker — DICABUT (2026-09-29)
 
-```text
-Task input
- ↓
-Slot claimed?
- ↓
-taskId created?
- ↓
-active/parked?
- ↓
-Agent loop
- ↓
-Tool
- ↓
-Approval?
- ↓
-Terminal?
- ↓
-Queue drain?
- ↓
-Actor feedback?
-```
-
-Execution dan speech diperiksa secara terpisah.
+Contoh tutorial; bukan kontrak. Riwayat lengkap ada di git.
 
 ---
 
@@ -1537,210 +1105,29 @@ Sebaiknya terisolasi:
 
 ---
 
-# 45. Urutan Integrasi Ulang
+# 45. Urutan Integrasi Ulang — SELESAI, DIARSIPKAN (2026-09-29)
 
-Karena project sengaja diulang dari sebelum integrasi View → Engine baru:
-
-## Phase A — Audit View
-
-Petakan:
-
-```text
-Chat
-VTuber
-Assistant/Harness
-```
-
-Untuk setiap View:
-
-- input;
-- output;
-- state;
-- endpoint;
-- event;
-- speech;
-- motion;
-- model access.
-
-**Audit only.**
-
-## Phase B — Audit Behavior
-
-Petakan:
-
-```text
-Chat → Companion
-VTuber → VTuber behavior
-Assistant → Worker
-```
-
-Cari siapa yang:
-
-- memanggil LLM;
-- membuat directive;
-- memanggil speech;
-- memanggil motion;
-- menulis parameter.
-
-**Audit only.**
-
-## Phase C — Tentukan Engine Boundary
-
-Kelompokkan existing Live2D control:
-
-```text
-Motion
-Expression
-Parameter
-Speech
-Model
-```
-
-Tentukan titik adapter.
-
-## Phase D — Integrasikan Companion
-
-Mulai dari jalur sederhana:
-
-```text
-Chat
- ↓
-Companion
- ↓
-Engine
- ↓
-Live2D
-```
-
-Pastikan stabil sebelum VTuber/Worker.
-
-## Phase E — Integrasikan VTuber
-
-```text
-VTuber events
- ↓
-VTuber Behavior
- ↓
-same Engine
- ↓
-same Live2D Runtime
-```
-
-## Phase F — Integrasikan Worker
-
-```text
-Worker
- ↓
-Task lifecycle
- ↓
-Engine actor feedback
- ↓
-same Live2D Runtime
-```
+Phase A–F selesai 2026-09-19. Detail fase dihapus; riwayat lengkap ada di git.
+Jangan memulai "fase integrasi" baru dari bagian ini.
 
 ---
 
-# 46. Golden Rules untuk Coding Agent
+# 46. Golden Rules untuk Coding Agent — DICABUT (2026-09-29)
 
-Sebelum mengubah kode:
-
-1. Audit repo aktual.
-2. Jangan menganggap S6/S7/Behavior Contract lama masih terimplementasi setelah revert.
-3. Petakan View aktual.
-4. Petakan Behavior aktual.
-5. Petakan Engine boundary aktual.
-6. Petakan Live2D boundary aktual.
-7. Bedakan fakta kode dari target architecture.
-8. Buat implementation plan sebelum perubahan besar.
-9. Jangan membuat subsystem baru jika boundary existing sudah cukup.
-10. Implementasikan satu boundary pada satu waktu.
-11. Verifikasi runtime setelah setiap perubahan.
-12. Jangan memperbaiki masalah satu layer dengan merombak layer lain tanpa evidence.
+Aturan sesi rework yang sudah lewat; yang masih berlaku kini tinggal di
+`AGENTS.md` ("Aturan kerja"). Riwayat lengkap ada di git.
 
 ---
 
-# 47. Final Mental Model
+# 47. Final Mental Model — DICABUT (2026-09-29)
 
-```text
-                           APPLICATION
-                                │
-              ┌─────────────────┼─────────────────┐
-              │                 │                 │
-              ▼                 ▼                 ▼
-          CHAT VIEW         VTUBER VIEW      ASSISTANT VIEW
-              │                 │                 │
-              ▼                 ▼                 ▼
-         COMPANION           VTUBER            WORKER
-          / PET-LIKE         BEHAVIOR          BEHAVIOR
-              │                 │                 │
-              └─────────────────┼─────────────────┘
-                                │
-                                ▼
-                         BEHAVIOR OUTPUT
-                                │
-                                ▼
-                           ONE ENGINE
-                                │
-                 ┌──────────────┼──────────────┐
-                 │              │              │
-                 ▼              ▼              ▼
-              Motion       Expression      Speech
-                 │              │              │
-                 └──────────────┼──────────────┘
-                                ▼
-                         LIVE2D RUNTIME
-                                │
-                                ▼
-                         CUBISM / PIXI
-                                │
-                                ▼
-                              WEBGL
-                                │
-                                ▼
-                            LIVE2D
-```
-
-## Kalimat inti
-
-> **View menentukan konteks. Behavior menentukan tindakan. Engine menerjemahkan tindakan menjadi aksi karakter. Live2D Runtime mengeksekusinya.**
-
-Tiga behavioral context utama:
-
-```text
-CHAT      → COMPANION / PET-LIKE
-VTUBER    → STREAM / EVENT BEHAVIOR
-ASSISTANT → WORKER / TASK BEHAVIOR
-```
-
-Semua dapat berbagi:
-
-```text
-ONE ENGINE
-ONE LIVE2D RUNTIME
-ONE RENDERING STACK
-```
-
-sementara execution state tetap terisolasi.
+Duplikat §§2–4 dalam bentuk diagram; bukan kontrak tambahan. Kalimat intinya
+tetap dikutip di §4. Riwayat lengkap ada di git.
 
 ---
 
-# 48. Status dan Batas Dokumen
+# 48. Status dan Batas Dokumen — DICABUT (2026-09-29)
 
-Dokumen ini adalah **dasar pemahaman arsitektur sebelum integrasi ulang**.
-
-Urutan kerja yang wajib:
-
-```text
-AUDIT ACTUAL REPO
-       ↓
-ACTUAL FLOW MAP
-       ↓
-COMPARE WITH THIS DOCUMENT
-       ↓
-IDENTIFY GAP
-       ↓
-IMPLEMENT ONE BOUNDARY
-       ↓
-RUNTIME VERIFY
-```
+Prosedur kerja sesi rework ("audit actual repo → … → runtime verify") sudah
+digantikan definisi "selesai" di `AGENTS.md`. Riwayat lengkap ada di git.
 

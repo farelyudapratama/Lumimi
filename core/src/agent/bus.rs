@@ -13,23 +13,6 @@ use serde_json::{json, Value};
 
 const MAX_EVENTS: usize = 120;
 
-/// Tipe event kanonik (sama dgn AgentEventType TS).
-pub const EVENT_TYPES: &[&str] = &[
-    "thinking_start",
-    "tool_call_start",
-    "tool_call_end",
-    "permission_request",
-    "permission_resolved",
-    "verification_start",
-    "verification_result",
-    "plan_updated",
-    "plan_revised",
-    "subagent_spawned",
-    "subagent_completed",
-    "final_answer",
-    "error",
-];
-
 #[derive(Clone)]
 struct AgentEvent {
     seq: u64,

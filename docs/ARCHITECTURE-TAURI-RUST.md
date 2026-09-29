@@ -1,19 +1,15 @@
-# ARCHITECTURE — Migrasi ke Tauri + Rust Core (arah, kontrak, roadmap)
+# ARCHITECTURE — Tauri + Rust Core (selesai, kontrak berlaku)
 
-> **Dokumen arah arsitektur.** Ditulis untuk AI agent & manusia yang mengerjakan
-> migrasi backend `live2d-agent` dari TypeScript/Bun ke **Rust core di dalam
-> Tauri**, tanpa merusak renderer Live2D/PixiJS yang sudah jalan.
->
-> **Status: DIEKSEKUSI — TARGET FINAL (revisi 2026-09-22).** `Lumimi.exe` =
-> satu binary satu proses: Tauri + Rust core (library, in-process) + frontend
+> **Status (2026-09-29): TARGET TEREKSEKUSI PENUH — dokumen ini kini dibaca
+> sebagai kontrak arsitektur yang berlaku, bukan rencana migrasi.** `Lumimi.exe`
+> = satu binary satu proses: Tauri + Rust core (library, in-process) + frontend
 > ter-embed (frontendDist → binary). Transport INTERNAL WebView↔Rust = perintah
 > IPC per-domain, bertahap (single source of truth = fungsi `live2d_core`;
 > handler HTTP memakai fungsi yang sama). HTTP/Axum loopback dipertahankan
 > HANYA sebagai adapter eksternal (CLI, OBS `vtuber.html`, dev browser) +
 > jembatan transisi domain yang belum migrasi (CORS permisif, loopback saja).
 > Render loop Live2D/PixiJS tetap 100% di WebView — tanpa IPC per-frame.
-> Server Bun (`src/server/`) DIHAPUS (Batch A 2026-09-23) — backend penuh di
-> `core/src/` (Rust); Bun = alat build/dev saja.
+> Backend penuh di `core/src/` (Rust); Bun = alat build/dev saja.
 >
 > Sumber niat: arah "Tauri + Rust Application Core + TypeScript/Live2D Frontend"
 > yang disetujui user. Prinsip inti:
@@ -125,36 +121,14 @@ LLM → Agent/Decision (Rust) → Companion Directive → HTTP loopback → Fron
 
 ---
 
-## 4. Kondisi awal (hasil eksplorasi — dasar rencana)
+## 4. Kondisi awal — SEJARAH (2026-09-29)
 
-- **Frontend:** TANPA WebSocket. Hanya **1** konsumen SSE (panel assistant:
-  `ask-stream`/`approve-stream`; event `delta / tool_call / tool_result /
-  approval / speak / done`). Sisanya `fetch` + **polling berkursor**:
-  assistant events 1500ms, status 2000ms, vtuber events 2500ms, koneksi LLM
-  4000ms, badge 4000ms, rail 8000ms, pet 5000ms, browser status 2000ms +
-  screenshot 3000ms.
-- **±60 pemanggilan `/api/*`** tersebar di 6+ file dengan **5 pola derivasi
-  origin berbeda** (`location.origin`+fallback 8310, `location.origin` polos,
-  path relatif). Guard `test/legacy/test-api-origin.js` mengunci ini.
-- **Shell Tauri sekarang** (`agent-shell/`): 0 `#[tauri::command]`, 0
-  invoke_handler, `bundle.active=false`, load `WebviewUrl::External` ke server
-  Bun. Click-through pet via `withGlobalTauri` + `setIgnoreCursorEvents`, state
-  di server (`/api/pet/*`).
-- **Biner over HTTP:** TTS audio blob (`/api/tts`), screenshot JPEG
-  (`/api/browser/screenshot`); aset model Live2D di-load `fetch("/model/...")`
-  relatif (loader Cubism di `live2d-view.mjs`).
-- **Klien HTTP mandiri (mudah terlupa):** `vtuber.html` (OBS overlay),
-  `pet.html`, `src/cli/agent.ts` (SSE + fallback JSON).
-- **Kopling motion-dsl (mudah terlupa):** sanitasi motion + taxonomy hidup di
-  TS client (`src/client/animation/motion-dsl`, `src/client/engine/motion-taxonomy`)
-  DAN diport ke Rust (`core/src/motion_dsl.rs`, `core/src/motion_taxonomy.rs`) —
-  dua sisi harus tetap sepadan bila salah satu berubah.
-- **`appRoot()` (dev/test)** = `import.meta.dir` di TS test; produksi memakai
-  `core/src/paths.rs :: AppPaths::detect`. Choke point path data: `data/config.json`,
-  `data/assistant-sessions.json`, `.agent-memory/memory.json` (di akar app,
-  BUKAN `data/`), `data/sheets/*`, `data/motions/*`, `data/browser/profile`.
-- Sudah native/Rust: `agent-shell/` (Tauri) + `engine/` (crate live2d-engine,
-  TTS `ort` + STT `whisper-rs`, port 8330).
+Bagian ini mendeskripsikan kondisi pra-migrasi (0 command IPC, server Bun,
+port sidecar 8330, ±60 situs fetch). Diarsipkan; riwayat lengkap ada di git.
+Yang masih berlaku sebagai fakta arsitektur kini: klien HTTP mandiri
+(`vtuber.html`, `pet.html`, `src/cli/agent.ts`) + kopling motion-dsl TS↔Rust
+yang wajib sepadan + choke point path data — semuanya diringkas di §5 dan
+peta kode `AGENTS.md`.
 
 ---
 
@@ -216,66 +190,16 @@ berhenti aman di situ.
 > `src/client/transport/` yang sudah ada tetap seam-nya; ia cukup diarahkan ke
 > server in-process (default sekarang: HTTP loopback, tak berubah).
 
-### Stage 0 — Kontrak & fondasi
-- Commit dokumen ini + entri STATUS + rujukan AGENTS.md. **(sesi ini)**
-- Ubah ke **cargo workspace**: root `Cargo.toml` `members = ["agent-shell",
-  "engine", "core"]`; `engine/` jadi **lib + bin** (bin tetap untuk debug
-  standalone; lib untuk diabsorb Stage 4).
-- Selesai = workspace build + semua gate hijau, perilaku aplikasi tak berubah.
+### Stage 0–5 — SELESAI SEMUA (2026-09-29)
 
-### Stage 1 — Transport seam + infra IPC shell
-- Buat `src/client/transport/` (abstraksi `api` + `TauriTransport` &
-  `HttpTransport`). Migrasi ±60 situs panggilan **mekanis 1:1** — perilaku HTTP
-  identik, backend Tauri belum aktif (feature-detect `window.__TAURI__`).
-- `agent-shell/`: tambah `invoke_handler` + capabilities; command minimal
-  (`app_info`, pet click-through → command, lepas polling `/api/pet/state`).
-- **Spike teknis wajib** (buktikan sebelum lanjut): (a) blob biner via IPC
-  (TTS WAV beberapa MB) — IPC vs custom protocol; (b) custom protocol `lumi://`
-  untuk aset model + loader Cubism tetap resolve; (c) `ipc::Channel` untuk
-  streaming event SSE.
-- Guard `test-api-origin.js` → guard transport (perbarui, jangan hapus).
-- Selesai = jendela Tauri load frontend, semua fitur jalan via HttpTransport;
-  TauriTransport siap tapi belum jadi jalur utama.
+Roadmap migrasi tereksekusi penuh; kondisi akhir melampaui rencana (satu
+proses, §2). Detail tiap stage dihapus; riwayat lengkap ada di git. Jangan
+memulai stage migrasi baru dari bagian ini — sisa pekerjaan = stabilisasi +
+packaging.
 
-### Stage 2 — Rust core: infrastruktur
-- Crate `core` (tokio). Pindah low-risk: config manager (byte-compatible),
-  paths (portable exe-dir), mode manager, model/sheet/motions file manager.
-  **Port `sanitizeMotionAsset` + `motion-taxonomy` ke Rust** (memecah kopling
-  server→client).
-- IPC command per domain; transport backend Tauri **aktif** untuk scope ini.
-- **Parity harness**: diff respons TS vs Rust per scope (ikuti pola test
-  server-parity yang sudah ada). Bun server tetap ada untuk scope belum pindah.
-
-### Stage 3 — AI infrastruktur
-- **3a** trait `LlmProvider` (Cloud/Local/OpenAI-compat/Custom) + role routing
-  (chat/motion/sheet/assistant) + streaming (idle-timeout per chunk) +
-  fallback/cooldown + persist status ke config.
-- **3b** agent loop + 21 tool + permission gate (event `approval` push
-  menggantikan SSE) + bus → event push (ganti poll 1500ms; **replay `since=0`
-  tetap ada** — hybrid) + sessions/memory/undo/subagent. Refactor singleton →
-  owned state; catat pola runtime-swap subagent (`subagent.ts:47-58`) yang
-  perlu didesain ulang.
-- **3c** vtuber (IRC via tokio-tungstenite, YouTube poll, scheduler) +
-  persona/narrator.
-- **Compat adapter (axum) dibangun paralel** dari service yang sama → CLI agent
-  (`src/cli/agent.ts`) tetap hidup; kosakata SSE dipertahankan.
-
-### Stage 4 — Media + browser + engine absorb
-- TTS multi-provider + cache + pcmToWav; STT. **engine lib dipanggil
-  in-process** (downloader model on-demand pindah ke core; port 8330 hilang).
-- Browser CDP (tokio-tungstenite + panggilan Win32 langsung menggantikan
-  PowerShell focus); zip import via crate `zip` (ganti unzip.exe/Expand-Archive).
-- `vtuber.html`/OBS overlay dilayani compat adapter; `pet.html` (jendela Tauri)
-  via IPC (`withGlobalTauri`).
-
-### Stage 5 — Packaging + pangkas
-- `frontendDist` Tauri meng-embed `static/`; hapus `live2d-agent.exe` Bun dari
-  dist (`src/dist.ts` disederhanakan; `installer.iss` di-update — kontrak
-  `data/` di samping exe dipertahankan).
-- Compat adapter di belakang flag config (default ON — OBS butuh). Hapus server
-  Bun lama dari jalur produksi (tetap dipakai test/dev).
-- Update AGENTS.md/README/TROUBLESHOOTING; guard final. **`bun` tetap alat
-  dev/build, bukan dependensi runtime produksi.**
+Aturan yang TETAP BERLAKU dari roadmap: **tiap perubahan meninggalkan
+aplikasi fungsional + gate hijau** (`bun run build` + `bunx tsc --noEmit` +
+`bun run test` + `cargo test` untuk crate yang tersentuh).
 
 ---
 
@@ -333,17 +257,11 @@ Jadi jalur internal = IPC per-domain (domain yang sudah migrasi) + HTTP loopback
 untuk sisanya; frontend TIDAK di-serve via `WebviewUrl::External`. §6b tinggal
 sebagai catatan sejarah temuan teknis (blokir-origin IPC pada origin remote).
 
-## 7. Risiko utama & mitigasi
+## 7. Risiko — SELESAI (2026-09-29)
 
-| Risiko | Mitigasi |
-|---|---|
-| Blob besar via IPC (TTS WAV) | Spike Stage 1: bandingkan IPC vs custom protocol `lumi://`; pilih yang tak menyalin ganda. |
-| Loader Cubism resolve URL relatif di bawah `lumi://` | Spike Stage 1: uji load model3/moc/texture/physics; siapkan protocol handler streaming aset. |
-| Semantik replay polling→push | Hybrid: poll/replay awal `since=0` lalu subscribe push; jangan buang kursor. |
-| Refactor singleton agent/subagent (runtime-swap) | Desain owned-state + handle; port bertahap dengan parity harness. |
-| Profil Cargo campur (`opt-level` shell "s" vs engine 3) | Cargo **workspace** dengan profil per-package / feature. |
-| Skop besar tak tuntas satu sesi | Tiap stage berhenti aman + gate hijau; jangan gabung dua stage. |
-| Guard legacy pecah | Update guard di commit yang sama; guard menguji kode asli. |
+Tabel risiko migrasi dihapus; mitigasinya sudah jadi arsitektur final di
+atas. Riwayat lengkap ada di git. Risiko operasional yang masih hidup
+tinggal di `TROUBLESHOOTING.md`.
 
 ---
 

@@ -41,7 +41,8 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 | 2 | [`docs/SHEET-SYSTEM.md`](docs/SHEET-SYSTEM.md) | menyentuh sheet, preset, migrasi, atau analisa LLM |
 | 3 | [`docs/MOTION-SYSTEM-SPEC.md`](docs/MOTION-SYSTEM-SPEC.md) | menyentuh pipeline motion / Motion Studio |
 | 4 | [`docs/MODES.md`](docs/MODES.md) | menyentuh mode, runtime, atau teardown |
-| 5 | [`docs/ARCHITECTURE-TAURI-RUST.md`](docs/ARCHITECTURE-TAURI-RUST.md) | menyentuh **apa pun** terkait backend Rust / shell Tauri / transport (IPC per-domain untuk domain yang sudah migrasi; HTTP loopback = adapter eksternal + jembatan transisi) |
+| 5 | [`docs/ARSITEKTUR-TARGET.md`](docs/ARSITEKTUR-TARGET.md) | menyentuh kontrak perilaku (concurrency, speech ownership, proactive gate, lifecycle request) — HANYA §§1–18 + §§32–34 + §36; sisanya arsip |
+| 6 | [`docs/ARCHITECTURE-TAURI-RUST.md`](docs/ARCHITECTURE-TAURI-RUST.md) | menyentuh **apa pun** terkait backend Rust / shell Tauri / transport (IPC per-domain untuk domain yang sudah migrasi; HTTP loopback = adapter eksternal + jembatan transisi) |
 | 6 | `docs/STATUS-CUBISM5-EFEK.md` (LOKAL, di-gitignore — handoff sesi pribadi, bukan acuan contributor) | **awal sesi lokal**: baca entri teratas bila file ada · **akhir sesi**: tambah entri baru (tetap lokal, jangan di-push) |
 | 7 | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | debugging perilaku yang dilaporkan user |
 
@@ -49,11 +50,11 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 439 unit (bun) + 367 guard (7 suite)
+bun run test           # SEMUA TS: 457 unit (bun, 28 file) + 302 guard (5 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)
-cargo test --workspace # backend Rust (164 test: 158 core + 6 engine), bagian gate
+cargo test --workspace # backend Rust (179 test: 173 core + 6 engine), bagian gate
 ```
 
 **Selesai** = build bersih + `tsc` bersih + `bun run test` hijau + `cargo test
@@ -202,8 +203,11 @@ src/client/transport/        seam transport: HTTP (apiBase/apiUrl/apiFetch/getJs
                              postJson) + helper IPC per-domain (modeGet/modeSet/
                              coreVersion/modelImportDialog/initLoopback)
 src/shared/                  types, config, llm-client (role routing)
-src/client/animation/        easing, motion-dsl, motion-registry, motion-runtime
-src/client/engine/           motion-taxonomy (klasifikasi klip .motion3.json)
+src/client/animation/        easing, motion-dsl, motion-io (dua arah .motion3.json),
+                             motion-registry, motion-runtime
+src/client/engine/           motion-taxonomy (klasifikasi klip .motion3.json),
+                             native-clips (daftar per-file + alias rename),
+                             role-mapping (inferensi role), native-expressions
 src/client/agent/            brain + directive-parser → window.__agent
 src/client/agent/panel/      panel agent (remake ala ZCode): stream/transcript/
                              actor/view/panel/diff/md/registry → window.__agentPanel
@@ -218,7 +222,7 @@ src/live2d/                  renderer satu jalur: Pixi 8 + Cubism 5-r.5 (teruji 
   Live2DUserModel.ts         pipeline update dua fase + updater efek ber-gate
   Live2DRenderer.ts          draw, tekstur, role/arbiter, setGazeGain
   cubism/                    Cubism Framework 5-r.5 vendored + PATCH renderOrders/blend
-static/js/app.js             driver karakter & UI (±9.300 baris), dijaga guard
+static/js/app.js             driver karakter & UI (±9.800 baris), dijaga guard
 static/js/mode-runtime.js    switcher mode; panel assistant tinggal bridge
                              window.__agentPanel
 static/js/{voice-input,motion-editor,camera-presence}.js

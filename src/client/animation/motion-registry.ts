@@ -4,7 +4,7 @@
  */
 import type { MotionAsset } from "../../shared/types";
 import type { NativeClip } from "../engine/native-clips";
-import { stepsToTracks, summaryForLLM } from "./motion-dsl";
+import { summaryForLLM } from "./motion-dsl";
 
 export interface RegistryEntry extends MotionAsset {
   source: "builtin" | "native" | "user";
@@ -45,17 +45,6 @@ export class MotionRegistry {
     if(want.length) out=out.filter(a=> want.every(t=> (a.tags||[]).includes(String(t).toLowerCase())));
     if(q && q.emotion) out=out.filter(a=> ((a as any).emotionCompatibility||{})[q.emotion!]>=0.5);
     return out;
-  }
-
-  registerGestureLibrary(lib: Record<string, any[]>, emotionGestureMap?: Record<string,string>): void {
-    const emo2gest=emotionGestureMap||{};
-    const gest2emo:Record<string,number>={};
-    for(const [emo,gest] of Object.entries(emo2gest)) gest2emo[gest]=Math.max(gest2emo[gest]||0,1.0);
-    for(const [name,steps] of Object.entries(lib||{})){
-      const tracks=stepsToTracks(steps);
-      const totalMs=(steps||[]).reduce((s:number,st:any)=>s+((st&&st.ms)||0),0);
-      this.register({ version:1, id:name, name, source:"builtin", type:"gesture", description:"Gerakan bawaan: "+name.replace(/_/g," "), tags:["builtin"], duration:+(totalMs/1000).toFixed(3), loop:false, intensity:{min:0.3,max:1.0,default:0.8} as any, emotionCompatibility: gest2emo[name]?{normal:0.7}:{}, cooldown:0, priority:60, aiEnabled:true, requires:[], tracks } as any);
-    }
   }
 
   registerNativeGroups(groups: string[], info?: Record<string, any>): void {

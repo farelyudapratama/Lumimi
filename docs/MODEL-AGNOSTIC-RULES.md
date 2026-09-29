@@ -96,9 +96,12 @@ pernah memasukkan nama model, id `Param…`, atau range spesifik ke
 
 ## Cara membuktikan tidak melanggar
 
-Guard model-agnostic hidup di `test/legacy/` (role-mapping, param-scaling,
-sheet-schema, exp3-adoption, api-origin, core6-compat, dst.)
-plus `test/motion-taxonomy.test.ts` (bun test), dijalankan lewat runner sendiri:
+Guard model-agnostic: uji invariansi penggantian nama di
+`test/role-mapping.test.ts` (rig Inggris/Jepang/Mandarin resolve ke role yang
+sama; rig opaque `m_001`..`m_020` resolve ke nol role) plus guard di
+`test/legacy/` (param-notes-ui, sheet-schema, exp3-adoption, api-origin,
+core6-compat) dan `test/motion-taxonomy.test.ts`, dijalankan lewat runner
+sendiri:
 
 ```bash
 bun run test:guards   # hanya guard legacy
@@ -115,8 +118,7 @@ bisa menyusup balik tanpa memerahkan test.
 
 Kalau menambah logika yang menyimpulkan makna: jalankan ulang dengan semua nama
 diganti `m_001` / `モーション1` / hash, lalu bandingkan. Kalau distribusi
-hasilnya kolaps, logika itu masih bergantung nama. Saat `app.js` nanti di-port
-ke TS, guard-guard ini dikonversi ke bun test bersama modulnya — bukan dibuang.
+hasilnya kolaps, logika itu masih bergantung nama.
 
 ## Catatan sheet
 

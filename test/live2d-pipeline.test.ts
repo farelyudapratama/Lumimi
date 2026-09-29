@@ -4,8 +4,6 @@
  */
 import { describe, expect, it } from "bun:test";
 import { ParameterArbiter } from "../src/live2d/ParameterArbiter";
-import { analyzeCapabilities } from "../src/live2d/CapabilityAnalyzer";
-import type { ModelProfile } from "../src/live2d/ModelInspector";
 import { mapRoles } from "../src/client/engine/role-mapping";
 
 describe("ParameterArbiter — prioritas & konflik", () => {
@@ -72,71 +70,6 @@ describe("ParameterArbiter — prioritas & konflik", () => {
     expect(r1.get("ParamAngleX")).toBe(7);
     expect(r2.get("ParamAngleX")).toBe(7);
     expect(a.hasConflict("ParamAngleX")).toBe(false);
-  });
-});
-
-describe("CapabilityAnalyzer — kapabilitas via role, bukan id model", () => {
-  const profileDasar = (over: Partial<ModelProfile> = {}): ModelProfile => ({
-    parameters: [{ id: "ParamAngleX", min: -30, max: 30, default: 0 }],
-    parts: [],
-    motions: [],
-    expressions: [],
-    physics: false,
-    pose: false,
-    canvas: { width: 2, height: 3 },
-    drawable: 10,
-    offscreen: 0,
-    ...over,
-  });
-
-  it("semua role ada → kapabilitas inti true", () => {
-    const roleMap = {
-      angleX: "P1", angleY: "P2", angleZ: "P3",
-      eyeLOpen: "P4", eyeROpen: "P5",
-      mouthOpenY: "P6", mouthForm: "P7",
-      eyeBallX: "P8", eyeBallY: "P9",
-      bodyAngleX: "P10",
-      blush: "P11", ear: "P12",
-    };
-    const caps = analyzeCapabilities(profileDasar({ physics: true }), roleMap);
-    expect(caps.has.headRotation).toBe(true);
-    expect(caps.has.eyeBlink).toBe(true);
-    expect(caps.has.mouth).toBe(true);
-    expect(caps.has.gaze).toBe(true);
-    expect(caps.has.bodyRotation).toBe(true);
-    expect(caps.has.physics).toBe(true);
-    expect(caps.has.blush).toBe(true);
-    expect(caps.has.earMovement).toBe(true);
-    expect(caps.missing).toEqual([]);
-  });
-
-  it("tanpa role ear → earMovement missing dengan fallback ignore (bukan crash)", () => {
-    const caps = analyzeCapabilities(profileDasar(), { angleX: "P1" });
-    expect(caps.has.earMovement).toBe(false);
-    expect(caps.missing).toContain("earMovement");
-    expect(caps.fallback.earMovement).toBe("ignore");
-  });
-
-  it("blush missing + model punya ekspresi → fallback ke expression pertama", () => {
-    const caps = analyzeCapabilities(
-      profileDasar({ expressions: ["f01_normal", "f02_shy"] }),
-      { angleX: "P1" },
-    );
-    expect(caps.has.blush).toBe(false);
-    expect(caps.fallback.blush).toBe("expression:f01_normal");
-  });
-
-  it("blush missing + tanpa ekspresi → fallback ignore", () => {
-    const caps = analyzeCapabilities(profileDasar(), { angleX: "P1" });
-    expect(caps.fallback.blush).toBe("ignore");
-  });
-
-  it("physics diambil dari profile (file physics3 ada di manifest)", () => {
-    const capsOn = analyzeCapabilities(profileDasar({ physics: true }), {});
-    const capsOff = analyzeCapabilities(profileDasar({ physics: false }), {});
-    expect(capsOn.has.physics).toBe(true);
-    expect(capsOff.has.physics).toBe(false);
-    expect(capsOff.missing).toContain("physics");
   });
 });
 

@@ -493,7 +493,6 @@ async function callStreamWithOneRetry(conn: Connection, messages: ChatMessage[],
   }
 }
 
-
 // ── Multi-LLM role routing ─────────────────────────────────────
 // Satu LLM "serba bisa" menerima seluruh konteks (termasuk dulu: tabel
 // parameter) di prompt-nya, dan itu menurunkan mutu balasan teks. Dengan tag
@@ -546,50 +545,6 @@ export function orderForRole(role: string, conns: Connection[]): Connection[] {
   return explicit.concat(matching.filter((c) => !explicit.includes(c)));
 }
 
-/**
- * Panggil LLM untuk sebuah PERAN. Bukan pengganti llmWithFallback(): kebijakan
- * retry/cooldown/persist tetap di sana (satu tempat). Yang ditambahkan di sini
- * hanya penyaringan kandidat + preferensi urutan, lalu pekerjaan diserahkan.
- * Aturan keras: kalau tidak ada connection yang menandai role ini, JANGAN
- * gagal — jatuh ke urutan default (semua connection). Endpoint tidak boleh
- * mati hanya karena user belum menandai role apa pun.
- */
-export function llmForRole(
-  role: string,
-  getConnections: () => Connection[],
-  getActive: () => Connection | null,
-  persist: (conns: Connection[]) => void,
-  messages: ChatMessage[],
-  clientSystem: string = ""
-): Promise<LLMResult> {
-  const order = orderForRole(role, getConnections());
-  if (order.length) {
-    console.log("[roles] role=" + role + " -> " + order.map((c) => c.name || c.id).join(" > "));
-  }
-  return llmWithFallback(getConnections, getActive, persist, messages, clientSystem, order);
-}
-
-/** llmForRole + streaming: delta token diteruskan ke `onDelta`. Kebijakan
- *  fallback/cooldown/persist identik dengan llmForRole. */
-export function llmForRoleStream(
-  role: string,
-  getConnections: () => Connection[],
-  getActive: () => Connection | null,
-  persist: (conns: Connection[]) => void,
-  messages: ChatMessage[],
-  clientSystem: string,
-  onDelta: StreamDelta
-): Promise<LLMResult> {
-  const order = orderForRole(role, getConnections());
-  if (order.length) {
-    console.log("[roles] role=" + role + " (stream) -> " + order.map((c) => c.name || c.id).join(" > "));
-  }
-  return llmWithFallback(
-    getConnections, getActive, persist, messages, clientSystem, order,
-    (c) => callStreamWithOneRetry(c, messages, clientSystem, onDelta),
-  );
-}
-
 export function llmWithFallback(
   getConnections: () => Connection[],
   getActive: () => Connection | null,
@@ -607,8 +562,8 @@ export function llmWithFallback(
     if (!conns.length) { const e: any = new Error("Semua connection sedang dinonaktifkan — aktifkan lagi di panel ⚙️ AI Connections."); e.httpStatus = 400; e.kind = "no-connections"; return reject(e); }
     const activeRaw = getActive();
     const active = activeRaw && activeRaw.enabled === false ? null : activeRaw;
-    // `order` opsional: daftar connection yang SUDAH diurutkan (dipakai
-    // llmForRole). Bila tidak diberikan, perilaku lama dipertahankan persis:
+    // `order` opsional: daftar connection yang SUDAH diurutkan (mis. hasil
+    // orderForRole). Bila tidak diberikan, perilaku lama dipertahankan persis:
     // active dulu, lalu sisanya urut config.
     const order2 = (Array.isArray(order) && order.length)
       ? order.filter(Boolean)
