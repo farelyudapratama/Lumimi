@@ -1,7 +1,7 @@
 //! Rute ekspresi: discoverExpressions + adoption GET/POST.
-//! Guard `test-overlay-gate` (bagian client) + test di bawah menuntut tiap
-//! ekspresi membawa `params` (Id dari file .exp3.json) untuk gate
-//! overlay-vs-native. Folder tanpa `.model3.json` memakai blueprint
+//! Test di bawah menuntut tiap ekspresi membawa `params` (Id dari file
+//! .exp3.json) — data rig asli milik model, dipakai klien untuk info
+//! ekspresi/adopsi. Folder tanpa `.model3.json` memakai blueprint
 //! Auto-Rescue in-memory (padanan fallback TS — manifest user tak disentuh).
 
 use std::collections::BTreeSet;
@@ -329,9 +329,8 @@ mod tests {
 
     #[test]
     fn params_edge_cases() {
-        // Port test-overlay-gate part-1: params per ekspresi — rusak → []
-        // (bukan error), tanpa Parameters → [], Id duplikat didedupe, field
-        // lama (Name/File/declared) utuh.
+        // params per ekspresi — rusak → [] (bukan error), tanpa Parameters
+        // → [], Id duplikat didedupe, field lama (Name/File/declared) utuh.
         let data = std::env::temp_dir().join(format!("l2dexppe-{}-{}", std::process::id(), crate::config::base36_pub(now())));
         let model_dir = data.join("model");
         let m = model_dir.join("g");

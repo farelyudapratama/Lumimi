@@ -17,7 +17,6 @@ const LLM_ROLES: &[&str] =
 pub fn default_config() -> Value {
     json!({
         "activeId": null,
-        "overlay": { "enabled": true, "alpha": 0.9, "size": 1 },
         "connections": [],
         "tts": { "provider": "supertonic", "endpoint": "", "voice": "F1" },
         "events": {
@@ -148,7 +147,6 @@ pub fn api_config_response(path: &Path) -> Value {
         "motion": sect("motion"),
         "stt": stt_out,
         "i18n": sect("i18n"),
-        "overlay": sect("overlay"),
     })
 }
 

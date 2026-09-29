@@ -221,7 +221,7 @@ src/live2d/                  renderer satu jalur: Pixi 8 + Cubism 5-r.5 (teruji 
 static/js/app.js             driver karakter & UI (±9.300 baris), dijaga guard
 static/js/mode-runtime.js    switcher mode; panel assistant tinggal bridge
                              window.__agentPanel
-static/js/{voice-input,emotion-overlay,motion-editor,camera-presence}.js
+static/js/{voice-input,motion-editor,camera-presence}.js
 test/                        bun test (unit): frontend TS (motion/i18n/transport/brain)
 test/legacy/                 guard legacy: mengekstrak fungsi app.js via vm
 data/                        data user, TIDAK di-commit
