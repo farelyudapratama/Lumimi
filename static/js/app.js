@@ -83,8 +83,6 @@
 
     overrides: {},
 
-    visfxMap: null,
-
     cdiInfo: null,
 
     rawDrive: null,
@@ -244,19 +242,6 @@
           cm.setParameterValueById(id, o.value, o.weight);
         else cm.setParameterValueById(id, o, 1);
       } catch (e) {}
-    }
-  }
-
-  function visfxStoreKey(modelKey) {
-    return "l2d_visfx_v2_" + (modelKey || "default");
-  }
-  function visfxLoad() {
-    try {
-      return JSON.parse(
-        localStorage.getItem(visfxStoreKey(currentModelKey())) || "null",
-      );
-    } catch (e) {
-      return null;
     }
   }
 
@@ -782,10 +767,8 @@
       fetchSheetFile().catch(() => {});
 
       startIdle();
-      state.visfxMap = visfxLoad();
       wireInteractions();
       detectModelCapabilities();
-      prefetchOverlayGate();
       prefetchCdiInfo();
       startIdleMotion();
 
@@ -1956,10 +1939,6 @@
       state.model.internalModel.motionManager.expressionManager;
     if (mgr && typeof mgr.resetExpression === "function") mgr.resetExpression();
     setEmotionTargets({});
-
-    try {
-      window.__emotionOverlay && window.__emotionOverlay.clear();
-    } catch (e) {}
   }
 
   function detectModelCapabilities() {
@@ -2158,78 +2137,6 @@
     );
   }
 
-  let overlayGateExprs = null;
-  let overlayGateModelPath = null;
-
-  function overlayGateExpBindings() {
-    if (overlayGateModelPath !== (state.modelPath || '')) {
-      overlayGateExprs = undefined;
-      overlayGateModelPath = state.modelPath || "";
-    }
-    if (overlayGateExprs !== undefined)
-      return Promise.resolve(overlayGateExprs);
-    const folder = String(state.modelPath || "").split("/")[1];
-    if (!folder) {
-      overlayGateExprs = null;
-      return Promise.resolve(null);
-    }
-    return fetch(
-      API + "/api/model/expressions?name=" + encodeURIComponent(folder),
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((info) => {
-        const map = {};
-        const list =
-          info && Array.isArray(info.expressions) ? info.expressions : [];
-        for (const e of list) {
-          if (!e || !e.Name) continue;
-          map[e.Name] = Array.isArray(e.params) ? e.params.filter(Boolean) : [];
-        }
-        overlayGateExprs = map;
-        return map;
-      })
-      .catch(() => {
-        overlayGateExprs = null;
-        return null;
-      });
-  }
-
-  function overlayGateSuppress(name, bindings, visfx, resolveFx) {
-    if (typeof resolveFx !== "function" || !resolveFx(name)) return false;
-    if (!visfx) return false;
-    const bare = String(name || "").replace(/^user:/, "");
-    const ids =
-      bindings && Object.prototype.hasOwnProperty.call(bindings, name)
-        ? bindings[name]
-        : bindings && Object.prototype.hasOwnProperty.call(bindings, bare)
-          ? bindings[bare]
-          : null;
-    if (!Array.isArray(ids) || !ids.length) return false;
-    for (const id of ids) {
-      const m = visfx[id];
-      if (!m || typeof m.changed !== "number") continue;
-      if (m.changed > 0) return true;
-    }
-    return false;
-  }
-
-  function overlayGateExpBindingsSync() {
-    return overlayGateExprs === undefined ? null : overlayGateExprs;
-  }
-
-  function overlayShouldSuppress(name) {
-    const ov = window.__emotionOverlay;
-    return overlayGateSuppress(
-      name,
-      overlayGateExpBindingsSync(),
-      state.visfxMap,
-      ov && ov._resolve ? (n) => ov._resolve(n) : null,
-    );
-  }
-  function prefetchOverlayGate() {
-    overlayGateExpBindings().catch(() => {});
-  }
-
   function cdiGroupTitle(gid) {
     if (!(state.cdiInfo && state.cdiInfo.groups.has(gid))) return gid;
     const members = state.cdiInfo.groups.get(gid) || [];
@@ -2293,16 +2200,6 @@
         }
       })
       .catch(() => {});
-  }
-
-  function fireOverlay(name) {
-    try {
-      if (overlayShouldSuppress(name)) {
-        console.log("[overlay] suppressed (efek native hidup):", name);
-        return;
-      }
-      window.__emotionOverlay && window.__emotionOverlay.onExpression(name);
-    } catch (e) {}
   }
 
   async function applyExpression(name, intensity) {
@@ -2376,7 +2273,6 @@
       state.activeProperty = "default";
       setEmotionTargets(userEntry, intensity);
       playEmotionClip(name); // body follows the face (see native branch)
-      fireOverlay(name);
       $$(".expr-btn").forEach((b) =>
         b.classList.toggle("active", b.dataset.expr === name),
       );
@@ -2400,7 +2296,6 @@
       state.activeEmotion = name;
       state.activeProperty = "default";
       resetEmotion();
-      fireOverlay(name);
       try {
         await state.model.expression(nativeName);
         $$(".expr-btn").forEach((b) =>
@@ -2419,7 +2314,6 @@
       state.activeEmotion = name;
       state.activeProperty = "default";
       playEmotionClip(name);
-      fireOverlay(name);
       $$(".expr-btn").forEach((b) =>
         b.classList.toggle("active", b.dataset.expr === name),
       );
@@ -2440,7 +2334,6 @@
       } else {
         setEmotionTargets(synth, intensity);
         playEmotionClip(name); // body follows the face (see native branch)
-        fireOverlay(name);
       }
       $$(".expr-btn").forEach((b) =>
         b.classList.toggle("active", b.dataset.expr === name),
@@ -2453,8 +2346,6 @@
       );
       return;
     }
-
-    fireOverlay(name);
   }
 
   function toggleAccessory(paramId, val) {
@@ -2541,7 +2432,6 @@
         if (typeof d.motion.gain === "number") MOTION.gain = d.motion.gain;
       }
 
-      if (d.overlay) window.__overlayCfg = Object.assign({}, window.__overlayCfg || {}, d.overlay);
     } catch (e) {
       /* pakai default */
     }
@@ -5999,7 +5889,6 @@
         return;
       }
 
-      if (!state.visfxMap) state.visfxMap = visfxLoad();
       renderParamNotesPopup(sheet);
       if (pnPopup) {
         pnPopup.classList.remove("hidden");

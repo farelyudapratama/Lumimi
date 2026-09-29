@@ -61,8 +61,6 @@ export interface Config {
   // memperlakukannya sebagai "id"); klien menulis nilai konkret saat
   // first-run / ganti bahasa di panel pengaturan.
   i18n: I18nConfig;
-  // Overlay efek emosi app-level (js/emotion-overlay.js).
-  overlay: { enabled: boolean; alpha: number; size: number };
   // Koneksi stream VTuber tersimpan (prefill form Stream Settings). apiKey
   // plaintext di config.json (sama seperti connections/tts), DIMASK ke UI.
   // Opsional: config lama tanpa field ini valid.

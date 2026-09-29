@@ -97,7 +97,7 @@ pernah memasukkan nama model, id `Param…`, atau range spesifik ke
 ## Cara membuktikan tidak melanggar
 
 Guard model-agnostic hidup di `test/legacy/` (role-mapping, param-scaling,
-sheet-schema, exp3-adoption, api-origin, core6-compat, emotion-overlay, dst.)
+sheet-schema, exp3-adoption, api-origin, core6-compat, dst.)
 plus `test/motion-taxonomy.test.ts` (bun test), dijalankan lewat runner sendiri:
 
 ```bash

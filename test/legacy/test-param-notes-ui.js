@@ -62,7 +62,7 @@ ok('ID param = teks utama di baris slider; label hanya pelengkap (audit i18n 202
 // ── 3. label cdi3 ────────────────────────────────────────────────────────────
 section('label + grup asli rigger dari cdi3');
 ok('prefetchCdiInfo dipanggil saat loadModel (fire-and-forget)',
-  /prefetchOverlayGate\(\);[\s\S]{0,120}prefetchCdiInfo\(\)/.test(appSrc));
+  /prefetchCdiInfo\(\)/.test(appSrc));
 ok('cdi3 diambil via DisplayInfo dari model3.json',
   /FileReferences && m3\.FileReferences\.DisplayInfo/.test(appSrc));
 ok('state.cdiInfo dibuang saat model diganti (id param antar model tak bisa dipertukarkan)',

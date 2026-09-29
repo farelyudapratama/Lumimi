@@ -7,7 +7,6 @@ import { join, dirname } from "path";
 
 const DEFAULT_CONFIG: Config = {
   activeId: null,
-  overlay: { enabled: true, alpha: 0.9, size: 1 },
   connections: [],
   // TTS default: SuperTonic native (in-process di core Rust, model on-demand).
   // Provider lain (browser/gradio/openai/elevenlabs/gemini/custom) tetap bisa
