@@ -18,7 +18,7 @@ pub fn default_config() -> Value {
     json!({
         "activeId": null,
         "connections": [],
-        "tts": { "provider": "supertonic", "endpoint": "", "voice": "F1" },
+        "tts": { "provider": "auto", "endpoint": "", "voice": "F1" },
         "events": {
             "idleSpeak": true, "idleMs": 1_800_000, "idleRepeatMs": 1_800_000,
             "awaySpeak": true, "returnSpeak": true, "awayHiddenMs": 10_000,
@@ -32,7 +32,7 @@ pub fn default_config() -> Value {
         "motion": { "enabled": false, "gain": 1.5 },
         "i18n": { "lang": "auto" },
         "stt": {
-            "provider": "local", "engineModel": "base", "model": "Xenova/whisper-base",
+            "provider": "auto", "engineModel": "base", "model": "Xenova/whisper-base",
             "language": "indonesian", "autoSend": true, "silenceMs": 1500,
             "maxMs": 30_000, "device": "",
             "endpoint": "", "apiKey": "", "apiModel": "whisper-1"
@@ -477,8 +477,10 @@ mod tests {
     #[test]
     fn load_backfill_default_saat_file_hilang() {
         let cfg = load(Path::new("/tak/ada/config.json"));
-        assert_eq!(cfg["tts"]["provider"], "supertonic");
-        assert_eq!(cfg["stt"]["provider"], "local");
+        // Default "auto": native dipakai bila modelnya tersedia, selain itu
+        // klien jatuh ke mesin browser.
+        assert_eq!(cfg["tts"]["provider"], "auto");
+        assert_eq!(cfg["stt"]["provider"], "auto");
         assert_eq!(cfg["activeId"], Value::Null);
     }
 

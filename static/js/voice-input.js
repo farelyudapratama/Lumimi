@@ -251,16 +251,19 @@ async function transcribeAndSend() {
       f32 = resampleTo16k(decoded.getChannelData(0), decoded.sampleRate);
     }
     // Provider transkripsi: "browser" = Whisper transformers.js in-browser
-    // (audio tak keluar tab); selain itu ("local"/cloud) → kirim WAV ke server
-    // /api/stt (whisper in-process di core atau penyedia cloud sesuai config.stt.provider).
-    const provider = String(cfg.provider || 'local').toLowerCase();
+    // (audio tak keluar tab); "local" = whisper in-process di core — HANYA
+    // bila build memakai feature engine-stt DAN file modelnya ada di disk
+    // (dicek via /api/media/status; model tidak dibundel & tidak diunduh
+    // otomatis). Bila native belum siap → fallback ke jalur browser dengan
+    // status yang jelas, bukan gagal senyap. Provider cloud = eksplisit user.
+    const provider = String(cfg.provider || 'auto').toLowerCase();
     let text;
     if (provider === 'browser') {
-      const model = await loadASR();
-      const genOpts = { chunk_length_s: 30, stride_length_s: 5 };
-      if (cfg.language && cfg.language !== 'auto') { genOpts.language = cfg.language; genOpts.task = 'transcribe'; }
-      const out = await model(f32, genOpts);
-      text = String((out && out.text) || '').trim();
+      text = await transcribeBrowser(f32);
+    } else if ((provider === 'local' || provider === 'auto') && !(await nativeSttReady())) {
+      // auto/local tanpa model native → browser (tetap 100% lokal), status jelas.
+      setStatus(__t('chat.sttNativeMissing'));
+      text = await transcribeBrowser(f32);
     } else {
       text = await transcribeViaServer(f32);
     }
@@ -287,6 +290,31 @@ async function transcribeAndSend() {
     else setTimeout(() => setStatus(''), 1500);
     syncButtonState();
   }
+}
+
+// Status STT native dari /api/media/status — di-cache sekali per halaman:
+// compiled (feature engine-stt) + file model ggml ada di disk.
+let nativeStPromise = null;
+function nativeStatus() {
+  if (!nativeStPromise) {
+    nativeStPromise = fetch(apiBase() + '/api/media/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }
+  return nativeStPromise;
+}
+async function nativeSttReady() {
+  const st = await nativeStatus();
+  return !!(st && st.stt && st.stt.available);
+}
+
+// Jalur transkripsi browser (Whisper transformers.js dalam tab).
+async function transcribeBrowser(f32) {
+  const model = await loadASR();
+  const genOpts = { chunk_length_s: 30, stride_length_s: 5 };
+  if (cfg.language && cfg.language !== 'auto') { genOpts.language = cfg.language; genOpts.task = 'transcribe'; }
+  const out = await model(f32, genOpts);
+  return String((out && out.text) || '').trim();
 }
 
 // Encode Float32 mono [-1,1] @16kHz → WAV PCM16 (untuk dikirim ke /api/stt).

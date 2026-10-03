@@ -21,7 +21,7 @@ use crate::{browser, jsonx};
 
 const DETAIL_FRAMES: usize = 8; // tubuh atas (wajah/kepala) — detail halus
 const FULL_FRAMES: usize = 3; // seluruh model (termasuk kaki) — menyeluruh
-const JPEG_QUALITY: u8 = 72;
+// Kualitas JPEG frame ditentukan sisi harness TS (toDataURL "image/jpeg", 0.72).
 
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0

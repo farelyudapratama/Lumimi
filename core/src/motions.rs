@@ -31,7 +31,7 @@ fn candidate_keys(motions_root: &Path, model_key: &str) -> Vec<PathBuf> {
     let Some(folder) = crate::motion_analysis::resolve_model_folder(&model_root, model_key) else {
         return out;
     };
-    let mut push = |k: String, out: &mut Vec<PathBuf>| {
+    let push = |k: String, out: &mut Vec<PathBuf>| {
         if !out.iter().any(|p| p.file_name().map(|f| f == std::ffi::OsStr::new(&k)).unwrap_or(false)) {
             out.push(motions_root.join(k));
         }

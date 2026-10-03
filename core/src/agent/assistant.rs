@@ -282,7 +282,6 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
     // mengeluarkan ulang JSON besar.
     let mut motion_validated = false;
     let mut last_validated_draft: Option<Value> = None;
-    let mut nudged_save = false;
 
     for _turn in 0..MAX_ITERATIONS {
         // Cancel kooperatif: dicek di awal tiap turn (loop lepas lock saat await
@@ -330,9 +329,8 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
                 // Model mendeskripsikan "sudah kusimpan" tapi tak pernah memanggil
                 // motion_save. Bila draft sudah tervalidasi, JANGAN cuma berhenti:
                 // ajukan motion_save sendiri (server yang pegang draft valid) lewat
-                // kartu izin. Bounded sekali (nudged_save) agar tak berulang.
-                if motion_validated && !nudged_save && last_validated_draft.is_some() {
-                    nudged_save = true;
+                // kartu izin. Sekali per ask — jalur ini langsung pause & break.
+                if motion_validated && last_validated_draft.is_some() {
                     let draft = last_validated_draft.clone().unwrap();
                     let save_args = json!({ "motion": draft });
                     bus::emit("permission_request", "motion_save");

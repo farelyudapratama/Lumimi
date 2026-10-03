@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use live2d_engine::tts::SuperTonic;
+use live2d_engine::tts::{nasal_filter, pitch_resample, SuperTonic};
 use live2d_engine::wav;
 
 use crate::config;
@@ -20,11 +20,22 @@ use crate::paths::AppPaths;
 // CPU → dijalankan di spawn_blocking; Mutex menjaga akses serial.
 static TTS_ENGINE: OnceLock<Mutex<Option<SuperTonic>>> = OnceLock::new();
 
+/// Kecepatan bicara dasar SuperTonic (sedikit lebih cepat dari netral) —
+/// dikali `rate` dari config sebelum dikompensasi pitch.
+const BASE_TTS_SPEED: f32 = 1.05;
+
+/// SuperTonic siap pakai hanya bila SEMUA file manifest ada — bukan cuma
+/// vocoder.onnx. Cache setengah jadi (mis. warisan app lain atau unduhan
+/// lama yang terputus) tidak dipercaya sebagai sumber model.
+fn supertonic_dir_usable(dir: &Path) -> bool {
+    supertonic_files_ok(dir) == SUPERTONIC_FILES.len()
+}
+
 /// Direktori model SuperTonic: cache Python bila lengkap, else engines/models.
 fn tts_model_dir(paths: &AppPaths) -> PathBuf {
     if let Some(home) = dirs_home() {
         let shared = home.join(".cache").join("supertonic3");
-        if shared.join("onnx").join("vocoder.onnx").exists() {
+        if supertonic_dir_usable(&shared) {
             return shared;
         }
     }
@@ -38,16 +49,21 @@ fn dirs_home() -> Option<PathBuf> {
 }
 
 /// Sintesis TTS in-process (SuperTonic). Return (WAV bytes, mime) atau error.
-/// Blocking di-offload ke spawn_blocking.
-pub async fn synth_tts(paths: &AppPaths, text: &str, voice: &str, lang: &str) -> Result<(Vec<u8>, &'static str), String> {
+/// `pitch` >1 = lebih tinggi (efek "anak kecil"), `rate` = kecepatan bicara,
+/// `nasal` 0..1 = penekanan resonansi hidung (cempreng). Pitch dicapai dengan
+/// resample + kompensasi durasi (synth lebih lambat sebesar pitch) supaya
+/// tempo bicara tetap normal. Blocking di-offload ke spawn_blocking.
+pub async fn synth_tts(paths: &AppPaths, text: &str, voice: &str, lang: &str, pitch: f32, rate: f32, nasal: f32) -> Result<(Vec<u8>, &'static str), String> {
     if text.trim().is_empty() {
         return Err("teks kosong".into());
     }
     let model_dir = tts_model_dir(paths);
-    if !model_dir.join("onnx").join("vocoder.onnx").exists() {
+    if !supertonic_dir_usable(&model_dir) {
         return Err(format!(
-            "model SuperTonic belum ada di {} — unduh dulu (on-demand belum diport ke core)",
-            model_dir.display()
+            "model SuperTonic belum lengkap di {} ({}/{} file) — unduh/lanjutkan lewat panel Mesin Native",
+            model_dir.display(),
+            supertonic_files_ok(&model_dir),
+            SUPERTONIC_FILES.len()
         ));
     }
     let text = text.to_string();
@@ -62,7 +78,16 @@ pub async fn synth_tts(paths: &AppPaths, text: &str, voice: &str, lang: &str) ->
         let eng = guard.as_mut().unwrap();
         let style = SuperTonic::load_style(&model_dir, &voice)?;
         let lang_opt = if lang.is_empty() { None } else { Some(lang.as_str()) };
-        let samples = eng.synthesize(&text, &style, 8, 1.05, 0.3, lang_opt)?;
+        // Kompensasi durasi: synth selama pitch× lebih panjang, lalu resample
+        // naik sebesar pitch → durasi akhir normal, frekuensi ×pitch.
+        let engine_speed = (BASE_TTS_SPEED * rate / pitch).max(0.25);
+        let mut samples = eng.synthesize(&text, &style, 8, engine_speed, 0.3, lang_opt)?;
+        if (pitch - 1.0).abs() > 1e-3 {
+            samples = pitch_resample(&samples, pitch);
+        }
+        if nasal > 1e-3 {
+            samples = nasal_filter(&samples, eng.sample_rate(), nasal);
+        }
         Ok((wav::encode_pcm16(&samples, eng.sample_rate()), "audio/wav"))
     })
     .await
@@ -77,6 +102,11 @@ static STT_ENGINE: OnceLock<Mutex<Option<live2d_engine::stt::Whisper>>> = OnceLo
 /// engine/models/ggml-<name>.bin (dev). None bila tak ada.
 #[cfg(feature = "engine-stt")]
 fn stt_model_path(paths: &AppPaths, name: &str) -> Option<PathBuf> {
+    stt_lookup(paths, name)
+}
+
+/// Pencarian file GGML tanpa gating feature — dipakai pelaporan status UI.
+fn stt_lookup(paths: &AppPaths, name: &str) -> Option<PathBuf> {
     let clean: String = name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect();
     for base in [paths.root.join("engines").join("models"), paths.root.join("engine").join("models")] {
         let p = base.join(format!("ggml-{clean}.bin"));
@@ -85,6 +115,457 @@ fn stt_model_path(paths: &AppPaths, name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Status ketersediaan mesin native untuk UI (GET /api/media/status). Model
+/// TIDAK dibundel & tidak diunduh otomatis — yang dilaporkan apa adanya:
+/// tersedia atau belum, plus path tempat ia dicari/ditemukan.
+pub fn media_status(paths: &AppPaths, config_path: &Path) -> serde_json::Value {
+    let tts_dir = tts_model_dir(paths);
+    let tts_ready = supertonic_dir_usable(&tts_dir);
+    let (_, stt_model, _) = stt_provider_model(config_path);
+    let stt_compiled = cfg!(feature = "engine-stt");
+    let (stt_found, stt_path) = match stt_lookup(paths, &stt_model) {
+        Some(p) => (true, Some(p.to_string_lossy().into_owned())),
+        None => (false, None),
+    };
+    let whisper_models: Vec<serde_json::Value> = WHISPER_MODELS
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "name": m,
+                "available": stt_lookup(paths, m).is_some(),
+                "path": stt_lookup(paths, m).map(|p| p.to_string_lossy().into_owned()),
+            })
+        })
+        .collect();
+    let downloads = downloads_cell()
+        .lock()
+        .map(|g| serde_json::to_value(&*g).unwrap_or_else(|_| serde_json::json!({})))
+        .unwrap_or_else(|_| serde_json::json!({}));
+    // Lokasi lain yang juga berisi file SuperTonic (mis. cache bersama
+    // ~/.cache/supertonic3 padahal engine memakai engines/models, atau
+    // sebaliknya) — dilaporkan agar user bisa melihat & menghapus semuanya.
+    let other_paths: Vec<String> = supertonic_candidate_dirs(paths)
+        .iter()
+        .filter(|d| **d != tts_dir && supertonic_files_ok(d) > 0)
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect();
+    serde_json::json!({
+        "tts": { "supertonic": {
+            "available": tts_ready,
+            "path": tts_dir.to_string_lossy(),
+            "files_ok": supertonic_files_ok(&tts_dir),
+            "files_total": SUPERTONIC_FILES.len(),
+            "other_paths": other_paths,
+        } },
+        "stt": {
+            "compiled": stt_compiled,
+            "model": stt_model,
+            "available": stt_compiled && stt_found,
+            "path": stt_path,
+            "whisperModels": whisper_models,
+        },
+        "downloads": downloads,
+    })
+}
+
+// ── Unduhan model native — per-engine terpisah (SuperTonic saja / Whisper
+// saja / keduanya). Sumber resmi: HF Supertone/supertonic-3 (openrail, tidak
+// gated) & whisper.cpp (ggerganov). Progres dilacak per kunci target. ──
+
+pub const SUPERTONIC_HF: &str = "https://huggingface.co/Supertone/supertonic-3/resolve/main";
+/// Yang benar-benar dibutuhkan engine (4 onnx + 2 json + 10 voice style).
+pub const SUPERTONIC_FILES: &[&str] = &[
+    "onnx/duration_predictor.onnx",
+    "onnx/text_encoder.onnx",
+    "onnx/vector_estimator.onnx",
+    "onnx/vocoder.onnx",
+    "onnx/tts.json",
+    "onnx/unicode_indexer.json",
+    "voice_styles/F1.json",
+    "voice_styles/F2.json",
+    "voice_styles/F3.json",
+    "voice_styles/F4.json",
+    "voice_styles/F5.json",
+    "voice_styles/M1.json",
+    "voice_styles/M2.json",
+    "voice_styles/M3.json",
+    "voice_styles/M4.json",
+    "voice_styles/M5.json",
+];
+const WHISPER_HF: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+pub const WHISPER_MODELS: &[&str] = &["tiny", "base", "small", "medium"];
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DownloadState {
+    pub status: String, // "running" | "done" | "error"
+    pub progress: u64,  // byte selesai
+    pub total: u64,     // estimasi total (0 = tak diketahui)
+    pub file: String,   // file yang sedang/terakhir diambil
+    pub error: String,
+}
+
+fn downloads_cell() -> &'static Mutex<HashMap<String, DownloadState>> {
+    static CELL: OnceLock<Mutex<HashMap<String, DownloadState>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Semua lokasi cache SuperTonic yang dikenal: folder engines milik app +
+/// cache bersama `~/.cache/supertonic3` (konvensi Python). Dipakai pelaporan
+/// status dan penghapusan agar tidak ada salinan yang tak terlihat user.
+fn supertonic_candidate_dirs(paths: &AppPaths) -> Vec<PathBuf> {
+    let mut v = vec![paths.root.join("engines").join("models").join("supertonic3")];
+    if let Some(home) = dirs_home() {
+        v.push(home.join(".cache").join("supertonic3"));
+    }
+    v
+}
+
+/// Direktori tujuan unduhan SuperTonic: cache bersama bila sudah ada (dilengkapi
+/// di sana), selain itu folder engines milik app.
+fn supertonic_download_dir(paths: &AppPaths) -> PathBuf {
+    if let Some(home) = dirs_home() {
+        let shared = home.join(".cache").join("supertonic3");
+        if shared.exists() {
+            return shared;
+        }
+    }
+    paths.root.join("engines").join("models").join("supertonic3")
+}
+
+/// Berapa file manifest yang sudah ada di disk (untuk status UI).
+pub fn supertonic_files_ok(dir: &Path) -> usize {
+    SUPERTONIC_FILES
+        .iter()
+        .filter(|f| dir.join(f).exists())
+        .count()
+}
+
+/// Unduh satu file dengan streaming (progress per chunk). Skip bila sudah
+/// ada. Ditulis ATOMIK: ke `<nama>.part` lalu di-rename — unduhan yang putus
+/// tidak pernah meninggalkan file final terpotong (dulu: file setengah jadi
+/// dianggap "sudah ada" dan di-skip selamanya = korup permanen).
+async fn download_one(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    key: &str,
+    label: &str,
+) -> Result<(), String> {
+    if dest.exists() {
+        return Ok(());
+    }
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("gagal menghubungi {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} untuk {url}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+    {
+        let mut g = downloads_cell().lock().map_err(|_| "lock unduhan")?;
+        let st = g.get_mut(key).ok_or("state unduhan hilang")?;
+        st.file = label.to_string();
+        st.total = total;
+        st.progress = 0;
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("buat folder {}: {e}", parent.display()))?;
+    }
+    let part = dest.with_file_name(format!(
+        "{}.part",
+        dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    ));
+    let mut written: u64 = 0;
+    let hasil: Result<(), String> = async {
+        let mut file = tokio::fs::File::create(&part)
+            .await
+            .map_err(|e| format!("buat file {}: {e}", part.display()))?;
+        let mut stream = resp;
+        while let Some(chunk) = stream
+            .chunk()
+            .await
+            .map_err(|e| format!("aliran unduhan terputus: {e}"))?
+        {
+            tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+                .await
+                .map_err(|e| format!("tulis {}: {e}", part.display()))?;
+            written += chunk.len() as u64;
+            let mut g = downloads_cell().lock().map_err(|_| "lock unduhan")?;
+            if let Some(st) = g.get_mut(key) {
+                st.progress = written;
+            }
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
+            .await
+            .map_err(|e| format!("flush {}: {e}", part.display()))?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = hasil {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(e);
+    }
+    // Server melaporkan content-length tapi mengirim kurang = aliran terpotong
+    // diam-diam. Jangan pernah di-rename ke nama final.
+    if total > 0 && written != total {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("{label} terpotong ({written}/{total} byte) — coba unduh lagi"));
+    }
+    tokio::fs::rename(&part, dest)
+        .await
+        .map_err(|e| format!("finalisasi {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+/// Mulai unduhan (background). Idempoten: bila target masih berjalan, tidak
+/// disubmit ulang. target = "supertonic" | "whisper" (model: tiny/base/...).
+pub fn start_media_download(paths: AppPaths, target: &str, model: &str) -> Result<(), String> {
+    let (key, file, url, dest) = match target {
+        "supertonic" => {
+            let dir = supertonic_download_dir(&paths);
+            (
+                "supertonic".to_string(),
+                format!("model SuperTonic ({}/{} file)", supertonic_files_ok(&dir), SUPERTONIC_FILES.len()),
+                SUPERTONIC_HF.to_string(),
+                dir,
+            )
+        }
+        "whisper" => {
+            let m = model.trim().to_lowercase();
+            if !WHISPER_MODELS.contains(&m.as_str()) {
+                return Err(format!("model whisper '{}' tidak dikenal (pilih: {})", m, WHISPER_MODELS.join(", ")));
+            }
+            (
+                format!("whisper:{m}"),
+                format!("ggml-{m}.bin"),
+                format!("{WHISPER_HF}/ggml-{m}.bin"),
+                paths.root.join("engines").join("models").join(format!("ggml-{m}.bin")),
+            )
+        }
+        other => return Err(format!("target unduhan tidak dikenal: {other}")),
+    };
+    {
+        let mut g = downloads_cell().lock().map_err(|_| "lock unduhan")?;
+        if let Some(st) = g.get(&key) {
+            if st.status == "running" {
+                return Ok(()); // sedang berjalan — jangan submit ulang
+            }
+        }
+        g.insert(
+            key.clone(),
+            DownloadState { status: "running".into(), progress: 0, total: 0, file: file.clone(), error: String::new() },
+        );
+    }
+    tokio::spawn(async move {
+        let out = match key.as_str() {
+            "supertonic" => match http_client(600) {
+                Ok(client) => {
+                    let mut err = None;
+                    for f in SUPERTONIC_FILES {
+                        let u = format!("{SUPERTONIC_HF}/{f}");
+                        if let Err(e) = download_one(&client, &u, &dest.join(f), &key, f).await {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                    match err {
+                        Some(e) => Err(e),
+                        None => Ok(()),
+                    }
+                }
+                Err(e) => Err(e),
+            },
+            k if k.starts_with("whisper:") => match http_client(600) {
+                Ok(client) => download_one(&client, &url, &dest, &key, &file).await,
+                Err(e) => Err(e),
+            },
+            _ => Ok(()),
+        };
+        // Task background tak mengembalikan Result — kegagalan lock hanya
+        // berarti status akhir tak tercatat; unduhan itu sendiri sudah selesai.
+        if let Ok(mut g) = downloads_cell().lock() {
+            if let Some(st) = g.get_mut(&key) {
+                match out {
+                    Ok(()) => {
+                        st.status = "done".into();
+                        st.progress = st.total.max(1);
+                    }
+                    Err(e) => {
+                        st.status = "error".into();
+                        st.error = e;
+                    }
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+// ── Penghapusan model native — semua lokasi yang dikenal, supaya panel UI
+// bisa menawarkan "hapus sampai bersih" tanpa user menyelusuri file manager. ──
+
+/// Total byte sebuah file (None bila tak ada).
+fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len())
+}
+
+/// Total byte isi folder secara rekursif (folder tak ada → 0).
+fn dir_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(m) = e.metadata() {
+                total += m.len();
+            }
+        }
+    }
+    total
+}
+
+/// Hapus folder (rekursif) bila ada; return byte yang dibebaskan.
+fn remove_tree_summed(dir: &Path) -> Option<u64> {
+    if !dir.exists() {
+        return None;
+    }
+    let bytes = dir_size(dir);
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Some(bytes),
+        Err(e) => {
+            eprintln!("[media] gagal hapus {}: {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// Hapus satu file bila ada; return byte yang dibebaskan.
+fn remove_file_summed(path: &Path) -> Option<u64> {
+    let bytes = file_size(path)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => Some(bytes),
+        Err(e) => {
+            eprintln!("[media] gagal hapus {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+/// Dua folder pencarian model whisper (padanan `stt_lookup`).
+fn whisper_model_dirs(paths: &AppPaths) -> Vec<PathBuf> {
+    vec![
+        paths.root.join("engines").join("models"),
+        paths.root.join("engine").join("models"),
+    ]
+}
+
+/// Lupakan engine in-process yang sedang dimuat — dipanggil setelah model
+/// dihapus, agar synth/transcribe berikutnya memuat file baru dari disk
+/// (dulu: engine lama bertahan sampai restart meski filenya sudah diganti).
+fn reset_cached_engines() {
+    if let Some(cell) = TTS_ENGINE.get() {
+        if let Ok(mut g) = cell.lock() {
+            *g = None;
+        }
+    }
+    #[cfg(feature = "engine-stt")]
+    if let Some(cell) = STT_ENGINE.get() {
+        if let Ok(mut g) = cell.lock() {
+            *g = None;
+        }
+    }
+}
+
+/// Hapus model native dari disk — SEMUA lokasi yang dikenal, supaya "hapus"
+/// di panel benar-benar bersih. target = "supertonic" (hapus folder model di
+/// engines/models DAN cache bersama ~/.cache/supertonic3) | "whisper"
+/// (hapus ggml-*.bin; model kosong/"all" = semua varian, bukan cuma yang
+/// aktif). Menolak saat unduhan serumpun masih berjalan (file bisa saja
+/// ditulis balik setelah folder dihapus). Return daftar lokasi + byte.
+pub fn delete_media_model(paths: &AppPaths, target: &str, model: &str) -> Result<serde_json::Value, String> {
+    {
+        let g = downloads_cell().lock().map_err(|_| "lock unduhan")?;
+        let ada_berjalan = g.iter().any(|(k, st)| {
+            st.status == "running"
+                && match target {
+                    "supertonic" => k == "supertonic",
+                    "whisper" => k.starts_with("whisper:"),
+                    _ => false,
+                }
+        });
+        if ada_berjalan {
+            return Err("unduhan masih berjalan — tunggu sampai selesai/gagal lalu hapus lagi".into());
+        }
+    }
+    let rep = match target {
+        "supertonic" => delete_supertonic_dirs(&supertonic_candidate_dirs(paths)),
+        "whisper" => delete_whisper_bins(&whisper_model_dirs(paths), model),
+        other => return Err(format!("target unduhan tidak dikenal: {other}")),
+    };
+    if rep["deleted"].as_array().is_some_and(|a| !a.is_empty()) {
+        reset_cached_engines();
+    }
+    Ok(rep)
+}
+
+/// Inti penghapusan SuperTonic pada daftar folder eksplisit — dipisah dari
+/// `delete_media_model` agar test memakai folder sementara, bukan cache host.
+fn delete_supertonic_dirs(dirs: &[PathBuf]) -> serde_json::Value {
+    let mut deleted: Vec<serde_json::Value> = Vec::new();
+    let mut freed: u64 = 0;
+    for dir in dirs {
+        if let Some(b) = remove_tree_summed(dir) {
+            freed += b;
+            deleted.push(serde_json::json!({ "path": dir.to_string_lossy(), "bytes": b }));
+        }
+    }
+    serde_json::json!({ "deleted": deleted, "freed_bytes": freed })
+}
+
+/// Inti penghapusan whisper: satu varian (nama dibersihkan, padanan
+/// `stt_lookup`) atau semua ggml-*.bin saat model kosong/"all".
+fn delete_whisper_bins(dirs: &[PathBuf], model: &str) -> serde_json::Value {
+    let mut deleted: Vec<serde_json::Value> = Vec::new();
+    let mut freed: u64 = 0;
+    let m = model.trim().to_lowercase();
+    let want_all = m.is_empty() || m == "all";
+    for base in dirs {
+        if want_all {
+            let entries = match std::fs::read_dir(base) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let p = e.path();
+                // .part ikut dihapus: sisa unduhan terputus bukan data user.
+                if name.starts_with("ggml-")
+                    && (name.ends_with(".bin") || name.ends_with(".part"))
+                    && p.is_file()
+                {
+                    if let Some(b) = remove_file_summed(&p) {
+                        freed += b;
+                        deleted.push(serde_json::json!({ "path": p.to_string_lossy(), "bytes": b }));
+                    }
+                }
+            }
+        } else {
+            let clean: String = m.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-').collect();
+            let p = base.join(format!("ggml-{clean}.bin"));
+            if let Some(b) = remove_file_summed(&p) {
+                freed += b;
+                deleted.push(serde_json::json!({ "path": p.to_string_lossy(), "bytes": b }));
+            }
+        }
+    }
+    serde_json::json!({ "deleted": deleted, "freed_bytes": freed })
 }
 
 /// Transkripsi STT in-process (whisper). `audio_wav` = byte WAV; lang mis "id".
@@ -107,10 +588,10 @@ pub async fn transcribe_stt(paths: &AppPaths, audio_wav: Vec<u8>, lang: String, 
     .map_err(|e| format!("task STT gagal: {e}"))?
 }
 
-/// STT provider + model dari config.stt (fallback local / base).
+/// STT provider + model dari config.stt (fallback auto / base).
 pub fn stt_provider_model(config_path: &Path) -> (String, String, String) {
     let stt = stt_section(config_path);
-    let provider = stt.get("provider").and_then(|v| v.as_str()).unwrap_or("local").to_string();
+    let provider = stt.get("provider").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
     let model = stt.get("engineModel").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or("base").to_string();
     (provider, model, stt_lang_of(&stt))
 }
@@ -248,7 +729,9 @@ pub fn tts_voices(paths: &AppPaths) -> Vec<String> {
 // - "custom": `POST {text}` → audio biner ATAU JSON {audio|audioBase64|url}
 
 /// Konfigurasi TTS satu provider (disimpan di `config.json` → `tts`).
-#[derive(Debug, Clone, Default)]
+/// pitch/rate/nasal = DSP SuperTonic native (browser memakai pitch/rate-nya
+/// sendiri via speechSynthesis); default netral = tanpa efek.
+#[derive(Debug, Clone)]
 pub struct TtsConfig {
     pub provider: String,
     pub endpoint: String,
@@ -258,6 +741,27 @@ pub struct TtsConfig {
     pub style: String,
     pub format: String,
     pub lang: String,
+    pub pitch: f32,
+    pub rate: f32,
+    pub nasal: f32,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            provider: String::new(),
+            endpoint: String::new(),
+            api_key: String::new(),
+            voice: String::new(),
+            model: String::new(),
+            style: String::new(),
+            format: String::new(),
+            lang: String::new(),
+            pitch: 1.0,
+            rate: 1.0,
+            nasal: 0.0,
+        }
+    }
 }
 
 fn vs(v: &serde_json::Value, k: &str) -> String {
@@ -302,6 +806,25 @@ pub fn tts_config_from_value(stored_tts: &serde_json::Value, draft: &serde_json:
         lang: {
             let l = pick("lang");
             if l.is_empty() { "id".to_string() } else { l }
+        },
+        pitch: {
+            // Angka boleh datang sebagai f64 (JSON) — draft UI menang atas stored.
+            let p = d.get("pitch").and_then(|x| x.as_f64())
+                .or_else(|| stored_tts.get("pitch").and_then(|x| x.as_f64()))
+                .unwrap_or(1.0);
+            (p.clamp(0.5, 2.0)) as f32
+        },
+        rate: {
+            let r = d.get("rate").and_then(|x| x.as_f64())
+                .or_else(|| stored_tts.get("rate").and_then(|x| x.as_f64()))
+                .unwrap_or(1.0);
+            (r.clamp(0.5, 2.0)) as f32
+        },
+        nasal: {
+            let n = d.get("nasal").and_then(|x| x.as_f64())
+                .or_else(|| stored_tts.get("nasal").and_then(|x| x.as_f64()))
+                .unwrap_or(0.0);
+            (n.clamp(0.0, 1.0)) as f32
         },
     }
 }
@@ -356,8 +879,18 @@ pub fn openai_base(endpoint: &str) -> String {
     b.trim_end_matches('/').to_string()
 }
 
-fn b64_to_bytes(b64: &str) -> Result<Vec<u8>, String> {
-    use base64::Engine as _;
+/// Payload `POST <base>/v1/audio/speech`. `omit_model_voice`: wrapper tertentu
+/// (mis. tunnel TTS pribadi) memakai model/voice internalnya dan menolak kedua
+/// field itu — kirim minimalis {input, response_format} saja.
+fn openai_tts_payload(text: &str, fmt: &str, model: &str, voice: &str, omit_model_voice: bool) -> serde_json::Value {
+    if omit_model_voice {
+        serde_json::json!({ "input": text, "response_format": fmt })
+    } else {
+        serde_json::json!({ "model": model, "voice": voice, "input": text, "response_format": fmt })
+    }
+}
+
+fn b64_to_bytes(b64: &str) -> Result<Vec<u8>, String> {    use base64::Engine as _;
     let clean = b64.split(',').next_back().unwrap_or(b64);
     // `data:audio/...;base64,` prefix dibuang caller via split di atas
     // (ambil segmen terakhir); di sini terima base64 murni.
@@ -519,11 +1052,21 @@ pub async fn tts_audio_for(
     let endpoint = cfg.endpoint.trim().to_string();
     let api_key = cfg.api_key.trim().to_string();
 
+    // "auto" (default baru): pakai native yang TERSEDIA — SuperTonic bila
+    // modelnya ada; bila belum, error diteruskan supaya klien jatuh ke mesin
+    // browser (yang tidak pernah menyentuh server).
+    if provider == "auto" || provider.is_empty() {
+        let dir = tts_model_dir(paths);
+        if !dir.join("onnx").join("vocoder.onnx").exists() {
+            return Err("provider auto: model SuperTonic belum ada — pakai mesin browser, atau unduh lewat panel Mesin Native".into());
+        }
+    }
+
     // Native SuperTonic in-process — default proyek (tanpa endpoint/key).
-    if provider.is_empty() || provider == "supertonic" || provider == "native" {
+    if provider.is_empty() || provider == "auto" || provider == "supertonic" || provider == "native" {
         let voice = if cfg.voice.is_empty() { "F1" } else { cfg.voice.as_str() };
         let lang = if cfg.lang.is_empty() { "id" } else { cfg.lang.as_str() };
-        return synth_tts(paths, text, voice, lang)
+        return synth_tts(paths, text, voice, lang, cfg.pitch, cfg.rate, cfg.nasal)
             .await
             .map(|(buf, mime)| (buf, mime.to_string()));
     }
@@ -608,14 +1151,17 @@ pub async fn tts_audio_for(
         let mut model = if cfg.model.is_empty() { "tts-1".to_string() } else { cfg.model.clone() };
         let mut voice = if cfg.voice.is_empty() { "alloy".to_string() } else { cfg.voice.clone() };
         let mut fmt = if cfg.format.is_empty() { "mp3".to_string() } else { cfg.format.clone() };
+        // Wrapper tertentu (mis. tunnel TTS pribadi) memakai default internalnya
+        // dan MENOLAK field model/voice — terdeteksi via 5xx saat keduanya masih
+        // default bawaan; percobaan berikutnya kirim minimalis.
+        let mut omit_model_voice = false;
         // Server OpenAI-compat tak semua sama: sebagian menolak mp3, sebagian
         // tak punya model/voice default ("tts-1"/"alloy"). Perbaiki SATU hal
-        // per kegagalan (format → model → voice), maks 4 percobaan.
-        for _ in 0..4 {
-            let mut payload = serde_json::json!({
-                "model": model, "voice": voice, "input": text, "response_format": fmt,
-            });
-            if !style.is_empty()
+        // per kegagalan (format → minimalis → model → voice), maks 5 percobaan.
+        for _ in 0..5 {
+            let mut payload = openai_tts_payload(&text, &fmt, &model, &voice, omit_model_voice);
+            if !omit_model_voice
+                && !style.is_empty()
                 && (model.contains("gpt-4o-mini-tts") || model.contains("gpt-4o") && model.contains("tts") || model.contains("gpt-4") && model.contains("tts"))
             {
                 payload["instructions"] = serde_json::Value::String(style.clone());
@@ -639,10 +1185,15 @@ pub async fn tts_audio_for(
                     return Ok((buf, mime));
                 }
                 Ok(r) => {
+                    let status = r.status();
                     let msg = http_err_text(r).await;
                     let low = msg.to_lowercase();
-                    if fmt != "wav" && low.contains("response_format") {
+                    if fmt != "wav" && (low.contains("response_format") || (low.contains("wav") && low.contains("only"))) {
                         fmt = "wav".to_string();
+                        continue;
+                    }
+                    if !omit_model_voice && cfg.model.is_empty() && cfg.voice.is_empty() && status.is_server_error() {
+                        omit_model_voice = true;
                         continue;
                     }
                     if cfg.model.is_empty() && low.contains("model") {
@@ -826,9 +1377,12 @@ const TTS_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
 const TTS_CACHE_MAX: usize = 200;
 
 fn tts_cache_key(cfg: &TtsConfig, text: &str) -> String {
+    // pitch/rate/nasal ikut dikunci — nilai DSP berubah = audio berubah.
     let s = serde_json::json!([
         cfg.provider, cfg.endpoint, cfg.api_key, cfg.voice,
-        cfg.model, cfg.style, cfg.format, cfg.lang, text,
+        cfg.model, cfg.style, cfg.format, cfg.lang,
+        format!("{:.2}", cfg.pitch), format!("{:.2}", cfg.rate), format!("{:.2}", cfg.nasal),
+        text,
     ])
     .to_string();
     // FNV-1a 64-bit (stabil lintas proses, murah, cukup untuk kunci cache).
@@ -939,7 +1493,7 @@ pub const ELEVENLABS_TTS_MODELS: &[(&str, &str)] = &[
 pub async fn tts_catalog(provider: &str, api_key: &str, endpoint: &str) -> serde_json::Value {
     use serde_json::json;
     let p = provider.trim().to_lowercase();
-    if p.is_empty() || p == "supertonic" || p == "native" {
+    if p.is_empty() || p == "auto" || p == "supertonic" || p == "native" {
         // Diisi pemanggil dari voice_styles (lihat get_tts_options); di sini
         // fallback statis bila model belum ada di disk.
         return json!({
@@ -1166,9 +1720,124 @@ mod tests {
         assert!(s.contains("name=\"model\"\r\n\r\nwhisper-1\r\n"));
         assert!(s.contains("name=\"language\"\r\n\r\nid\r\n"));
         assert!(s.ends_with("--BOUNDRY--\r\n"));
-        // byte WAV utuh ada di body
-        let pos = s.find("audio/wav\r\n\r\n").unwrap() + "audio/wav\r\n\r\n".len();
-        assert_eq!(&body[pos..pos + wav.len()], &wav[..]);
+    }
+
+    #[test]
+    fn payload_openai_bisa_minimalis_tanpa_model_voice() {
+        let p = openai_tts_payload("hai", "wav", "tts-1", "alloy", false);
+        assert_eq!(p["model"], "tts-1");
+        assert_eq!(p["voice"], "alloy");
+        assert_eq!(p["input"], "hai");
+        assert_eq!(p["response_format"], "wav");
+        // Wrapper tanpa model/voice: kedua field DIBUANG, input tetap utuh.
+        let q = openai_tts_payload("hai", "wav", "tts-1", "alloy", true);
+        assert!(q.get("model").is_none());
+        assert!(q.get("voice").is_none());
+        assert_eq!(q["input"], "hai");
+        assert_eq!(q["response_format"], "wav");
+    }
+
+    #[test]
+    fn status_media_laporkan_ketersediaan_model() {
+        let tmp = std::env::temp_dir().join(format!("lumi_media_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("app");
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        let paths = AppPaths::from_root(&root);
+        let cfg_path = paths.data_dir.join("config.json");
+        std::fs::write(&cfg_path, r#"{"stt":{"provider":"local","engineModel":"base"}}"#).unwrap();
+
+        // Belum ada model sama sekali → semuanya belum tersedia, path dilaporkan.
+        // (supertonic bisa saja tersedia via cache host ~/.cache/supertonic3 —
+        // asersi konsisten terhadap disk, bukan terhadap keadaan host.)
+        let st = media_status(&paths, &cfg_path);
+        assert_eq!(
+            st["tts"]["supertonic"]["available"],
+            supertonic_dir_usable(&tts_model_dir(&paths))
+        );
+        assert_eq!(st["stt"]["compiled"], cfg!(feature = "engine-stt"));
+        assert_eq!(st["stt"]["available"], false);
+        assert!(st["tts"]["supertonic"]["path"].as_str().unwrap().contains("supertonic3"));
+
+        // Model SuperTonic palsu LENGKAP di engines/models → tersedia.
+        // (cache host ~/.cache ikut menang bila lengkap — sama-sama "tersedia",
+        // jadi files_ok 16 di direktori aktif mana pun.)
+        let st_dir = root.join("engines").join("models").join("supertonic3");
+        for f in SUPERTONIC_FILES {
+            let p = st_dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        let st2 = media_status(&paths, &cfg_path);
+        assert_eq!(st2["tts"]["supertonic"]["available"], true);
+        assert_eq!(st2["tts"]["supertonic"]["files_ok"], SUPERTONIC_FILES.len());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn supertonic_usable_butuh_manifest_lengkap() {
+        // Dulu "available" cukup vocoder.onnx — status hijau palsu padahal
+        // synth pasti gagal karena 15 file lain hilang.
+        let tmp = std::env::temp_dir().join(format!("lumi_media_usable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let dir = tmp.join("supertonic3");
+        let onnx = dir.join("onnx");
+        std::fs::create_dir_all(&onnx).unwrap();
+        std::fs::write(onnx.join("vocoder.onnx"), b"x").unwrap();
+        assert!(!supertonic_dir_usable(&dir));
+        for f in SUPERTONIC_FILES {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        assert!(supertonic_dir_usable(&dir));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn hapus_model_media_bersihkan_semua_lokasi() {
+        let tmp = std::env::temp_dir().join(format!("lumi_media_del_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let eng = tmp.join("engines").join("models");
+        let eng_dev = tmp.join("engine").join("models");
+        std::fs::create_dir_all(&eng).unwrap();
+        std::fs::create_dir_all(&eng_dev).unwrap();
+        std::fs::write(eng.join("ggml-tiny.bin"), [0u8; 10]).unwrap();
+        std::fs::write(eng.join("ggml-base.bin"), [0u8; 20]).unwrap();
+        std::fs::write(eng.join("ggml-base.bin.part"), [0u8; 3]).unwrap();
+        std::fs::write(eng.join("bukan-ggml.bin"), [0u8; 5]).unwrap();
+        std::fs::write(eng_dev.join("ggml-tiny.bin"), [0u8; 30]).unwrap();
+
+        // Satu varian → file di KEDUA folder pencarian hilang, sisanya utuh.
+        let rep = delete_whisper_bins(&[eng.clone(), eng_dev.clone()], "Tiny");
+        assert_eq!(rep["freed_bytes"], 40);
+        assert!(!eng.join("ggml-tiny.bin").exists());
+        assert!(!eng_dev.join("ggml-tiny.bin").exists());
+        assert!(eng.join("ggml-base.bin").exists());
+
+        // "all" → semua ggml-*.bin hilang (termasuk sisa .part), file
+        // non-ggml tak tersentuh.
+        let rep = delete_whisper_bins(&[eng.clone(), eng_dev.clone()], "all");
+        assert_eq!(rep["freed_bytes"], 23);
+        assert!(!eng.join("ggml-base.bin").exists());
+        assert!(!eng.join("ggml-base.bin.part").exists());
+        assert!(eng.join("bukan-ggml.bin").exists());
+
+        // SuperTonic → folder dihapus rekursif dan byte dilaporkan; folder
+        // lain di base (bukan-ggml.bin) tidak ikut.
+        let st_dir = eng.join("supertonic3").join("onnx");
+        std::fs::create_dir_all(&st_dir).unwrap();
+        std::fs::write(st_dir.join("vocoder.onnx"), [0u8; 7]).unwrap();
+        let rep = delete_supertonic_dirs(&[eng.join("supertonic3"), eng_dev.join("supertonic3")]);
+        assert_eq!(rep["freed_bytes"], 7);
+        assert_eq!(rep["deleted"].as_array().unwrap().len(), 1);
+        assert!(!eng.join("supertonic3").exists());
+        assert!(eng.join("bukan-ggml.bin").exists());
+
+        // Folder yang tak ada → bukan error, cuma tak masuk laporan.
+        let rep = delete_supertonic_dirs(&[tmp.join("tak-ada")]);
+        assert_eq!(rep["freed_bytes"], 0);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1200,7 +1869,7 @@ mod tests {
             r#"{"stt":{"provider":"openai","endpoint":"https://api.groq.com/openai/v1","apiKey":" sk-test123 ","apiModel":"whisper-large-v3-turbo"}}"#,
         )
         .unwrap();
-        let (endpoint, key, model, lang) = stt_openai_config(&f);
+        let (endpoint, key, model, _lang) = stt_openai_config(&f);
         assert_eq!(endpoint, "https://api.groq.com/openai/v1");
         assert_eq!(key, "sk-test123"); // trim
         assert_eq!(model, "whisper-large-v3-turbo");
@@ -1310,6 +1979,30 @@ mod tests {
         let mut cfg2 = cfg.clone();
         cfg2.voice = "Zephyr".into();
         assert_ne!(tts_cache_key(&cfg, "halo"), tts_cache_key(&cfg2, "halo"));
+    }
+
+    #[test]
+    fn tts_config_pitch_rate_nasal_diparse_dan_diclamp() {
+        // Default netral: tanpa efek.
+        let d = tts_config_from_value(&serde_json::Value::Null, &serde_json::Value::Null);
+        assert_eq!(d.pitch, 1.0);
+        assert_eq!(d.rate, 1.0);
+        assert_eq!(d.nasal, 0.0);
+        // Draft UI menang atas stored; di-clamp ke rentang aman DSP.
+        let stored = serde_json::json!({ "pitch": 1.15 });
+        let draft = serde_json::json!({ "pitch": 9.0, "rate": 0.1, "nasal": 0.5 });
+        let c = tts_config_from_value(&stored, &draft);
+        assert_eq!(c.pitch, 2.0);
+        assert_eq!(c.rate, 0.5);
+        assert_eq!(c.nasal, 0.5);
+        // Draft tak berisi pitch → pakai stored (1.15), bukan default.
+        let c2 = tts_config_from_value(&stored, &serde_json::json!({ "nasal": 1 }));
+        assert!((c2.pitch - 1.15).abs() < 1e-6);
+        assert_eq!(c2.nasal, 1.0);
+        // Cache key peka pitch: nilai DSP beda = audio beda, tak boleh nyangkut.
+        let mut hi = c2.clone();
+        hi.pitch = 1.3;
+        assert_ne!(tts_cache_key(&c2, "hai"), tts_cache_key(&hi, "hai"));
     }
 
     #[tokio::test]

@@ -89,8 +89,9 @@ export function toMotion3(asset: MotionAsset, opts: ToMotion3Opts): ToMotion3Res
     if (tr.kind !== "param" || !Array.isArray(tr.keys)) continue;
     const keys = tr.keys.filter((k: any) => finite(k?.t) && finite(k?.v));
     if (!keys.length) continue;
-    // Kurva motion3 diawali nilai awal; sisanya daftar segmen.
-    const curve: unknown[] = [round4(keys[0].v)];
+    // Kurva motion3 diawali titik pertama [t0, v0] (format Cubism), sisanya
+    // daftar segmen.
+    const curve: unknown[] = [round4(keys[0].t), round4(keys[0].v)];
     totalPoints += 1;
     let segCount = 0;
     for (let i = 0; i < keys.length - 1; i++) {
@@ -276,11 +277,15 @@ function curveSegmentsToKeys(
   warnings: string[],
   notify: { onInverse(): void; onUnknown(type: number): void },
 ): any[] {
-  const v0 = Number(segs[0]);
-  if (!finite(v0)) return [];
-  const keys: any[] = [{ t: 0, v: round4(v0) }];
+  // Format Cubism: Segments diawali DUA angka titik pertama [t0, v0], baru
+  // deretan segmen. (Titik awal motion native praktis selalu t0=0, tapi
+  // dibaca apa adanya biar setia.)
+  const t0 = Number(segs[0]);
+  const v0 = Number(segs[1]);
+  if (!finite(t0) || !finite(v0)) return [];
+  const keys: any[] = [{ t: round4(t0), v: round4(v0) }];
   let prev = keys[0];
-  let i = 1;
+  let i = 2;
   while (i < segs.length) {
     const type = Number(segs[i]);
     i += 1;

@@ -1,5 +1,6 @@
 /** Control plane Browser pada tab teknis; DOM aman tanpa innerHTML. */
 import type { BrowserState } from "../../shared/browser-types";
+import { apiUrl } from "../transport";
 import { t } from "../i18n/index";
 
 const DEFAULT_URL = "https://example.com";
@@ -29,7 +30,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 }
 
 async function post(path: string, body: object): Promise<any> {
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
@@ -128,7 +129,7 @@ function mountBrowserPanel(root: HTMLElement): () => void {
   async function refreshStatus(): Promise<void> {
     if (!isVisible(root) || destroyed) return;
     try {
-      const response = await fetch("/api/browser/status", { cache: "no-store" });
+      const response = await fetch(apiUrl("/api/browser/status"), { cache: "no-store" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setState(await response.json());
     } catch (error) {
@@ -139,7 +140,7 @@ function mountBrowserPanel(root: HTMLElement): () => void {
   async function refreshScreenshot(): Promise<void> {
     if (!isVisible(root) || destroyed || busy || !connected) return;
     try {
-      const response = await fetch(`/api/browser/screenshot?format=jpeg&quality=70&_=${Date.now()}`, { cache: "no-store" });
+      const response = await fetch(apiUrl(`/api/browser/screenshot?format=jpeg&quality=70&_=${Date.now()}`), { cache: "no-store" });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${response.status}`);

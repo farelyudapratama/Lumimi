@@ -100,7 +100,11 @@ ok('tombol Reset Pose ada di atas daftar preset (label lewat i18n)',
   /resetBtn\.textContent = __t\("sheet\.resetPose"\);/.test(appSrc));
 ok('setiap ekspresi teradopsi punya tombol tes (pasang di model, label lewat i18n)',
   /testBtn\.textContent = __t\("sheet\.testBtn"\);/.test(appSrc) &&
-  /window\.__live2dAgent\.setExpression\(e\.Name, 1\)/.test(appSrc));
+  /await state\.model\.expression\(e\.Name\)/.test(appSrc));
+ok('tes ekspresi yang belum dikenal model memicu muat ulang lalu status jujur (bukan gagal senyap)',
+  /state\.modelExpressions \|\| \[\]\)\.some\(/.test(appSrc) &&
+  /if \(!known\) \{[\s\S]{0,400}await loadModel\(state\.modelPath\);/.test(appSrc) &&
+  /__t\("sheet\.exprFail"/.test(appSrc));
 ok('hint System Prompt menjelaskan scope koneksi (persona tetap di Catatan Karakter)',
   /Persona karakter jangan di sini: pakai Catatan Karakter/.test(htmlSrc));
 

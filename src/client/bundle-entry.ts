@@ -23,10 +23,13 @@ import { MotionRuntime } from "./animation/motion-runtime";
 import * as MotionTaxonomy from "./engine/motion-taxonomy";
 import * as Framing from "./engine/framing";
 import * as RoleMapping from "./engine/role-mapping";
+import * as MouthCandidates from "./engine/mouth-candidates";
 import { collectNativeExpressions } from "./engine/native-expressions";
 import { buildNativeClips, buildNativeClipsFromCounts } from "./engine/native-clips";
 import * as LipSync from "./speech/lip-sync";
 import { createSpeechPolicy } from "./speech/speech-policy";
+import * as Character from "./character/runtime";
+import { directorToIntents, behaviorToIntents } from "./character/adapters";
 import * as i18n from "./i18n/index";
 import { transport } from "./transport/index";
 import "./agent/directive-parser";
@@ -49,6 +52,8 @@ if (typeof window !== "undefined") {
   // Role mapping & skala referensi (murni) — sumber kebenaran tunggal;
   // app.js legacy memanggil lewat window.__roleMapping (wrapper tipis).
   window.__roleMapping = RoleMapping;
+  // Kandidat param mulut (Lab Mulut) — murni; keputusan kepemilikan milik user.
+  window.__mouthCandidates = MouthCandidates;
   window.__nativeExpressions = { collect: collectNativeExpressions };
   // Klip motion native per-file — app.js memakainya untuk registry per-klip:
   // grup "" dan klip di grup multi-klip kini teralamat exact (bukan acak).
@@ -59,6 +64,15 @@ if (typeof window !== "undefined") {
   // Konversi dua arah Motion Asset ↔ .motion3.json — dipakai Motion Studio
   // (tombol Ekspor + Impor). Murni; role→param di-resolve pemanggil.
   window.__motionIO = { toMotion3, motion3ToAsset };
+  // Character Runtime + adapter keputusan → Intent semantik. Adapter murni
+  // (Director/behavior dinormalkan dulu); runtime-lah yang mengarbitrase slot
+  // base/action/expression — tak pernah menyentuh param Live2D langsung.
+  window.__characterRuntime = {
+    CharacterRuntime: Character.CharacterRuntime,
+    create: () => new Character.CharacterRuntime(),
+    directorToIntents,
+    behaviorToIntents,
+  };
   // Rumus framing panggung (murni) — dipakai legacy frameModel. upper/full
   // hanya fungsi TINGGI stage (anti-gepeng saat splitter didrag).
   window.__framing = Framing;

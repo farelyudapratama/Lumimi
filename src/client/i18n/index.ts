@@ -1,5 +1,7 @@
 /**
- * client/i18n — penerjemah UI ringan (zero-dep) untuk Lumimi.
+ * client/i18n — penerjemah UI ringan (zero-dep: tanpa paket eksternal; satu
+ * import internal diizinkan — seam transport — untuk mirror bahasa ke server
+ * dengan basis yang selalu benar walau port server bergeser).
  *
  * Prinsip:
  *  - Bahasa "id" adalah IDENTITY/fallback: kunci tidak ketemu di kamus bahasa
@@ -17,6 +19,7 @@
  *    memperlakukannya sebagai "id" (server tidak bisa mendeteksi locale
  *    browser) — klien yang menulis pilihan konkret saat first-run.
  */
+import { apiUrl, initLoopback } from "../transport";
 import { DICT_ID } from "./dict-id";
 import { DICT_EN } from "./dict-en";
 
@@ -84,11 +87,19 @@ export function apply(root: ParentNode = document): void {
 }
 
 function persistToServer(l: Lang): void {
-  fetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "saveI18n", i18n: { lang: l } }),
-  }).catch(() => {});
+  // Selesaikan basis dulu (embedded → IPC server_port; dev: no-op) supaya
+  // mirror bahasa tidak melayang ke origin salah saat port server bergeser.
+  // Gagal kirim = diam — localStorage tetap sumber keputusan bahasa.
+  initLoopback()
+    .catch(() => null)
+    .then(() =>
+      fetch(apiUrl("/api/config"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "saveI18n", i18n: { lang: l } }),
+      }),
+    )
+    .catch(() => {});
 }
 
 /** Inisialisasi sinkron (bundle.js dieksekusi sebelum app.js, DOM sudah ter-parse):
@@ -113,8 +124,11 @@ export function init(): void {
 
   // Rekonsiliasi first-run: bila config sudah menyimpan pilihan konkret
   // (mis. dari mesin/browser lain), itu menang atas deteksi otomatis.
-  fetch("/api/config")
-    .then((r) => (r.ok ? r.json() : null))
+  // Basis API lewat seam (apiUrl) — relatif salah di origin embedded.
+  initLoopback()
+    .catch(() => null)
+    .then(() => fetch(apiUrl("/api/config")))
+    .then((r) => (r && r.ok ? r.json() : null))
     .then((cfg: any) => {
       if (stored) return; // repeat visit — localStorage adalah keputusan final
       const fromConfig = normalize(cfg?.i18n?.lang);

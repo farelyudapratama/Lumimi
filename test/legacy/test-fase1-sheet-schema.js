@@ -66,6 +66,7 @@ const defaultsMatch = appSrc.match(/const MODEL_CONFIG_DEFAULTS = \{[\s\S]*?\n  
 const framingMatch = appSrc.match(/const FRAMING_MODES = \[[^\]]*\];/);
 const rateMatch = appSrc.match(/const TTS_RATE_RANGE = \{[^}]*\};/);
 const pitchMatch = appSrc.match(/const TTS_PITCH_RANGE = \{[^}]*\};/);
+const nasalMatch = appSrc.match(/const TTS_NASAL_RANGE = \{[^}]*\};/);
 const clampMatch = appSrc.match(/const clamp = \(v, lo, hi\) => [^;]*;/);
 
 section('1. Schema version plumbing');
@@ -109,6 +110,7 @@ vm.runInContext([
   framingMatch ? framingMatch[0] : '',
   rateMatch ? rateMatch[0] : '',
   pitchMatch ? pitchMatch[0] : '',
+  nasalMatch ? nasalMatch[0] : '',
   catsMatch ? catsMatch[0] : '',
   boundsMatch ? boundsMatch[0] : '',
   stepLimitsMatch ? stepLimitsMatch[0] : '',
@@ -293,6 +295,11 @@ ok('Infinity pitch falls back to default',
 ok('rate below 0.5 is clamped up', normalizeModelConfig({ ttsRate: 0.1 }).ttsRate === 0.5);
 ok('rate above 2 is clamped down', normalizeModelConfig({ ttsRate: 10 }).ttsRate === 2);
 ok('rate 1.5 passes through', normalizeModelConfig({ ttsRate: 1.5 }).ttsRate === 1.5);
+
+ok('nasal 0.5 passes through', normalizeModelConfig({ ttsNasal: 0.5 }).ttsNasal === 0.5);
+ok('nasal above 1 is clamped down', normalizeModelConfig({ ttsNasal: 5 }).ttsNasal === 1);
+ok('negative nasal is clamped up', normalizeModelConfig({ ttsNasal: -2 }).ttsNasal === 0);
+ok('NaN nasal falls back to default', normalizeModelConfig({ ttsNasal: NaN }).ttsNasal === DEFAULTS.ttsNasal);
 
 ok('valid BCP-47 lang is accepted',
   normalizeModelConfig({ ttsLang: 'ja-JP' }).ttsLang === 'ja-JP');

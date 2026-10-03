@@ -182,9 +182,9 @@ pub async fn handle_animate_text(config_path: &Path, body: &Value) -> Value {
             "\nPARAMETER MENTAH MODEL (opsional, untuk ekspresi lebih menjiwai — hormati penjelasan di atas):"
         };
         let tail = if assets_poor {
-            "Setel LEWAT field \"params\": {\"<id persis>\": <nilai DI DALAM rentang>} di SETIAP segmen ekspresif; gerakkan mata/alis/mulut/kepala sesuai emosi. Jangan mengarang id di luar daftar."
+            "Setel LEWAT field \"params\": {\"<id persis>\": <nilai DI DALAM rentang>} di SETIAP segmen ekspresif; gerakkan mata/alis/kepala sesuai emosi. Bukaan mulut diurus OTOMATIS oleh lipsync — jangan disetel. Jangan mengarang id di luar daftar."
         } else {
-            "Boleh setel LEWAT field \"params\": {\"<id persis>\": <nilai DI DALAM rentang>}. Hanya setel yang benar-benar menambah nyawa; kosongkan bila tak perlu. Jangan mengarang id di luar daftar."
+            "Boleh setel LEWAT field \"params\": {\"<id persis>\": <nilai DI DALAM rentang>}. Hanya setel yang benar-benar menambah nyawa; kosongkan bila tak perlu. Bukaan mulut diurus otomatis (lipsync) — jangan disetel. Jangan mengarang id di luar daftar."
         };
         format!("{lead}\n{lines}\n{tail}\n")
     } else {

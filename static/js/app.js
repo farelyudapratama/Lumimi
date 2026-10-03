@@ -96,6 +96,9 @@
     talking: false,
     mouthRest: 0,
     mouthTimer: null,
+    // Lab Mulut: offset ADD per param (eksperimen). Marks/manual disimpan
+    // per model di localStorage, bukan di sini.
+    mouthLab: { offsets: {}, modelKey: "" },
 
     look: {
       ax: 0,
@@ -179,6 +182,15 @@
     clipName: null,
     clipStartedAt: 0,
 
+    // Character Runtime produksi — singleton lazy lewat facade
+    // getCharacterRuntime(); instance YANG SAMA dipakai Runtime Lab supaya
+    // log keputusan lab memperlihatkan keputusan live produksi.
+    characterRuntime: null,
+    // Routing keputusan behavior → Character Runtime. Default OFF: toggle
+    // off = aplikasi persis jalur legacy. Persist di localStorage global
+    // "lumimi_runtime_routing" (=== "1").
+    runtimeRouting: false,
+
     emoTarget: {},
     emoCur: {},
 
@@ -195,6 +207,10 @@
 
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
+
+  // Bendera routing dibaca segera (fungsi di-hoist dari bagian singleton di
+  // bawah) — keputusan behavior tidak boleh jalan dengan state setengah init.
+  runtimeRoutingLoad();
 
   let refreshConfigForm = () => {};
 
@@ -1117,6 +1133,26 @@
       // pembersihan overrides saat bicara selesai tetap jalan di jalur TTS.
       applyOverrides();
       applyRawDrive();
+      // Lab Mulut: offset ADD eksperimen — menumpuk di atas lipsync
+      // (flush order 900 setelah 450), bukan menimpanya.
+      applyMouthLabOffsets();
+      // Sinyal selalu-on untuk Character Runtime (Tahap B): saat routing
+      // aktif dan runtime ada, umpan speech/lipsync dari state TTS existing
+      // lalu tick (R7: expire TTL, resume base, admit antrian). Murah dan
+      // di-guard — dipanggil tiap frame.
+      if (state.runtimeRouting && state.characterRuntime) {
+        try {
+          const audio = state.ttsAudio;
+          const audioPlaying = !!(audio && !audio.paused && !audio.ended);
+          state.characterRuntime.speechActive(
+            !!(state.talking || audioPlaying),
+          );
+          state.characterRuntime.lipsyncActive(
+            !!(state.audioLipSync && state.audioLipSync.active && audioPlaying),
+          );
+          state.characterRuntime.tick();
+        } catch (e) {}
+      }
       state._tickCount = (state._tickCount || 0) + 1;
       state.idleRAF = requestAnimationFrame(tick);
     };
@@ -1218,10 +1254,195 @@
     }
   }
 
+  // ── Character Runtime produksi (singleton) + routing ────────────────────
+  // Satu instance dibagi dua pemakai: jalur produksi (routing keputusan
+  // behavior idle) dan Runtime Lab (indikator/inject manual). Bridge di bawah
+  // memetakan intent semantik ke eksekutor existing — TIDAK ada penulisan
+  // param Live2D langsung di sini. Semua akses di-guard: bundle TS bisa belum
+  // termuat (window.__characterRuntime absen → null, jalur legacy tetap jalan).
+  function isRuntimeRouting() {
+    return !!state.runtimeRouting;
+  }
+
+  function runtimeRoutingLoad() {
+    try {
+      state.runtimeRouting = localStorage.getItem("lumimi_runtime_routing") === "1";
+    } catch (e) {
+      state.runtimeRouting = false;
+    }
+  }
+
+  function runtimeRoutingSave(on) {
+    state.runtimeRouting = !!on;
+    try {
+      localStorage.setItem("lumimi_runtime_routing", state.runtimeRouting ? "1" : "0");
+    } catch (e) {}
+  }
+
+  // Bridge produksi. CATATAN KANAL TUNGGAL: startAction menghentikan motion
+  // native yang sedang main (base ikut berhenti) — status base dicatat bridge
+  // sendiri dan runtime yang memanggil resumeBase (tidak ada double-resume
+  // di sini).
+  function makeCharacterBridge() {
+    return {
+      now() {
+        return performance.now();
+      },
+      startBase(intent) {
+        // Rantai fallback: klip emosi cocok → klip idle semantik → klip
+        // idle-safe pertama dari taxonomy model.
+        let id = playEmotionClip(intent.id);
+        if (!id && playIdleClip(intent.id)) id = intent.id;
+        if (!id) {
+          const safe = idleSafeClips()[0];
+          if (safe && playIdleClip(safe.id)) id = safe.id;
+        }
+        return {
+          id: id || intent.id,
+          playing: !!id,
+          paused: false,
+          stopped: false,
+        };
+      },
+      pauseBase(handle) {
+        try {
+          if (state.model && state.model.stopMotions) state.model.stopMotions();
+        } catch (e) {}
+        try {
+          state.clipUntil = 0; // auto-idle boleh jalan lagi
+          state.clipName = null;
+        } catch (e) {}
+        if (handle) handle.paused = true;
+      },
+      resumeBase(handle) {
+        if (!handle || handle.stopped) return;
+        handle.paused = false;
+        let id = playEmotionClip(handle.id);
+        if (!id && playIdleClip(handle.id)) id = handle.id;
+        if (!id) {
+          const safe = idleSafeClips()[0];
+          if (safe && playIdleClip(safe.id)) id = safe.id;
+        }
+        if (id) handle.id = id;
+      },
+      stopBase(handle) {
+        try {
+          if (state.model && state.model.stopMotions) state.model.stopMotions();
+        } catch (e) {}
+        try {
+          state.clipUntil = 0;
+          state.clipName = null;
+        } catch (e) {}
+        if (handle) {
+          handle.paused = false;
+          handle.stopped = true;
+        }
+      },
+      startAction(intent) {
+        // Satu kanal motion: klip baru menggantikan klip yang sedang main.
+        // Rantai: Motion Studio runtime → gesture → klip emosi → klip idle.
+        // playGesture void: keberhasilan dideteksi dari perubahan
+        // clipName/clipUntil (atau return playMotion).
+        const before = state.clipName;
+        const until = state.clipUntil;
+        let id = null;
+        try {
+          if (haveMotionSystem && motionRuntime.play(intent.id, { fromLLM: true, priority: 80 }))
+            id = intent.id;
+        } catch (e) {}
+        if (!id) {
+          try {
+            playGesture(intent.id);
+          } catch (e) {}
+          if (state.clipName !== before || state.clipUntil > until) id = intent.id;
+        }
+        if (!id && playEmotionClip(intent.id)) id = intent.id;
+        if (!id && playIdleClip(intent.id)) id = intent.id;
+        return {
+          id: id || intent.id,
+          playing: !!id,
+          paused: false,
+          stopped: false,
+        };
+      },
+      stopAction() {
+        try {
+          if (state.model && state.model.stopMotions) state.model.stopMotions();
+        } catch (e) {}
+        try {
+          state.clipUntil = 0;
+          state.clipName = null;
+        } catch (e) {}
+        // Tanpa resume — runtime yang memanggil resumeBase.
+      },
+      setExpression(intent) {
+        try {
+          if (
+            window.__live2dAgent &&
+            typeof window.__live2dAgent.setExpression === "function"
+          )
+            window.__live2dAgent.setExpression(intent.id);
+        } catch (e) {}
+      },
+      clearExpression() {
+        try {
+          resetEmotion();
+        } catch (e) {}
+      },
+    };
+  }
+
+  // Lazy singleton: dibuat sekali dengan bridge produksi, lalu dipakai
+  // bersama Runtime Lab (lab memanggil facade ini, bukan create sendiri).
+  function getCharacterRuntime() {
+    if (state.characterRuntime) return state.characterRuntime;
+    if (
+      !window.__characterRuntime ||
+      typeof window.__characterRuntime.create !== "function"
+    )
+      return null;
+    try {
+      const rt = window.__characterRuntime.create();
+      rt.attach(makeCharacterBridge());
+      state.characterRuntime = rt;
+    } catch (e) {
+      console.warn(
+        "[runtime] gagal membuat Character Runtime:",
+        (e && e.message) || e,
+      );
+      return null;
+    }
+    return state.characterRuntime;
+  }
+
   function applyBehaviorDecision(d) {
     if (!state.model || !state.idleEnabled || state.aiLock || clipIsPlaying())
       return;
     state.lastIdleActionAt = Date.now();
+    // Routing (toggle Runtime Lab): keputusan behavior dinormalkan adapter
+    // (behaviorToIntents) → intent semantik → runtime mengarbitrase (R1–R10)
+    // → bridge produksi. Fail-safe: error apa pun jatuh ke jalur legacy di
+    // bawah, app tetap berperilaku seperti sebelum routing ada.
+    if (isRuntimeRouting()) {
+      try {
+        const factory = window.__characterRuntime;
+        const rt = getCharacterRuntime();
+        if (rt && factory && typeof factory.behaviorToIntents === "function") {
+          const { intents } = factory.behaviorToIntents(d);
+          for (const it of intents) {
+            try {
+              rt.submit(it);
+            } catch (e) {}
+          }
+          return;
+        }
+      } catch (e) {
+        console.warn(
+          "[runtime] routing behavior gagal — jatuh ke jalur legacy:",
+          (e && e.message) || e,
+        );
+      }
+    }
     const gazeKind = d && d.gaze && GAZE_INTENTS[d.gaze] ? d.gaze : null;
     const hold =
       d && Number.isFinite(d.holdMs) ? clamp(d.holdMs, 800, 8000) : undefined;
@@ -2413,6 +2634,11 @@
   };
   let MOTION = { enabled: false, gain: 1.5 };
   async function loadAppConfig() {
+    // Embedded: API awal = location.origin (tauri.localhost) — SALAH untuk
+    // /api. Tunggu resolusi loopback dulu (IPC server_port, di-cache), kalau
+    // tidak TTS_CFG terjebak nilai awal "browser" dan provider default tak
+    // pernah tampil.
+    try { await refreshApiBase(); } catch (e) {}
     try {
       const r = await fetch(API + "/api/config");
       const d = await r.json();
@@ -2425,7 +2651,13 @@
       window.__ttsCfg = TTS_CFG;
       // Form TTS mungkin sudah ter-init sebelum config tiba — paint ulang.
       if (window.__paintTTSForm) window.__paintTTSForm(TTS_CFG);
-      if (d.events) Object.assign(EVENTS, d.events);
+      if (d.events) {
+        Object.assign(EVENTS, d.events);
+        // Form inisiatif di-paint ulang supaya isinya = config aktual, bukan
+        // default yang tertinggal dari init (sumber inkonsistensi first-open).
+        if (typeof window.__paintBehaviourForm === "function")
+          window.__paintBehaviourForm();
+      }
       if (d.camera) Object.assign(CAMERA, d.camera);
       if (d.motion) {
         MOTION.enabled = !!d.motion.enabled;
@@ -2616,27 +2848,41 @@
   }
 
   async function fetchTTSAudio(text, ttsLang, parentSignal) {
-    // Timeout + retry: kadang koneksi request pertama (dari handler klik)
-    // menggantung di server tanpa jawaban. Abort menutup socket beku; retry
-    // memakai koneksi segar — dan teks yang sama biasanya sudah ter-cache
-    // di server sehingga nyaris instan. Saat bahasa suara tetap aktif,
-    // server menerjemahkan dulu (+latensi LLM) → batas dilonggarkan 45 dtk.
-    // parentSignal = abort claim speech: preempt memutus juga request
-    // in-flight (hemat billing provider).
+    // Timeout HANYA jaring penggantung (socket beku), BUKAN ukuran kegagalan:
+    // generate remote yang lambat — Gemini terukur 10-16 dtk, paket
+    // hematRequest ±800 char, antrean provider — bukan kegagalan, jadi tidak
+    // boleh memicu fallback suara browser (laporan user: generate lama
+    // tiba-tiba digantikan suara browser). Budget melampaui batas server
+    // (upstream provider 60 dtk + terjemah LLM 60 dtk + retry internal
+    // Gemini) supaya yang di-abort hanya benar-benar menggantung.
+    // Abort menutup socket beku; retry memakai koneksi segar — dan teks
+    // yang sama biasanya sudah ter-cache di server sehingga nyaris instan.
+    // Bahasa suara tetap → server bisa menerjemahkan dulu (+latensi LLM) →
+    // budget ditambah. parentSignal = abort claim speech: preempt memutus
+    // juga request in-flight (hemat billing provider) dan TIDAK di-retry.
     const hasLang = !!ttsLang;
+    const budgetMs = hasLang ? 150000 : 120000;
     for (let attempt = 0; ; attempt++) {
       const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), hasLang ? 45000 : 20000);
+      const to = setTimeout(() => ctrl.abort(), budgetMs);
       if (parentSignal)
         parentSignal.addEventListener("abort", () => ctrl.abort(), {
           once: true,
         });
       try {
+        // Pitch/rate/nasal dari config model ikut dikirim: browser memakainya
+        // via speechSynthesis, SuperTonic native memakainya via DSP server.
+        const vc = currentModelConfig() || {};
+        const ttsOverride = {
+          pitch: Number(vc.ttsPitch) || 1,
+          rate: Number(vc.ttsRate) || 1,
+          nasal: Number(vc.ttsNasal) || 0,
+        };
         const resp = await fetch(API + "/api/tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(
-            hasLang ? { text, ttsLang } : { text },
+            hasLang ? { text, ttsLang, tts: ttsOverride } : { text, tts: ttsOverride },
           ),
           signal: ctrl.signal,
         });
@@ -2650,8 +2896,14 @@
         return blob;
       } catch (e) {
         clearTimeout(to);
+        // Claim sudah digulingkan (preempt/stop) → jangan request ulang.
+        if (parentSignal && parentSignal.aborted) throw e;
         if (attempt >= 1 || (e && e.name !== "AbortError")) throw e;
-        console.warn("[TTS] request menggantung (timeout 20 dtk), coba ulang…");
+        console.warn(
+          "[TTS] request menggantung (timeout " +
+            Math.round(budgetMs / 1000) +
+            " dtk), coba ulang…",
+        );
       }
     }
   }
@@ -2719,6 +2971,39 @@
       return;
     }
     if (sess.fallbackTimer) clearTimeout(sess.fallbackTimer);
+    // "Bahasa suara" tetap: terjemahkan SEKALI untuk seluruh balasan, baru
+    // dipecah per segmen. Dulu tiap segmen diterjemahkan dalam panggilan LLM
+    // terisolasi — segmen pendek (seruan, sapaan) sering tidak ikut
+    // diterjemahkan, jadi suara campur bahasa antar segmen. Segmen tetap
+    // mengirim ttsLang: server mendeteksi teks sudah bahasa target → tanpa
+    // terjemah ulang. Gagal terjemah utuh → tiap segmen mencoba sendiri
+    // (perilaku lama sebagai jaring pengaman).
+    if (ttsLang) {
+      try {
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 30000);
+        if (sess.abort)
+          sess.abort.signal.addEventListener("abort", () => ctrl.abort(), {
+            once: true,
+          });
+        const r = await fetch(API + "/api/tts/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, ttsLang }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(to);
+        const d = await r.json().catch(() => ({}));
+        if (d && typeof d.text === "string" && d.text.trim())
+          text = d.text.trim();
+      } catch (e) {
+        console.warn(
+          "[TTS] terjemah utuh gagal — segmen mencoba sendiri:",
+          e && e.message,
+        );
+      }
+      if (!sess.isActive()) return; // digulingkan saat menerjemahkan
+    }
     // `let` — regroup adaptif mengganti isi segments setelah latensi diukur
     let segments = splitSpeechSegments(text);
     // Mode hemat request (API yang menagih per request): gabung semua kalimat
@@ -2740,7 +3025,12 @@
         // Audio bisa lebih lambat dari estimasi — jendela mulut ikut durasi
         // segmen + margin; audio nyata tetap yang menang di provider.
         state.extendMouth(text.length * 75 + 4000);
-        sess.fallbackTimer = setTimeout(markDone, 45000);
+        // Watchdog pemutar ikut panjang teks (rate 0.5 → durasi 2×): paket
+        // hematRequest ±800 char ≈ >1 menit audio, flat 45 dtk memotongnya.
+        sess.fallbackTimer = setTimeout(
+          markDone,
+          Math.max(45000, text.length * 150 + 20000),
+        );
         playTTSAudio(
           blob,
           () => {
@@ -2766,14 +3056,23 @@
     // me-resolve Promise segmen yang menggantung.
     let aborted = false;
     const dead = () => !sess.isActive();
-    const guard = () => {
+    // Watchdog per-fase, re-arm di tiap progres nyata: menunggu sintesis →
+    // budget lebar (generate lambat BUKAN gagal — fetchTTSAudio punya batas
+    // sendiri dan error asli tetap lewat), memutar audio → budget ikut
+    // durasi segmen. Flat 60 dtk memotong segmen lambat di tengah menunggu,
+    // lalu audio yang selesai terbuang (dead() → dibuang).
+    const WATCHDOG_FETCH_MS = 150000;
+    const guard = (ms) => {
       if (sess.fallbackTimer) clearTimeout(sess.fallbackTimer);
       sess.fallbackTimer = setTimeout(() => {
         aborted = true;
+        try {
+          if (state.ttsAudio) state.ttsAudio.pause();
+        } catch (e) {}
         markDone();
-      }, 60000);
+      }, ms);
     };
-    guard();
+    guard(WATCHDOG_FETCH_MS);
 
     const pending = new Map(); // i -> Promise<blob>
     const prefetch = (i) => {
@@ -2800,6 +3099,9 @@
         if (dead()) return;
         if (i === 0) reveal && reveal();
         const remaining = segments.slice(i).join(" ");
+        // Watchdog fetch masih terpasang — cabut dulu, pemutaran browser
+        // dijaga onend/onerror milik speechSynthesis.
+        if (sess.fallbackTimer) clearTimeout(sess.fallbackTimer);
         browserTTS(remaining, markDone, null);
         return;
       }
@@ -2840,9 +3142,12 @@
           },
           sess,
         );
-        guard();
+        // playbackRate bisa 0.5 → durasi 2× — budget 150 ms/char + margin.
+        guard(segText.length * 150 + 25000);
       });
       if (aborted || dead()) return;
+      // Fase berikutnya: menunggu sintesis segmen i+1 — watchdog fetch.
+      if (i + 1 < segments.length) guard(WATCHDOG_FETCH_MS);
       // state.talking & mulut dikelola reveal(); antar segmen tetap "talking".
     }
     if (!aborted && !dead()) markDone();
@@ -4111,6 +4416,8 @@
       pitchOut: $("#cfg-tts-pitch-out"),
       rate: $("#cfg-tts-rate"),
       rateOut: $("#cfg-tts-rate-out"),
+      nasal: $("#cfg-tts-nasal"),
+      nasalOut: $("#cfg-tts-nasal-out"),
       lang: $("#cfg-tts-lang"),
       sysVoice: $("#cfg-tts-sysvoice"),
       ttsProvider: $("#cfg-tts-provider"),
@@ -4124,8 +4431,12 @@
       ttsStylePick: $("#cfg-tts-style-pick"),
       ttsHemat: $("#cfg-tts-hemat"),
       btn: $("#btn-save-cfg"),
+      btnVoice: $("#btn-save-cfg-voice"),
       test: $("#btn-test-voice"),
       status: $("#cfg-status"),
+      statusVoice: $("#cfg-status-voice"),
+      modelStatus: $("#cfg-model-status"),
+      activeLine: $("#tts-active-line"),
       bgColor: $("#cfg-bg-color"),
       bgDim: $("#cfg-bg-dim"),
       bgDimOut: $("#cfg-bg-dim-out"),
@@ -4144,11 +4455,40 @@
 
     let bgImageDraft;
     function setCfgStatus(msg, kind) {
-      if (!cfgEls.status) return;
-      cfgEls.status.textContent = msg;
-      cfgEls.status.className = "note-status" + (kind ? " " + kind : "");
+      // Dua tab punya tombol simpan → status ditulis ke keduanya; toast
+      // tetap global supaya hasil terlihat dari tab mana pun.
+      for (const el of [cfgEls.status, cfgEls.statusVoice]) {
+        if (!el) continue;
+        el.textContent = msg;
+        el.className = "note-status" + (kind ? " " + kind : "");
+      }
       if (kind === "ok") window.showToast?.(__t("cfg.settingsSavedToast"), "success");
       else if (kind === "err") window.showToast?.(msg, "error");
+    }
+
+    /** Status strip "Model Aktif": identitas + keberadaan sheet, digambar
+     * dari state yang sudah ada di memori — buka panel = langsung benar,
+     * tanpa klik. */
+    function paintModelStatus() {
+      const el = cfgEls.modelStatus;
+      if (!el) return;
+      el.textContent = "";
+      const modelName = state.modelPath
+        ? decodeURIComponent(state.modelPath.split("/")[1] || "")
+        : "";
+      const name = document.createElement("strong");
+      name.textContent = modelName || __t("cfg.statusNoModel");
+      el.appendChild(name);
+      let sheet = null;
+      try {
+        sheet = state.lastSheet || loadCharacterSheet();
+      } catch (e) {}
+      const sheetLine = document.createElement("span");
+      sheetLine.className = "cfg-status-sheet" + (sheet ? " ok" : " warn");
+      sheetLine.textContent = sheet
+        ? __t("cfg.statusSheetOk")
+        : __t("cfg.statusSheetNone");
+      el.appendChild(sheetLine);
     }
 
     function paintConfigForm(cfg) {
@@ -4166,9 +4506,11 @@
       if (cfgEls.framing) cfgEls.framing.value = c.framing;
       if (cfgEls.pitch) cfgEls.pitch.value = String(c.ttsPitch);
       if (cfgEls.rate) cfgEls.rate.value = String(c.ttsRate);
+      if (cfgEls.nasal) cfgEls.nasal.value = String(c.ttsNasal);
 
       if (cfgEls.pitchOut) cfgEls.pitchOut.textContent = c.ttsPitch.toFixed(2);
       if (cfgEls.rateOut) cfgEls.rateOut.textContent = c.ttsRate.toFixed(2);
+      if (cfgEls.nasalOut) cfgEls.nasalOut.textContent = c.ttsNasal.toFixed(2);
       for (const [k, el, out] of [
         ["gazeHead", cfgEls.gazeHead, cfgEls.gazeHeadOut],
         ["gazeEyes", cfgEls.gazeEyes, cfgEls.gazeEyesOut],
@@ -4196,6 +4538,7 @@
       if (cfgEls.bgColor) cfgEls.bgColor.value = c.bgColor || "#16120c";
       if (cfgEls.bgDim) cfgEls.bgDim.value = String(c.bgDim);
       if (cfgEls.bgDimOut) cfgEls.bgDimOut.textContent = c.bgDim.toFixed(2);
+      paintModelStatus();
     }
     refreshConfigForm = () => paintConfigForm(loadModelConfigLocal());
 
@@ -4210,6 +4553,7 @@
       gazeBody: cfgEls.gazeBody ? Number(cfgEls.gazeBody.value) : undefined,
       ttsPitch: cfgEls.pitch ? Number(cfgEls.pitch.value) : undefined,
         ttsRate: cfgEls.rate ? Number(cfgEls.rate.value) : undefined,
+        ttsNasal: cfgEls.nasal ? Number(cfgEls.nasal.value) : undefined,
         ttsLang: cfgEls.lang ? cfgEls.lang.value : undefined,
         ttsVoiceName: cfgEls.sysVoice ? cfgEls.sysVoice.value : undefined,
         bgColor: cfgEls.bgColor ? cfgEls.bgColor.value : undefined,
@@ -4305,6 +4649,11 @@
         cfgEls.rateOut.textContent = Number(cfgEls.rate.value).toFixed(2);
       });
     }
+    if (cfgEls.nasal && cfgEls.nasalOut) {
+      cfgEls.nasal.addEventListener("input", () => {
+        cfgEls.nasalOut.textContent = Number(cfgEls.nasal.value).toFixed(2);
+      });
+    }
 
     // Gain gaze: live-apply ke view saat digeser (persist lewat tombol
     // Simpan — readConfigForm → saveModelConfig, pola sama dengan bg).
@@ -4349,62 +4698,68 @@
         setCfgStatus(__t("cfg.notSaved"), "");
       });
 
-    if (cfgEls.btn) {
-      cfgEls.btn.addEventListener("click", async () => {
-        cfgEls.btn.disabled = true;
-        setCfgStatus(__t("sys.saving"));
-        try {
-          const saved = await saveModelConfig(readConfigForm());
+    // Satu alur simpan untuk dua tab (Karakter & Suara): sheet.config
+    // (per-model) + TTS global bila bagian remote disentuh. Form dibaca
+    // lintas tab — semua elemen tetap satu DOM.
+    async function saveSettingsFlow() {
+      cfgEls.btn && (cfgEls.btn.disabled = true);
+      cfgEls.btnVoice && (cfgEls.btnVoice.disabled = true);
+      setCfgStatus(__t("sys.saving"));
+      try {
+        const saved = await saveModelConfig(readConfigForm());
 
-          // TTS global (config.json) ikut disimpan — apiKey kosong berarti
-          // tetap pakai yang tersimpan; hanya dikirim saat bagian TTS diisi.
-          if (cfgEls.ttsProvider) {
-            const draft = readTTSForm();
-            const remoteTouched =
-              draft.endpoint ||
-              draft.apiKey ||
-              draft.voice ||
-              draft.model ||
-              draft.style ||
-              draft.hematRequest !== !!TTS_CFG.hematRequest ||
-              draft.provider !== (TTS_CFG.provider || "browser");
-            if (remoteTouched) {
-              if (!draft.apiKey) delete draft.apiKey;
-              const r = await fetch(API + "/api/config", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ action: "saveTTS", tts: draft }),
-              });
-              const d = await r.json();
-              if (!r.ok || d.error)
-                throw new Error("TTS: " + (d.error || r.status));
-              TTS_CFG = Object.assign(
-                {
-                  provider: "browser",
-                  endpoint: "",
-                  apiKey: "",
-                  voice: "",
-                  model: "",
-                  hematRequest: false,
-                },
-                d.tts || {},
-              );
-              if (!d.tts?.provider && TTS_CFG.endpoint)
-                TTS_CFG.provider = "gradio";
-              window.__ttsCfg = TTS_CFG;
-              paintTTSForm(TTS_CFG);
-            }
+        // TTS global (config.json) ikut disimpan — apiKey kosong berarti
+        // tetap pakai yang tersimpan; hanya dikirim saat bagian TTS diisi.
+        if (cfgEls.ttsProvider) {
+          const draft = readTTSForm();
+          const remoteTouched =
+            draft.endpoint ||
+            draft.apiKey ||
+            draft.voice ||
+            draft.model ||
+            draft.style ||
+            draft.hematRequest !== !!TTS_CFG.hematRequest ||
+            draft.provider !== (TTS_CFG.provider || "browser");
+          if (remoteTouched) {
+            if (!draft.apiKey) delete draft.apiKey;
+            const r = await fetch(API + "/api/config", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "saveTTS", tts: draft }),
+            });
+            const d = await r.json();
+            if (!r.ok || d.error)
+              throw new Error("TTS: " + (d.error || r.status));
+            TTS_CFG = Object.assign(
+              {
+                provider: "browser",
+                endpoint: "",
+                apiKey: "",
+                voice: "",
+                model: "",
+                hematRequest: false,
+              },
+              d.tts || {},
+            );
+            if (!d.tts?.provider && TTS_CFG.endpoint)
+              TTS_CFG.provider = "gradio";
+            window.__ttsCfg = TTS_CFG;
+            paintTTSForm(TTS_CFG);
           }
-
-          paintConfigForm(saved);
-          setCfgStatus(__t("sys.saved"), "ok");
-        } catch (e) {
-          setCfgStatus(__t("sys.errGeneric", { msg: e.message }), "err");
-        } finally {
-          cfgEls.btn.disabled = false;
         }
-      });
+
+        paintConfigForm(saved);
+        setCfgStatus(__t("sys.saved"), "ok");
+      } catch (e) {
+        setCfgStatus(__t("sys.errGeneric", { msg: e.message }), "err");
+      } finally {
+        cfgEls.btn && (cfgEls.btn.disabled = false);
+        cfgEls.btnVoice && (cfgEls.btnVoice.disabled = false);
+      }
     }
+    if (cfgEls.btn) cfgEls.btn.addEventListener("click", saveSettingsFlow);
+    if (cfgEls.btnVoice)
+      cfgEls.btnVoice.addEventListener("click", saveSettingsFlow);
 
     if (cfgEls.test) {
       cfgEls.test.addEventListener("click", () => {
@@ -4439,6 +4794,7 @@
 
     // ── Mesin Suara (TTS) — global, disimpan di config.json ──────
     const TTS_PROVIDERS = [
+      "auto",
       "supertonic",
       "browser",
       "gradio",
@@ -4453,6 +4809,15 @@
     const TTS_NEEDS_ENDPOINT = { gradio: 1, openai: 1, custom: 1 };
     const TTS_NEEDS_KEY = { elevenlabs: 1, gemini: 1 };
     const TTS_OPT_KEY = { openai: 1 };
+    // Provider yang benar-benar remote (butuh endpoint/key) — "auto" dan
+    // "supertonic" lokal, jadi kolom remote tidak pernah relevan untuk mereka.
+    const TTS_REMOTE_PROVIDERS = {
+      gradio: 1,
+      openai: 1,
+      elevenlabs: 1,
+      gemini: 1,
+      custom: 1,
+    };
 
     function readTTSForm() {
       return {
@@ -4632,27 +4997,48 @@
 
     function paintTTSVisibility() {
       const p = cfgEls.ttsProvider ? cfgEls.ttsProvider.value : "browser";
-      const remote = p !== "browser";
+      // "auto" & "supertonic" jalan in-process/lokal: kolom remote
+      // (endpoint/model/key/hemat) tak relevan → disembunyikan, bukan
+      // dinonaktifkan — dulu auto menampilkan sisa config provider lama
+      // dan terbaca sebagai state aktif yang menyesatkan.
+      const remote = !!TTS_REMOTE_PROVIDERS[p];
+      const native = p === "auto" || p === "supertonic" || p === "native";
       const needKey = !!TTS_NEEDS_KEY[p];
       // openai: kolom key tampil sebagai opsional (resmi/auth butuh,
       // server lokal tidak) — endpoint tetap tampil.
-      const showKey = needKey || !!TTS_OPT_KEY[p];
+      const showKey = remote && (needKey || !!TTS_OPT_KEY[p]);
       $$(".tts-remote-row").forEach((el) =>
         el.classList.toggle("hidden", !remote),
       );
+      // Voice style F1–M5 justru RELEVAN untuk SuperTonic native (class
+      // tts-voice-row sendiri, bukan tts-remote-row). Provider native tampil
+      // langsung; "auto" hanya saat SuperTonic benar-benar tersedia —
+      // fallback browser tidak memakai voice style apa pun.
+      const supAvail = !!(state._mediaStatus && state._mediaStatus.tts
+        && state._mediaStatus.tts.supertonic
+        && state._mediaStatus.tts.supertonic.available);
+      const showVoice = remote || (native && (p !== "auto" || supAvail));
+      const voiceRow = cfgEls.ttsVoice
+        ? cfgEls.ttsVoice.closest(".cfg-row")
+        : null;
+      if (voiceRow) voiceRow.classList.toggle("hidden", !showVoice);
       $$(".tts-key-row").forEach((el) =>
         el.classList.toggle("hidden", !showKey),
       );
       // Gemini & ElevenLabs pakai alamat resmi masing-masing; SuperTonic
       // native jalan in-process di core (tanpa endpoint) — endpoint disembunyikan
       // supaya tidak membingungkan.
-      const noEndpoint = needKey || p === "supertonic" || p === "native";
+      const noEndpoint = !remote || needKey || p === "supertonic";
       $$(".tts-endpoint-row").forEach((el) =>
         el.classList.toggle("hidden", noEndpoint),
       );
       // Gaya bicara hanya bermakna untuk Gemini & OpenAI gpt-4o-mini-tts
       $$(".tts-style-row").forEach((el) =>
         el.classList.toggle("hidden", p !== "gemini" && p !== "openai"),
+      );
+      // Cempreng (nasal) = fitur SuperTonic native — percuma untuk engine lain.
+      $$(".tts-native-row").forEach((el) =>
+        el.classList.toggle("hidden", !native),
       );
       if (cfgEls.ttsEndpoint) {
         cfgEls.ttsEndpoint.placeholder =
@@ -4664,7 +5050,168 @@
                 ? "URL lengkap POST {text} → audio"
                 : "opsional (default bawaan provider)";
       }
+      paintTTSActiveLine();
     }
+
+    /** "Aktif sekarang": state efektif provider × ketersediaan engine native
+     * (dari status media terakhir). Kalau status belum terbaca, baris
+     * disembunyikan — bukan mengisi teks tebakan. */
+    function paintTTSActiveLine() {
+      const el = cfgEls.activeLine;
+      if (!el) return;
+      const p = cfgEls.ttsProvider ? cfgEls.ttsProvider.value : "browser";
+      const media = state._mediaStatus || null;
+      let text = "";
+      if (p === "auto") {
+        if (media) {
+          const sup = (media.tts && media.tts.supertonic) || {};
+          text = sup.available
+            ? __t("cfg.activeSupertonic")
+            : __t("cfg.activeBrowserFallback");
+        }
+      } else if (p === "supertonic" || p === "native") {
+        text = __t("cfg.activeSupertonicSel");
+      } else if (p === "browser") {
+        text = __t("cfg.activeBrowser");
+      } else {
+        text = __t("cfg.activeRemote", { provider: p });
+      }
+      el.hidden = !text;
+      el.textContent = text;
+    }
+
+    // Panel Mesin Native: status model SuperTonic/Whisper + unduhan per-engine
+    // (terpisah — bisa salah satu saja atau keduanya). Sumber unduhan resmi:
+    // HF Supertone/supertonic-3 & ggerganov/whisper.cpp. Saat ada unduhan
+    // berjalan, status di-poll tiap 1 dtk sampai selesai/gagal.
+    let mediaPanelTimer = null;
+    function setMediaBtn(btn, visible) {
+      // Pakai class .hidden (display:none !important) — atribut [hidden]
+      // kalah dari .mini-btn { display:inline-flex } di app.css.
+      if (btn) btn.classList.toggle("hidden", !visible);
+    }
+    async function updateTTSNativeStatus() {
+      // Sama dengan loadAppConfig: embedded harus menunggu basis loopback
+      // (IPC server_port) sebelum fetch pertama, kalau tidak status panel
+      // gagal senyap saat boot.
+      try { await refreshApiBase(); } catch (e) {}
+      const ttsStatus = document.getElementById("media-tts-status");
+      const sttStatus = document.getElementById("media-stt-status");
+      const ttsBtn = document.getElementById("btn-media-dl-tts");
+      const sttBtn = document.getElementById("btn-media-dl-stt");
+      const ttsDel = document.getElementById("btn-media-del-tts");
+      const sttDel = document.getElementById("btn-media-del-stt");
+      if (!ttsStatus || !sttStatus) return;
+      let d = null;
+      try {
+        const r = await fetch(API + "/api/media/status");
+        if (r.ok) d = await r.json();
+      } catch (e) {}
+      if (!d) return;
+      // Simpan untuk "Aktif sekarang" & visibilitas baris voice (provider
+      // auto membaca ketersediaan SuperTonic dari sini — tanpa fetch
+      // tambahan). Repaint penuh, bukan cuma baris aktif: dropdown voice
+      // untuk auto harus muncul begitu status "tersedia" terbaca.
+      state._mediaStatus = d;
+      paintTTSVisibility();
+
+      const sup = (d.tts && d.tts.supertonic) || {};
+      const dlTts = (d.downloads && d.downloads.supertonic) || null;
+      if (dlTts && dlTts.status === "running") {
+        const pct = dlTts.total ? Math.round((dlTts.progress / dlTts.total) * 100) : 0;
+        ttsStatus.textContent = __t("media.dlRunning", { file: dlTts.file, pct });
+        setMediaBtn(ttsBtn, false);
+        setMediaBtn(ttsDel, false);
+      } else if (dlTts && dlTts.status === "error") {
+        ttsStatus.textContent = __t("media.dlError", { msg: dlTts.error });
+        setMediaBtn(ttsBtn, true);
+        setMediaBtn(ttsDel, true);
+      } else {
+        const info = { ok: sup.files_ok || 0, total: sup.files_total || 0, path: sup.path || "" };
+        let text = sup.available ? __t("media.filesOk", info) : __t("media.missing", info);
+        const others = (sup.other_paths || []).join(" · ");
+        if (others) text += " · " + __t("media.alsoAt", { path: others });
+        ttsStatus.textContent = text;
+        setMediaBtn(ttsBtn, !sup.available);
+        setMediaBtn(ttsDel, (sup.files_ok || 0) > 0 || (sup.other_paths || []).length > 0);
+      }
+
+      const stt = (d.stt) || {};
+      const dlSttKey = Object.keys(d.downloads || {}).find((k) => k.startsWith("whisper:"));
+      const dlStt = dlSttKey ? d.downloads[dlSttKey] : null;
+      const extraModels = (stt.whisperModels || [])
+        .filter((m) => m.available && m.name !== (stt.model || "base"))
+        .map((m) => "ggml-" + m.name + ".bin");
+      if (dlStt && dlStt.status === "running") {
+        const pct = dlStt.total ? Math.round((dlStt.progress / dlStt.total) * 100) : 0;
+        sttStatus.textContent = __t("media.dlRunning", { file: dlStt.file, pct });
+        setMediaBtn(sttBtn, false);
+        setMediaBtn(sttDel, false);
+      } else if (dlStt && dlStt.status === "error") {
+        sttStatus.textContent = __t("media.dlError", { msg: dlStt.error });
+        setMediaBtn(sttBtn, true);
+        setMediaBtn(sttDel, true);
+      } else {
+        let text;
+        if (stt.available) {
+          text = __t("media.sttReady", { model: stt.model || "base" });
+          setMediaBtn(sttBtn, false);
+        } else if (!stt.compiled) {
+          // Build tanpa engine-stt tak bisa memakai model whisper apa pun —
+          // jangan tawarkan unduhan yang pasti jadi dead weight.
+          text = stt.path
+            ? __t("media.sttFileReady", { model: stt.model || "base" })
+            : __t("media.sttNoBuild");
+          setMediaBtn(sttBtn, false);
+        } else {
+          text = __t("media.sttMissing", { model: stt.model || "base", path: stt.path || "" });
+          setMediaBtn(sttBtn, true);
+        }
+        if (extraModels.length) text += " · " + __t("media.sttAlso", { list: extraModels.join(", ") });
+        sttStatus.textContent = text;
+        setMediaBtn(sttDel, !!stt.path || extraModels.length > 0);
+      }
+
+      // Unduhan berjalan → poll lagi; semua selesai → berhenti.
+      const running = Object.values(d.downloads || {}).some((x) => x.status === "running");
+      if (mediaPanelTimer) { clearTimeout(mediaPanelTimer); mediaPanelTimer = null; }
+      if (running) mediaPanelTimer = setTimeout(updateTTSNativeStatus, 1000);
+    }
+    window.__refreshMediaPanel = updateTTSNativeStatus;
+
+    function wireMediaDownloads() {
+      const post = (path, payload, statusEl) =>
+        fetch(API + path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+          .then((r) => r.json().catch(() => ({})))
+          .then((d) => {
+            if (d && d.error && statusEl) statusEl.textContent = d.error;
+            updateTTSNativeStatus();
+          })
+          .catch(() => {});
+      const confirmDel = (path, payload, statusEl) => {
+        if (!confirm(__t("media.delConfirm"))) return;
+        post(path, payload, statusEl);
+      };
+      const ttsBtn = document.getElementById("btn-media-dl-tts");
+      const sttBtn = document.getElementById("btn-media-dl-stt");
+      const ttsDel = document.getElementById("btn-media-del-tts");
+      const sttDel = document.getElementById("btn-media-del-stt");
+      if (ttsBtn) ttsBtn.addEventListener("click", () => post("/api/media/download", { target: "supertonic" }, document.getElementById("media-tts-status")));
+      if (sttBtn) sttBtn.addEventListener("click", () => post("/api/media/download", { target: "whisper", model: "base" }, document.getElementById("media-stt-status")));
+      // Hapus membersihkan SEMUA lokasi & SEMUA varian (model: "all") —
+      // kalau cuma varian aktif, file ggml lain akan jadi sampah tak terlihat.
+      if (ttsDel) ttsDel.addEventListener("click", () => confirmDel("/api/media/delete", { target: "supertonic" }, document.getElementById("media-tts-status")));
+      if (sttDel) sttDel.addEventListener("click", () => confirmDel("/api/media/delete", { target: "whisper", model: "all" }, document.getElementById("media-stt-status")));
+    }
+    wireMediaDownloads();
+    // Refresh status panel saat boot juga (bukan cuma saat form TTS digambar):
+    // tombol memulai hidden di HTML dan baru muncul setelah status asli terbaca,
+    // supaya buka-pertama tidak pernah menampilkan tombol tanpa penjelasan.
+    updateTTSNativeStatus();
 
     function ttsTestRemote(ttsDraft) {
       // apiKey kosong di form = tetap pakai yang tersimpan (sama seperti
@@ -5015,6 +5562,11 @@
       tickCountdown();
 
       paintForm();
+      // Hook repaint: config server (window.__appEvents) bisa datang SETELAH
+      // panel init — tanpa ini form menampilkan default (semua aktif) padahal
+      // config aktual bisa "mati", dan panel mengkontradiksi dirinya sendiri
+      // (checkbox vs hitung mundur yang di-paint ulang tiap detik).
+      window.__paintBehaviourForm = paintForm;
     })();
 
     (function initLiveStateIndicator() {
@@ -5122,6 +5674,995 @@
       presetEditorOpenBtn.addEventListener("click", openPresetEditor);
     if (presetEditorCloseBtn)
       presetEditorCloseBtn.addEventListener("click", closePresetEditor);
+
+    // ── Lab Mulut: observability param mulut (eksperimen, bukan kontrol
+    // produksi). Klasifikasi window.__mouthCandidates hanyalah DUGAAN dari
+    // nama/manifest; kepemilikan sebenarnya ditulis user lewat verdict yang
+    // disimpan per model. Model TIDAK dibekukan di sini — SET saat TTS bunyi
+    // justru cara mereplikasi freeze mulut.
+    const mlPopup = $("#mouth-lab-popup");
+    const mlList = $("#mouth-lab-list");
+    const mlOpenBtn = $("#btn-open-mouth-lab");
+    const mlCloseBtn = $("#mouth-lab-close");
+    const mlAddInput = $("#ml-add-input");
+    const mlAddBtn = $("#ml-add-btn");
+    const mlReleaseAllBtn = $("#ml-release-all");
+    const mlStatus = $("#ml-status");
+    let mlTimer = null;
+    let mlDragging = false;
+    const mlModes = {}; // id -> "release" | "set" | "add"
+    const mlRows = new Map(); // id -> { cand, ctl } — diisi mlPaint
+
+    function mlStoreKey() {
+      return "live2d_mouthlab_" + characterSheetKey().replace("live2d_sheet_", "");
+    }
+    function mlStoreLoad() {
+      try {
+        const d = JSON.parse(localStorage.getItem(mlStoreKey()) || "{}");
+        return { marks: d.marks || {}, manual: d.manual || [] };
+      } catch (e) {
+        return { marks: {}, manual: [] };
+      }
+    }
+    function mlStoreSave(store) {
+      try {
+        localStorage.setItem(mlStoreKey(), JSON.stringify(store));
+      } catch (e) {}
+    }
+    function mlSetStatus(msg) {
+      if (mlStatus) mlStatus.textContent = msg || "";
+    }
+
+    function mlReleaseOne(id) {
+      delete state.overrides[id];
+      delete state.mouthLab.offsets[id];
+    }
+
+    function mlSyncRow(cand, ctl) {
+      const live = readParam(cand.id);
+      if (ctl.mode === "release") {
+        ctl.valEl.textContent =
+          fmtNum(live) + "  [" + fmtNum(cand.min) + ".." + fmtNum(cand.max) + "]";
+        if (!mlDragging) ctl.range.value = String(live);
+      }
+      ctl.heldEl.classList.toggle(
+        "on",
+        state.overrides[cand.id] != null ||
+          state.mouthLab.offsets[cand.id] != null,
+      );
+    }
+
+    function mlBuildRow(cand, store) {
+      const mode = mlModes[cand.id] || "release";
+      const row = document.createElement("div");
+      row.className = "pn-row ml-row";
+
+      const head = document.createElement("div");
+      head.className = "pn-head";
+      const idEl = document.createElement("span");
+      idEl.className = "pn-id";
+      idEl.textContent = cand.id;
+      head.appendChild(idEl);
+      const bEl = document.createElement("span");
+      bEl.className = "ml-badge ml-bucket";
+      bEl.textContent = __t("ml.bucket." + cand.bucket);
+      head.appendChild(bEl);
+      for (const ev of cand.evidence) {
+        const eEl = document.createElement("span");
+        eEl.className = "ml-badge ml-ev";
+        eEl.textContent = __t("ml.evidence." + ev);
+        head.appendChild(eEl);
+      }
+      const heldEl = document.createElement("span");
+      heldEl.className = "ml-badge ml-held";
+      heldEl.textContent = __t("ml.held");
+      head.appendChild(heldEl);
+      row.appendChild(head);
+
+      if (cand.note) {
+        const nEl = document.createElement("div");
+        nEl.className = "ml-note";
+        nEl.textContent = cand.note;
+        row.appendChild(nEl);
+      }
+
+      // Skala slider ikut mode: SET = range asli; ADD = offset -R..+R
+      // (R = rentang terlebar) supaya offset simetris di sekitar baseline.
+      const extent = Math.max(Math.abs(cand.min), Math.abs(cand.max), 1);
+      const sliderRow = document.createElement("div");
+      sliderRow.className = "pn-slider-row";
+      const range = document.createElement("input");
+      range.type = "range";
+      range.className = "pn-range";
+      range.step = "any";
+      if (mode === "add") {
+        range.min = String(-extent);
+        range.max = String(extent);
+        range.value = String(state.mouthLab.offsets[cand.id] || 0);
+      } else {
+        range.min = String(cand.min);
+        range.max = String(cand.max);
+        range.value = String(readParam(cand.id));
+        range.disabled = mode === "release";
+      }
+      const valEl = document.createElement("span");
+      valEl.className = "pn-val";
+      valEl.textContent =
+        fmtNum(Number(range.value)) +
+        (mode === "add" ? " offset" : mode === "set" ? " SET" : "");
+      sliderRow.appendChild(range);
+      sliderRow.appendChild(valEl);
+      row.appendChild(sliderRow);
+
+      range.addEventListener("pointerdown", () => { mlDragging = true; });
+      range.addEventListener("pointerup", () => { mlDragging = false; });
+      range.addEventListener("input", () => {
+        const v = Number(range.value);
+        if (mode === "set") {
+          setSticky(cand.id, v, 1);
+          valEl.textContent = fmtNum(v);
+        } else if (mode === "add") {
+          if (Math.abs(v) < 1e-3) delete state.mouthLab.offsets[cand.id];
+          else state.mouthLab.offsets[cand.id] = v;
+          valEl.textContent = (v >= 0 ? "+" : "") + fmtNum(v);
+        }
+      });
+
+      const tools = document.createElement("div");
+      tools.className = "ml-tools";
+      for (const m of ["release", "set", "add"]) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ml-mode" + (m === mode ? " on" : "");
+        b.textContent = __t("ml.mode." + m);
+        b.addEventListener("click", () => {
+          if (m !== mode) mlModes[cand.id] = m;
+          if (m === "release") mlReleaseOne(cand.id);
+          mlPaint();
+        });
+        tools.appendChild(b);
+      }
+
+      const sel = document.createElement("select");
+      sel.className = "ml-verdict";
+      sel.setAttribute("aria-label", __t("ml.verdictLegend"));
+      for (const v of ["unknown", "lipsync", "expression", "ignore"]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = __t("ml.verdict." + v);
+        const cur = store.marks[cand.id];
+        if ((v === "unknown" && !cur) || v === cur) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        const v = sel.value;
+        if (v === "unknown") delete store.marks[cand.id];
+        else store.marks[cand.id] = v;
+        mlStoreSave(store);
+      });
+      tools.appendChild(sel);
+      row.appendChild(tools);
+
+      return { row, ctl: { mode, range, valEl, heldEl } };
+    }
+
+    function mlPaint() {
+      if (!mlList) return;
+      mlList.textContent = "";
+      if (!window.__mouthCandidates) {
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = __t("ml.bundleMissing");
+        mlList.appendChild(p);
+        return;
+      }
+      // Ganti model → offset param lama tidak boleh bocor ke model baru.
+      const key = mlStoreKey();
+      if (state.mouthLab.modelKey !== key) {
+        state.mouthLab.offsets = {};
+        state.mouthLab.modelKey = key;
+      }
+      const store = mlStoreLoad();
+      const sheet = state.lastSheet || loadCharacterSheet();
+      const cands = window.__mouthCandidates.collectMouthCandidates(
+        sheet && sheet.params,
+        {
+          roleIds: {
+            mouthOpenY: roleId("mouthOpenY"),
+            mouthOpenX: roleId("mouthOpenX"),
+            mouthForm: roleId("mouthForm"),
+          },
+          officialLipSyncIds: getOfficialGroups(state.model).lipSyncIds,
+          manualIds: store.manual,
+        },
+      );
+      if (!cands.length) {
+        const p = document.createElement("p");
+        p.className = "hint";
+        p.textContent = __t("ml.empty");
+        mlList.appendChild(p);
+        return;
+      }
+      mlRows.clear();
+      let lastBucket = null;
+      for (const cand of cands) {
+        if (cand.bucket !== lastBucket) {
+          lastBucket = cand.bucket;
+          const h = document.createElement("div");
+          h.className = "ml-bucket-head";
+          h.textContent = __t("ml.bucket." + cand.bucket);
+          mlList.appendChild(h);
+        }
+        const { row, ctl } = mlBuildRow(cand, store);
+        mlRows.set(cand.id, { cand, ctl });
+        mlList.appendChild(row);
+        mlSyncRow(cand, ctl);
+      }
+    }
+
+    function mlTickRefresh() {
+      for (const { cand, ctl } of mlRows.values()) mlSyncRow(cand, ctl);
+    }
+
+    function openMouthLab() {
+      if (!state.model) return;
+      mlPaint();
+      if (mlPopup) {
+        mlPopup.classList.remove("hidden");
+        mlPopup.setAttribute("aria-hidden", "false");
+      }
+      if (mlTimer) clearInterval(mlTimer);
+      mlTimer = setInterval(mlTickRefresh, 150);
+    }
+    function closeMouthLab() {
+      if (mlPopup) {
+        mlPopup.classList.add("hidden");
+        mlPopup.setAttribute("aria-hidden", "true");
+      }
+      if (mlTimer) {
+        clearInterval(mlTimer);
+        mlTimer = null;
+      }
+    }
+    if (mlOpenBtn) mlOpenBtn.addEventListener("click", openMouthLab);
+    if (mlCloseBtn) mlCloseBtn.addEventListener("click", closeMouthLab);
+    if (mlReleaseAllBtn)
+      mlReleaseAllBtn.addEventListener("click", () => {
+        for (const id of mlRows.keys()) mlReleaseOne(id);
+        mlSetStatus(__t("ml.released"));
+        mlPaint();
+      });
+    if (mlAddBtn)
+      mlAddBtn.addEventListener("click", () => {
+        const id = (mlAddInput && mlAddInput.value || "").trim();
+        if (!id) {
+          mlSetStatus(__t("ml.addEmpty"));
+          return;
+        }
+        const store = mlStoreLoad();
+        if (store.manual.includes(id)) {
+          mlSetStatus(__t("ml.addDup", { id }));
+          return;
+        }
+        store.manual.push(id);
+        mlStoreSave(store);
+        mlSetStatus(__t("ml.added", { id }));
+        if (mlAddInput) mlAddInput.value = "";
+        mlPaint();
+      });
+
+    // ── Runtime Lab: panel uji manual Character Runtime ────────────────
+    // Kontrak runtime ada di src/client/character/runtime.ts (aturan R1–R10);
+    // instance = SINGLETON produksi (window.__live2dAgent.getCharacterRuntime,
+    // bridge di makeCharacterBridge) — lab memakai instance yang sama dengan
+    // jalur routing, jadi log keputusan memperlihatkan keputusan live dari AI.
+    // Panel hanya aktif saat popup terbuka; interval 150ms merender indikator
+    // dan ikut men-drive tick runtime selama popup terbuka.
+    const rlPopup = $("#runtime-lab-popup");
+    const rlOpenBtn = $("#btn-open-runtime-lab");
+    const rlCloseBtn = $("#runtime-lab-close");
+    const rlRoutingToggle = $("#rl-routing-toggle");
+    const rlRoutingStateEl = $("#rl-routing-state");
+    const rlSlotsEl = $("#rl-slots");
+    const rlHoldersEl = $("#rl-holders");
+    const rlDecisionsEl = $("#rl-decisions");
+    const rlResultsEl = $("#rl-checklist-results");
+    const rlChecklistStatusEl = $("#rl-checklist-status");
+    const rlChecklistBtn = $("#rl-checklist-run");
+    const rlStatusEl = $("#rl-status");
+    const rlBaseStartBtn = $("#rl-base-start");
+    const rlBaseStopBtn = $("#rl-base-stop");
+    const rlSpeakBtn = $("#rl-speak");
+    const rlResetBtn = $("#rl-reset");
+    const rlInjectBtn = $("#rl-inject");
+    const rlInjectConflictBtn = $("#rl-inject-conflict");
+    const rlActionIdEl = $("#rl-action-id");
+    const rlActionDurEl = $("#rl-action-dur");
+    const rlActionPrioEl = $("#rl-action-prio");
+    const rlApDomEl = $("#rl-inject-apdom");
+    const rlApFlagEl = $("#rl-inject-apflag");
+    const rlExprIdEl = $("#rl-expr-id");
+    const rlExprSetBtn = $("#rl-expr-set");
+    const rlExprReleaseBtn = $("#rl-expr-release");
+    let rlRt = null; // instance singleton produksi (dipinjam saat open)
+    let rlTimer = null; // interval indikator ~150ms
+    let rlLastInject = null; // intent inject terakhir — bahan "Inject konflik"
+    let rlChecklistBusy = false;
+
+    function rlSetStatus(msg) {
+      if (rlStatusEl) rlStatusEl.textContent = msg || "";
+    }
+
+    function rlEnsureRuntime() {
+      if (rlRt) return rlRt;
+      // Singleton produksi: facade yang membuat instance sekali dengan bridge
+      // produksi; lab hanya meminjam referensinya (tidak create sendiri).
+      const facade = window.__live2dAgent;
+      if (!facade || typeof facade.getCharacterRuntime !== "function") {
+        rlSetStatus(__t("rl.bundleMissing"));
+        return null;
+      }
+      try {
+        rlRt = facade.getCharacterRuntime() || null;
+      } catch (e) {
+        rlRt = null;
+      }
+      if (!rlRt)
+        rlSetStatus(
+          __t("rl.createFail", { msg: "getCharacterRuntime() → null" }),
+        );
+      return rlRt;
+    }
+
+    // Sinyal speech/lipsync dibaca dari state existing (bukan sumber baru):
+    // talking = timer estimasi TTS; audio = elemen TTS benar-benar main;
+    // lipsync = provider lipsync punya sinyal (analisis audio ATAU pola
+    // sintetis) dan model tidak dibekukan.
+    function rlSpeechSignals() {
+      const audio = state.ttsAudio;
+      const audioPlaying = !!(audio && !audio.paused && !audio.ended);
+      const speech = !!(state.talking || audioPlaying);
+      const lipSource =
+        (state.audioLipSync &&
+          state.audioLipSync.active &&
+          audioPlaying) ||
+        state.talking;
+      return {
+        speech,
+        lipsync: !!(speech && !state.frozen && lipSource),
+      };
+    }
+
+    const RL_STATUS_CLS = {
+      running: "on",
+      active: "on",
+      paused: "warn",
+      queued: "warn",
+      stopped: "",
+    };
+
+    function rlBadge(text, cls) {
+      const b = document.createElement("span");
+      b.className = "rl-badge" + (cls ? " " + cls : "");
+      b.textContent = text;
+      return b;
+    }
+
+    function rlSlotRow(label, slot) {
+      const row = document.createElement("div");
+      row.className = "rl-slot";
+      row.appendChild(rlBadge(label));
+      if (!slot) {
+        row.appendChild(rlBadge(__t("rl.none")));
+        return row;
+      }
+      row.appendChild(rlBadge(slot.status, RL_STATUS_CLS[slot.status] || ""));
+      const idEl = document.createElement("span");
+      idEl.className = "rl-id";
+      idEl.textContent = slot.id;
+      row.appendChild(idEl);
+      const meta = [];
+      if (typeof slot.remainingMs === "number")
+        meta.push(
+          __t("rl.remaining", { ms: String(Math.max(0, Math.round(slot.remainingMs))) }),
+        );
+      meta.push("p" + slot.priority);
+      if (Array.isArray(slot.domains) && slot.domains.length)
+        meta.push(slot.domains.join(","));
+      const metaEl = document.createElement("span");
+      metaEl.className = "rl-meta";
+      metaEl.textContent = meta.join(" · ");
+      row.appendChild(metaEl);
+      return row;
+    }
+
+    function rlPaint(snap, sig) {
+      if (!rlSlotsEl) return;
+      // Snapshot dibaca defensif — implementasi runtime bisa parsial.
+      const s = snap || {};
+      const actions = Array.isArray(s.actions) ? s.actions : [];
+      rlSlotsEl.textContent = "";
+      rlSlotsEl.appendChild(rlSlotRow(__t("rl.slotBase"), s.base || null));
+      if (!actions.length) {
+        const row = document.createElement("div");
+        row.className = "rl-slot";
+        row.appendChild(rlBadge(__t("rl.slotAction")));
+        row.appendChild(rlBadge(__t("rl.none")));
+        rlSlotsEl.appendChild(row);
+      } else {
+        for (const a of actions) rlSlotsEl.appendChild(rlSlotRow(__t("rl.slotAction"), a));
+      }
+      rlSlotsEl.appendChild(rlSlotRow(__t("rl.slotExpr"), s.expression || null));
+      // Speech/lipsync: badge dari sinyal state existing (sumber kebenaran
+      // readout), snapshot runtime dipakai untuk slot lain.
+      const sigRow = document.createElement("div");
+      sigRow.className = "rl-slot";
+      sigRow.appendChild(rlBadge(__t("rl.slotSpeech")));
+      sigRow.appendChild(
+        rlBadge(
+          sig.speech ? __t("rl.statusOn") : __t("rl.statusOff"),
+          sig.speech ? "on" : "",
+        ),
+      );
+      sigRow.appendChild(rlBadge(__t("rl.slotLipsync")));
+      sigRow.appendChild(
+        rlBadge(
+          sig.lipsync ? __t("rl.statusOn") : __t("rl.statusOff"),
+          sig.lipsync ? "on" : "",
+        ),
+      );
+      rlSlotsEl.appendChild(sigRow);
+
+      if (rlHoldersEl) {
+        rlHoldersEl.textContent = "";
+        const holders = s.holders || {};
+        const keys = Object.keys(holders).sort();
+        if (!keys.length) {
+          const p = document.createElement("span");
+          p.className = "rl-meta";
+          p.textContent = __t("rl.none");
+          rlHoldersEl.appendChild(p);
+        }
+        for (const k of keys) {
+          const row = document.createElement("div");
+          row.className = "rl-holder-row";
+          const d = document.createElement("span");
+          d.className = "dom";
+          d.textContent = k;
+          const h = document.createElement("span");
+          h.className = "hid";
+          h.textContent = holders[k];
+          row.appendChild(d);
+          row.appendChild(h);
+          rlHoldersEl.appendChild(row);
+        }
+      }
+
+      if (rlDecisionsEl) {
+        rlDecisionsEl.textContent = "";
+        let entries = [];
+        try {
+          entries = rlRt && rlRt.decisions ? rlRt.decisions() : [];
+        } catch (e) {}
+        const last = entries.slice(-10).reverse(); // terbaru di atas
+        if (!last.length) {
+          const p = document.createElement("span");
+          p.className = "rl-meta";
+          p.textContent = __t("rl.none");
+          rlDecisionsEl.appendChild(p);
+        }
+        for (const d of last) {
+          const row = document.createElement("div");
+          row.className = "rl-dec";
+          const modeCls = { overlay: "on", override: "err", queue: "warn", replace: "warn" }[
+            d.mode
+          ] || "";
+          row.appendChild(rlBadge(d.mode, modeCls));
+          const idEl = document.createElement("span");
+          idEl.className = "rl-id";
+          idEl.textContent = d.intentId;
+          const why = document.createElement("span");
+          why.className = "why";
+          why.textContent = d.reason || "";
+          row.appendChild(idEl);
+          row.appendChild(why);
+          row.title =
+            (d.at ? new Date(d.at).toLocaleTimeString() + " · " : "") +
+            "p" + d.priority + " · " + (d.domains || []).join(",");
+          rlDecisionsEl.appendChild(row);
+        }
+      }
+    }
+
+    function rlTick() {
+      if (!rlRt) return;
+      const sig = rlSpeechSignals();
+      try {
+        rlRt.speechActive(sig.speech);
+      } catch (e) {}
+      try {
+        rlRt.lipsyncActive(sig.lipsync);
+      } catch (e) {}
+      let snap = null;
+      try {
+        snap = rlRt.tick(); // R7: expire TTL + resume paused + admit antrian
+      } catch (e) {}
+      rlPaint(snap, sig);
+    }
+
+    function rlOpen() {
+      rlEnsureRuntime(); // bila bundle belum ada, popup tetap buka + hint
+      if (rlPopup) {
+        rlPopup.classList.remove("hidden");
+        rlPopup.setAttribute("aria-hidden", "false");
+      }
+      if (rlTimer) clearInterval(rlTimer);
+      rlTimer = setInterval(rlTick, 150);
+      rlTick();
+    }
+
+    function rlClose() {
+      if (rlPopup) {
+        rlPopup.classList.add("hidden");
+        rlPopup.setAttribute("aria-hidden", "true");
+      }
+      if (rlTimer) {
+        clearInterval(rlTimer);
+        rlTimer = null;
+      }
+    }
+
+    if (rlOpenBtn) rlOpenBtn.addEventListener("click", rlOpen);
+    if (rlCloseBtn) rlCloseBtn.addEventListener("click", rlClose);
+
+    // Toggle routing (Tahap A): mengubah state.runtimeRouting + persist
+    // localStorage. Saat aktif, keputusan behavior idle produksi masuk
+    // instance yang sama dengan lab — tampil live di log keputusan.
+    function rlPaintRouting() {
+      const on = isRuntimeRouting();
+      if (rlRoutingToggle) rlRoutingToggle.checked = on;
+      if (rlRoutingStateEl) {
+        rlRoutingStateEl.textContent = __t(on ? "rl.routingOn" : "rl.routingOff");
+        rlRoutingStateEl.className =
+          "rl-badge rl-head-badge" + (on ? " on" : "");
+      }
+    }
+    if (rlRoutingToggle)
+      rlRoutingToggle.addEventListener("change", () => {
+        runtimeRoutingSave(!!(rlRoutingToggle && rlRoutingToggle.checked));
+        rlPaintRouting();
+        rlSetStatus(
+          __t(isRuntimeRouting() ? "rl.routingEnabled" : "rl.routingDisabled"),
+        );
+      });
+    rlPaintRouting();
+
+    function rlReport(dec, fallbackId) {
+      rlSetStatus(
+        __t("rl.injected", {
+          id: (dec && dec.intentId) || fallbackId || "",
+          mode: (dec && dec.mode) || "?",
+          reason: (dec && dec.reason) || "",
+        }),
+      );
+    }
+
+    function rlReadInjectForm() {
+      const id = ((rlActionIdEl && rlActionIdEl.value) || "").trim();
+      const dur = Math.max(
+        100,
+        Math.round(Number(rlActionDurEl && rlActionDurEl.value) || 800),
+      );
+      const prio = Number(rlActionPrioEl && rlActionPrioEl.value) || 60;
+      const domains = ["head", "body"];
+      if (rlApDomEl && rlApDomEl.checked) domains.push("apertur");
+      return {
+        kind: "action",
+        id: id || "manual_action",
+        domains,
+        durationMs: dur,
+        priority: prio,
+        source: "manual",
+        flags: { aperture: !!(rlApFlagEl && rlApFlagEl.checked) },
+      };
+    }
+
+    function rlSubmitIntent(intent) {
+      const rt = rlEnsureRuntime();
+      if (!rt) return;
+      try {
+        rlReport(rt.submit(intent), intent.id);
+      } catch (e) {
+        rlSetStatus(__t("rl.createFail", { msg: (e && e.message) || String(e) }));
+      }
+    }
+
+    if (rlInjectBtn)
+      rlInjectBtn.addEventListener("click", () => {
+        const intent = rlReadInjectForm();
+        rlLastInject = intent;
+        rlSubmitIntent(intent);
+      });
+    if (rlInjectConflictBtn)
+      rlInjectConflictBtn.addEventListener("click", () => {
+        // Ulangi inject terakhir PERSIS (id+domain+priority+duration) untuk
+        // menguji R3/R4/R5 tanpa mengisi ulang form.
+        rlLastInject = rlLastInject || rlReadInjectForm();
+        rlSubmitIntent(rlLastInject);
+      });
+
+    if (rlBaseStartBtn)
+      rlBaseStartBtn.addEventListener("click", () => {
+        const rt = rlEnsureRuntime();
+        if (!rt) return;
+        try {
+          const dec = rt.setBase({
+            kind: "base",
+            id: "base_idle",
+            domains: ["head", "body", "gaze"],
+            priority: 0,
+            source: "manual",
+          });
+          rlReport(dec, "base_idle");
+        } catch (e) {
+          rlSetStatus(__t("rl.createFail", { msg: (e && e.message) || String(e) }));
+        }
+      });
+    if (rlBaseStopBtn)
+      rlBaseStopBtn.addEventListener("click", () => {
+        const rt = rlEnsureRuntime();
+        if (!rt) return;
+        try {
+          rt.stopBase();
+        } catch (e) {}
+        rlSetStatus(__t("rl.baseStopped"));
+      });
+    if (rlSpeakBtn)
+      rlSpeakBtn.addEventListener("click", () => {
+        if (
+          window.__live2dAgent &&
+          typeof window.__live2dAgent.speak === "function"
+        ) {
+          window.__live2dAgent.speak("Halo, ini tes Character Runtime.");
+          rlSetStatus(__t("rl.speakSent"));
+        } else {
+          rlSetStatus(__t("rl.agentMissing"));
+        }
+      });
+    if (rlResetBtn)
+      rlResetBtn.addEventListener("click", () => {
+        const rt = rlEnsureRuntime();
+        if (!rt) return;
+        try {
+          rt.reset();
+        } catch (e) {}
+        rlSetStatus(__t("rl.resetDone"));
+      });
+
+    if (rlExprSetBtn)
+      rlExprSetBtn.addEventListener("click", () => {
+        const id =
+          ((rlExprIdEl && rlExprIdEl.value) || "").trim() || "happy";
+        rlSubmitIntent({
+          kind: "expression",
+          id,
+          domains: ["affect"],
+          priority: 60,
+          source: "manual",
+        });
+      });
+    if (rlExprReleaseBtn)
+      rlExprReleaseBtn.addEventListener("click", () => {
+        const rt = rlEnsureRuntime();
+        if (!rt) return;
+        try {
+          rt.releaseExpression();
+        } catch (e) {}
+        rlSetStatus(__t("rl.exprReleased"));
+      });
+
+    // ── Checklist: runner async berurutan; asersi dari snapshot runtime,
+    // bukan tampilan. Item yang butuh mata manusia diberi catatan cek visual.
+    function rlSleep(ms) {
+      return new Promise((r) => setTimeout(r, ms));
+    }
+
+    async function rlPoll(fn, timeoutMs, stepMs) {
+      const deadline = performance.now() + timeoutMs;
+      for (;;) {
+        const v = fn();
+        if (v) return v;
+        if (performance.now() >= deadline) return null;
+        await rlSleep(stepMs || 120);
+      }
+    }
+
+    function rlSnap() {
+      try {
+        return rlRt && rlRt.tick ? rlRt.tick() : null;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function rlActionById(snap, id) {
+      return (
+        (snap && Array.isArray(snap.actions) ? snap.actions : []).find(
+          (a) => a && a.id === id,
+        ) || null
+      );
+    }
+
+    function rlFindDecision(intentId, modeRe, reasonRe) {
+      let entries = [];
+      try {
+        entries = rlRt && rlRt.decisions ? rlRt.decisions() : [];
+      } catch (e) {}
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const d = entries[i];
+        if (intentId && d.intentId !== intentId) continue;
+        if (modeRe && !modeRe.test(d.mode || "")) continue;
+        if (reasonRe && !reasonRe.test(d.reason || "")) continue;
+        return d;
+      }
+      return null;
+    }
+
+    function rlActionIntent(id, domains, priority, durationMs, flags) {
+      const intent = {
+        kind: "action",
+        id,
+        domains,
+        priority,
+        durationMs,
+        source: "manual",
+      };
+      if (flags) intent.flags = flags;
+      return intent;
+    }
+
+    function rlResultRow(r) {
+      const row = document.createElement("div");
+      row.className = "rl-result " + (r.ok ? "pass" : "fail");
+      const head = document.createElement("div");
+      head.className = "head";
+      head.appendChild(rlBadge(r.ok ? "PASS" : "FAIL", r.ok ? "on" : "err"));
+      const name = document.createElement("span");
+      name.textContent = __t("rl." + r.key);
+      head.appendChild(name);
+      row.appendChild(head);
+      if (r.obs) {
+        const obs = document.createElement("div");
+        obs.className = "obs" + (r.visual ? " visual" : "");
+        obs.textContent = r.obs;
+        row.appendChild(obs);
+      }
+      return row;
+    }
+
+    async function rlRunChecklist() {
+      const rt = rlEnsureRuntime();
+      if (!rt || rlChecklistBusy) return;
+      rlChecklistBusy = true;
+      if (rlChecklistBtn) rlChecklistBtn.disabled = true;
+      if (rlChecklistStatusEl)
+        rlChecklistStatusEl.textContent = __t("rl.checklistRunning");
+      if (rlResultsEl) rlResultsEl.textContent = "";
+      const results = [];
+      const paintResults = () => {
+        if (!rlResultsEl) return;
+        rlResultsEl.textContent = "";
+        for (const r of results) rlResultsEl.appendChild(rlResultRow(r));
+      };
+      const step = async (key, fn) => {
+        let ok = false,
+          obs = "",
+          visual = false;
+        try {
+          const out = (await fn()) || "";
+          if (typeof out === "object") {
+            obs = out.obs || "";
+            visual = !!out.visual;
+          } else obs = out;
+          ok = true;
+        } catch (e) {
+          obs = (e && e.message) || String(e);
+        }
+        results.push({ key, ok, obs, visual });
+        paintResults();
+      };
+      const assert = (cond, msg) => {
+        if (!cond) throw new Error(msg || "assert gagal");
+      };
+
+      try {
+        // 1 — base jalan
+        await step("ck1", async () => {
+          rt.setBase({
+            kind: "base",
+            id: "base_idle",
+            domains: ["head", "body", "gaze"],
+            priority: 0,
+            source: "manual",
+          });
+          await rlSleep(80);
+          const snap = rlSnap();
+          assert(
+            snap && snap.base && snap.base.status === "running",
+            "snapshot.base.status !== 'running'",
+          );
+          return "id=" + snap.base.id;
+        });
+
+        // 2 — inject action saat base jalan
+        await step("ck2", async () => {
+          rt.submit(rlActionIntent("cl_action_a", ["head", "body"], 80, 1200));
+          await rlSleep(80);
+          const a = rlActionById(rlSnap(), "cl_action_a");
+          assert(
+            a && a.status === "active",
+            "action cl_action_a tidak 'active' (priority 80 vs base 0 harusnya override)",
+          );
+          return "priority 80 mengambil alih base";
+        });
+
+        // 3 — action berdurasi: remainingMs > 0 dan menurun
+        await step("ck3", async () => {
+          const a1 = rlActionById(rlSnap(), "cl_action_a");
+          assert(
+            a1 && typeof a1.remainingMs === "number" && a1.remainingMs > 0,
+            "remainingMs tidak > 0",
+          );
+          await rlSleep(300);
+          const a2 = rlActionById(rlSnap(), "cl_action_a");
+          assert(
+            a2 && typeof a2.remainingMs === "number",
+            "action hilang sebelum TTL",
+          );
+          assert(
+            a2.remainingMs < a1.remainingMs,
+            "remainingMs tidak menurun (" + a1.remainingMs + " → " + a2.remainingMs + ")",
+          );
+          return a1.remainingMs + " → " + a2.remainingMs + " ms";
+        });
+
+        // 4 — base kembali 'running' setelah TTL action lewat
+        await step("ck4", async () => {
+          const got = await rlPoll(() => {
+            const snap = rlSnap();
+            if (!snap) return null;
+            const gone = !rlActionById(snap, "cl_action_a");
+            const baseOk = !!(snap.base && snap.base.status === "running");
+            return gone && baseOk ? snap : null;
+          }, 4500, 150);
+          assert(got, "base tidak kembali 'running' & action tidak lepas setelah TTL");
+          return "action lepas, base resumed otomatis";
+        });
+
+        // 5 — expression bertahan selama action
+        await step("ck5", async () => {
+          rt.submit({
+            kind: "expression",
+            id: "happy",
+            domains: ["affect"],
+            priority: 60,
+            source: "manual",
+          });
+          rt.submit(rlActionIntent("cl_action_b", ["head", "body"], 80, 900));
+          await rlSleep(100);
+          const snap = rlSnap();
+          assert(
+            snap && snap.expression && snap.expression.id === "happy",
+            "expression 'happy' hilang/ketagihan saat action inject",
+          );
+          return "expression tetap di slot affect";
+        });
+
+        // 6 — speech bersamaan (sinyal dari state TTS existing)
+        await step("ck6", async () => {
+          if (
+            !(
+              window.__live2dAgent &&
+              typeof window.__live2dAgent.speak === "function"
+            )
+          )
+            throw new Error("window.__live2dAgent.speak tidak tersedia");
+          window.__live2dAgent.speak("Halo, ini tes Character Runtime.");
+          const got = await rlPoll(() => rlSpeechSignals().speech, 2000, 120);
+          assert(got, "speech tidak aktif dalam 2 detik (TTS mungkin tanpa voice)");
+          return { obs: __t("rl.ck6Visual"), visual: true };
+        });
+
+        // 7 — apertur dilindungi saat speech: klaim domain apertur TANPA
+        // flags.aperture (inject programatik) harus REJECT dengan alasan apertur.
+        await step("ck7", async () => {
+          if (!rlSpeechSignals().speech) {
+            // Speech dari langkah 6 mungkin sudah selesai — picu ulang supaya
+            // item ini tetap bermakna.
+            if (
+              !(
+                window.__live2dAgent &&
+                typeof window.__live2dAgent.speak === "function"
+              )
+            )
+              throw new Error("window.__live2dAgent.speak tidak tersedia");
+            window.__live2dAgent.speak("Halo, ini tes Character Runtime.");
+          }
+          const sig = await rlPoll(() => rlSpeechSignals().speech, 2000, 120);
+          if (!sig)
+            throw new Error("speech tidak aktif — jalankan ulang checklist saat TTS bunyi");
+          rt.submit(
+            rlActionIntent("cl_apertur", ["head", "body", "apertur"], 80, 800),
+          );
+          await rlSleep(80);
+          const d = rlFindDecision("cl_apertur", /^reject$/, null);
+          assert(d, "tidak ada keputusan reject untuk klaim apertur");
+          assert(
+            /apertur|lipsync/i.test(d.reason || ""),
+            "alasan reject tidak menyebut apertur/lipsync: " + (d.reason || ""),
+          );
+          return { obs: "reject: " + (d.reason || "") + " · " + __t("rl.ck7Visual"), visual: true };
+        });
+
+        // 8 — dua action berebut domain sama
+        await step("ck8", async () => {
+          // Sisa action ck5/ck7 (priority 80) bisa masih dalam TTL — tunggu
+          // kosong dulu supaya cl_conf_a/b benar-benar berebut head di antara
+          // mereka sendiri, bukan dikalahkan pemegang lebih tinggi.
+          await rlPoll(() => {
+            const s = rlSnap();
+            return s && !s.actions.some((x) => x.priority >= 80) ? s : null;
+          }, 3000, 100);
+          rt.submit(rlActionIntent("cl_conf_a", ["head"], 60, 900));
+          rt.submit(rlActionIntent("cl_conf_b", ["head"], 60, 900));
+          await rlSleep(100);
+          const d = rlFindDecision("cl_conf_b", /^(override|queue|reject)$/, null);
+          assert(d, "keputusan action kedua tidak tercatat di log");
+          const snap = rlSnap();
+          const holder = snap && snap.holders ? snap.holders.head : null;
+          assert(
+            holder === "cl_conf_a" || holder === "cl_conf_b",
+            "holders.head tidak menunjuk id yang menang: " + holder,
+          );
+          return "mode kedua=" + d.mode + " · pemegang head=" + holder;
+        });
+
+        // 9 — dua action non-konflik jalan bersama (overlay)
+        await step("ck9", async () => {
+          // Sisa ck8 masih memegang head (900×2 ms berurutan karena yang
+          // kedua mengantre) — tunggu kosong agar gaze & head benar-benar
+          // non-konflik satu sama lain.
+          await rlPoll(() => {
+            const s = rlSnap();
+            return s && s.actions.length === 0 ? s : null;
+          }, 4500, 100);
+          rt.submit(rlActionIntent("cl_gaze", ["gaze"], 40, 1600));
+          rt.submit(rlActionIntent("cl_head", ["head"], 40, 1600));
+          await rlSleep(100);
+          const snap = rlSnap();
+          const g = rlActionById(snap, "cl_gaze");
+          const h = rlActionById(snap, "cl_head");
+          assert(
+            g && g.status === "active" && h && h.status === "active",
+            "kedua action harus 'active' (g=" + (g && g.status) + ", h=" + (h && h.status) + ")",
+          );
+          return "gaze + head = overlay";
+        });
+      } finally {
+        rlChecklistBusy = false;
+        if (rlChecklistBtn) rlChecklistBtn.disabled = false;
+        const pass = results.filter((r) => r.ok).length;
+        if (rlChecklistStatusEl)
+          rlChecklistStatusEl.textContent = __t("rl.checklistDone", {
+            pass: String(pass),
+            total: String(results.length),
+          });
+      }
+    }
+
+    if (rlChecklistBtn)
+      rlChecklistBtn.addEventListener("click", rlRunChecklist);
+
 
     function setSheetStatus(msg, kind) {
       if (!shEls.status) return;
@@ -6356,13 +7897,49 @@
           testBtn.className = "p-act";
           testBtn.textContent = __t("sheet.testBtn");
           testBtn.title = __t("sheet.testExprTip");
-          testBtn.addEventListener("click", () => {
+          testBtn.addEventListener("click", async () => {
             if (!state.model) {
               setAdoptionMsg(__t("sheet.loadFirstShort"), "err");
               return;
             }
-            window.__live2dAgent.setExpression(e.Name, 1);
-            setSheetStatus(__t("sheet.exprApplied", { name: e.Name }), "");
+            testBtn.disabled = true;
+            try {
+              // Vocabulary ekspresi dikumpulkan sekali saat model dimuat;
+              // file .exp3 yang muncul sesudahnya tampil di daftar ini tapi
+              // tak dikenal jalur apply — muat ulang model dulu, baru pasang.
+              const known = (state.modelExpressions || []).some(
+                (n) => String(n).toLowerCase() === String(e.Name).toLowerCase(),
+              );
+              if (!known) {
+                setSheetStatus(
+                  __t("sheet.exprReloading", { name: e.Name }),
+                  "busy",
+                );
+                await loadModel(state.modelPath);
+              }
+              // Langsung lewat facade: tombol ini menguji file .exp3 spesifik,
+              // bukan routing emosi (preset/klip) yang bisa menangkap nama sama.
+              const ok = state.model
+                ? await state.model.expression(e.Name)
+                : false;
+              if (ok)
+                setSheetStatus(
+                  __t("sheet.exprApplied", { name: e.Name }),
+                  "ok",
+                );
+              else
+                setSheetStatus(
+                  __t("sheet.exprFail", { name: e.Name }),
+                  "err",
+                );
+            } catch (err) {
+              setSheetStatus(
+                __t("sheet.exprFail", { name: e.Name }) + " · " + err.message,
+                "err",
+              );
+            } finally {
+              testBtn.disabled = false;
+            }
           });
           row.appendChild(testBtn);
           adEls.list.appendChild(row);
@@ -6500,6 +8077,8 @@
     gazeBody: 1,
     ttsRate: 1,
     ttsPitch: 1.15,
+    // Penekanan resonansi hidung (cempreng) — khusus SuperTonic native.
+    ttsNasal: 0,
     // Default "auto" = suara mengikuti bahasa teks balasan.
     ttsLang: "auto",
     ttsVoiceName: "",
@@ -6515,6 +8094,7 @@
 
   const TTS_RATE_RANGE = { min: 0.5, max: 2 };
   const TTS_PITCH_RANGE = { min: 0, max: 2 };
+  const TTS_NASAL_RANGE = { min: 0, max: 1 };
 
   state.modelConfig = Object.assign({}, MODEL_CONFIG_DEFAULTS);
 
@@ -6677,7 +8257,7 @@
         getOwnedParams: () => (state.caps && state.caps.params) || null,
         readParam: (id) => readParam(id),
 
-        applyParamDrive: (vals) => setRawDrive(vals),
+        applyParamDrive: (vals) => setRawDrive(stripApertureDrive(vals)),
         releaseParamDrive: (ids) => {
           if (!ids || !ids.length) return;
           const patch = {};
@@ -6880,9 +8460,19 @@
     }
   }
 
+  // Sheet yang sedang dilihat user di panel: lastSheet bila sudah terisi
+  // (simpan/inspeksi/chat pertama), kalau tidak — cache localStorage, sumber
+  // yang sama dengan render daftar preset. Dulu applyPreset/findPreset
+  // membaca state.lastSheet saja: daftar bisa menampilkan preset dari cache
+  // sementara jalur apply membaca kosong, jadi Terap gagal "tidak ada target
+  // valid" sampai user pencet Muat Ulang dari File.
+  function visibleSheet() {
+    return state.lastSheet || loadCharacterSheet();
+  }
+
   function findPreset(name, category) {
     if (!name || typeof name !== "string") return null;
-    const sheet = state.lastSheet;
+    const sheet = visibleSheet();
     if (!sheet || !sheet.presets) return null;
     const want = name.trim().toLowerCase();
     for (const branch of ['user', 'ai']) {
@@ -7264,7 +8854,7 @@
 
     if (preset.category === 'gerak') { playGesture(preset.name); return true; }
 
-    const sheet = state.lastSheet || {};
+    const sheet = visibleSheet() || {};
     const byId = new Map(
       (sheet.params || []).filter((p) => p && p.id).map((p) => [p.id, p]),
     );
@@ -7440,6 +9030,52 @@
     state._rawDriveLast = wrote;
   }
 
+  // Offset Lab Mulut: ADD per frame lewat antrean yang sama dengan poke
+  // app.js (flush order 900) — menumpuk di atas lipsync (450), bukan
+  // menimpanya. Mode SET di lab memakai setSticky (overrides) yang memang
+  // menimpa — itu poin eksperimennya.
+  function applyMouthLabOffsets() {
+    const d = state.mouthLab && state.mouthLab.offsets;
+    if (!d) return;
+    const cm = coreModel();
+    if (!cm) return;
+    for (const id in d) {
+      const v = d[id];
+      if (!Number.isFinite(v) || v === 0) continue;
+      try {
+        cm.addParameterValueById(id, v, 1);
+      } catch (e) {}
+    }
+  }
+
+  // Gerbang anti-freeze paramDrive: param bukaan mulut (role-resolved) tidak
+  // boleh ditulis absolut oleh siapa pun — SET di order 900 menimpa
+  // LipsyncUpdater (450) → mulut beku selama bicara. Sumber: Director
+  // (paramDrive), bukan jalur manual lab (setSticky sengaja tidak lewat sini).
+  function apertureIds() {
+    return [roleId("mouthOpenY"), roleId("mouthOpenX")].filter(Boolean);
+  }
+  function stripApertureDrive(vals) {
+    if (!vals || typeof vals !== "object") return vals;
+    const owned = apertureIds();
+    if (!owned.length) return vals;
+    const out = {};
+    let dropped = [];
+    for (const id in vals) {
+      if (owned.includes(id)) {
+        dropped.push(id);
+        continue;
+      }
+      out[id] = vals[id];
+    }
+    if (dropped.length)
+      console.warn(
+        "[paramDrive] param bukaan mulut ditolak (milik lipsync):",
+        dropped.join(", "),
+      );
+    return Object.keys(out).length ? out : null;
+  }
+
   function setRawDrive(patch) {
     if (!patch || typeof patch !== "object") return;
     if (!state.rawDrive) state.rawDrive = {};
@@ -7572,12 +9208,18 @@
       } catch (e) {}
     },
     isReady: () => !!state.model,
+    getApertureIds: apertureIds,
     getMouth: () => {
       const mId = roleId("mouthOpenY");
       return mId && state.overrides[mId] != null
         ? state.overrides[mId]
         : state.mouthRest;
     },
+    // Character Runtime produksi: singleton lazy (bridge produksi di dalam)
+    // + bendera routing. Dipakai jalur behavior idle dan Runtime Lab —
+    // instance sama supaya log keputusan lab memperlihatkan keputusan live.
+    getCharacterRuntime,
+    isRuntimeRouting,
     frameModel,
     zoom: setScaleAroundCenter,
     _getSupportedEmotions: () => state.supportedEmotions || {},
@@ -7745,7 +9387,10 @@
       state.look.tax = state.look.tay = 0;
       state.look.tex = state.look.tey = 0;
 
-      resetEmotion();
+      // Saat routing aktif, expression state milik Character Runtime —
+      // resetEmotion() legacy tidak dipanggil (pelepasan lewat clearExpression
+      // di bridge, dipanggil runtime sendiri). Jalur legacy tetap reset penuh.
+      if (!isRuntimeRouting()) resetEmotion();
       console.log("[Live2D] AI lock OFF — user control restored");
     },
 
@@ -7961,6 +9606,9 @@
     const p = Number(raw.ttsPitch);
     if (Number.isFinite(p))
       c.ttsPitch = clamp(p, TTS_PITCH_RANGE.min, TTS_PITCH_RANGE.max);
+    const n = Number(raw.ttsNasal);
+    if (Number.isFinite(n))
+      c.ttsNasal = clamp(n, TTS_NASAL_RANGE.min, TTS_NASAL_RANGE.max);
     if (
       typeof raw.ttsLang === "string" &&
       (/^[a-zA-Z]{2}(-[a-zA-Z0-9]{2,8})*$/.test(raw.ttsLang) ||

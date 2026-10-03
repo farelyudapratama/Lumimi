@@ -1,4 +1,5 @@
 import type * as RoleMapping from "./engine/role-mapping";
+import type * as MouthCandidates from "./engine/mouth-candidates";
 import type * as Framing from "./engine/framing";
 import type * as MotionDSL from "./animation/motion-dsl";
 import type { MotionRegistry } from "./animation/motion-registry";
@@ -17,6 +18,8 @@ import type {
   buildNativeClipsFromCounts,
 } from "./engine/native-clips";
 import type { toMotion3, motion3ToAsset } from "./animation/motion-io";
+import type { CharacterRuntime } from "./character/runtime";
+import type { directorToIntents, behaviorToIntents } from "./character/adapters";
 import type * as I18n from "./i18n/index";
 
 export type Destroy = () => void;
@@ -49,6 +52,8 @@ declare global {
     __shellProjek?: { start(): Destroy };
     __browserPanel?: { start(): Destroy };
     __roleMapping?: typeof RoleMapping;
+    /** Kandidat param mulut (Lab Mulut) — murni; verdict kepemilikan milik user. */
+    __mouthCandidates?: typeof MouthCandidates;
     __framing?: typeof Framing;
     __nativeExpressions?: { collect: typeof collectNativeExpressions };
     /** Klip motion native per-file — registry per-klip + playback exact. */
@@ -60,6 +65,13 @@ declare global {
     __motionIO?: {
       toMotion3: typeof toMotion3;
       motion3ToAsset: typeof motion3ToAsset;
+    };
+    /** Character Runtime (arbitrase slot) + adapter keputusan → Intent semantik. */
+    __characterRuntime?: {
+      CharacterRuntime: typeof CharacterRuntime;
+      create(): CharacterRuntime;
+      directorToIntents: typeof directorToIntents;
+      behaviorToIntents: typeof behaviorToIntents;
     };
     __i18n?: typeof I18n;
     /** Seam transport (Stage 1a) — titik tunggal komunikasi ke backend. */

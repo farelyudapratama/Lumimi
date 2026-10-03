@@ -26,6 +26,7 @@ import {
   deriveReplyActions,
 } from "./directive-parser";
 import { httpBase, transport } from "../transport";
+import { dropApertureParamCtx, directorToIntents } from "../character/adapters";
 import { estimateSpeechMs as estimateSpeechMsShared } from "../../shared/speech-timing";
 import type {
   ChatMessage,
@@ -80,6 +81,21 @@ const DEFAULT_EMOTIONS = [
 
 function l2d(): any {
   return (window as any).__live2dAgent;
+}
+
+/**
+ * Keputusan route per segmen (murni, mudah dites): toggle Character Runtime
+ * nyala DAN runtime ter-attach → kembalikan runtime; selain itu null (jalur
+ * legacy). Toggle/selector disediakan bridge production di app.js (TAHAP A,
+ * default mati) — error apa pun di sana dianggap "legacy" supaya speech tidak
+ * pernah mati karena runtime.
+ */
+export function resolveCharacterRuntime(agent: any): any | null {
+  try {
+    return agent?.isRuntimeRouting?.() ? (agent?.getCharacterRuntime?.() ?? null) : null;
+  } catch {
+    return null;
+  }
 }
 
 // Estimasi durasi bicara TTS satu segmen — rumusnya kini tinggal di
@@ -318,6 +334,15 @@ bila memang pas.
       // id NYATA + range TERUKUR model + penjelasan yang user konfigurasi.
       // Param yang PUNYA userNote diprioritaskan (keputusan berbasis maksud
       // user), lalu diisi sisanya; server memvalidasi & clamp nilai ke range.
+      // Param apertur (bukaan mulut, role-resolved) tidak pernah dikirim ke
+      // Director — kepemilikannya lipsync; Director yang menyetelnya berujung
+      // freeze (SET order 900 menimpa LipsyncUpdater 450).
+      const l2dAgent = l2d();
+      const apertureIds: string[] =
+        typeof l2dAgent?.getApertureIds === "function"
+          ? l2dAgent.getApertureIds()
+          : [];
+      const eligibleParams = dropApertureParamCtx(sheetParams, apertureIds);
       const paramCtx: Array<{ id: string; note?: string; min: number; max: number }> = [];
       const pushParam = (p: any) => {
         if (paramCtx.length >= 16 || !p || !p.id) return;
@@ -326,8 +351,8 @@ bila memang pas.
         const note = typeof p.userNote === "string" ? p.userNote.trim().slice(0, 80) : "";
         paramCtx.push(note ? { id: p.id, note, min: p.min, max: p.max } : { id: p.id, min: p.min, max: p.max });
       };
-      for (const p of sheetParams) if (p && typeof p.userNote === "string" && p.userNote.trim()) pushParam(p);
-      for (const p of sheetParams) pushParam(p);
+      for (const p of eligibleParams) if (p && typeof p.userNote === "string" && p.userNote.trim()) pushParam(p);
+      for (const p of eligibleParams) pushParam(p);
       const res = await fetch(httpBase() + "/api/animate-text", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -599,8 +624,14 @@ bila memang pas.
       const segIdx = i;
       i++;
 
-      // Apply this segment's actions (with inference fallback)
-      this.applyActions(seg.actions, segIdx, seg.text);
+      // TAHAP A migrasi: tiap segmen dinilai lewat gerbang toggle. Runtime
+      // nyala → keluaran director segmen ini jadi intent yang diarbitrase
+      // runtime (R1–R10), apply legacy untuk bidang itu DILEWATI; runtime
+      // mati atau fail-safe → jalur legacy persis seperti dulu.
+      if (!this.applySegmentViaRuntime(seg, segIdx)) {
+        // Apply this segment's actions (with inference fallback)
+        this.applyActions(seg.actions, segIdx, seg.text);
+      }
       // Chat log per-segment: teks baru muncul SESUDAH (seiring) TTS segmen ini
       if (seg.text) addChat("agent", seg.text);
       console.log(
@@ -626,6 +657,62 @@ bila memang pas.
       });
     };
     nextSegment();
+  }
+
+  /**
+   * TAHAP A migrasi — putar SATU segmen lewat Character Runtime bila toggle
+   * menyala. Keluaran director segmen (emotion/gesture/motion) dipetakan
+   * directorToIntents menjadi intent semantik lalu di-submit untuk
+   * diarbitrase (R1–R10 di runtime); apply legacy untuk bidang itu DILEWATI.
+   *
+   * paramDrive tidak pernah lewat jalur mana pun di sini: adapter sudah
+   * men-drop-nya ("raw-param-ditolak-policy" — param mentah model dilarang
+   * jadi intent) dan gerbang tulis param mentah tetap ada di bridge app.js;
+   * applyParamDrive legacy hanya hidup di jalur legacy (toggle mati).
+   *
+   * Pose/aksesori/property defensif tetap di-apply di kedua cabang (bukan
+   * keluaran director.rs saat ini — jangan dihilangkan).
+   *
+   * Fail-safe: submit yang melempar (atau adapter yang tak terduga melempar)
+   * → log warn + return false, pemanggil meneruskan apply legacy penuh untuk
+   * segmen itu. Speech tidak pernah mati karena runtime.
+   *
+   * Return true bila segmen ditangani runtime; false bila pemanggil harus
+   * memakai apply legacy penuh.
+   */
+  private applySegmentViaRuntime(seg: ParsedSegment, segIdx: number): boolean {
+    const rt = resolveCharacterRuntime(l2d());
+    if (!rt) return false;
+    try {
+      // Adapter membaca bentuk flat keluaran director.rs
+      // {text, emotion, gesture, motion, paramDrive, durationMs} — gabungkan
+      // actions + text segmen menjadi bentuk itu (nowMs didelegasikan ke
+      // runtime via bridge.now()).
+      const { intents } = directorToIntents(
+        [{ ...seg.actions, text: seg.text }],
+        undefined,
+      );
+      for (const intent of intents) {
+        try {
+          rt.submit(intent);
+        } catch (e: any) {
+          console.warn(
+            "[agent] runtime submit gagal, fallback legacy segmen",
+            segIdx + 1,
+            ":",
+            e?.message ?? e,
+          );
+          return false;
+        }
+      }
+    } catch (e: any) {
+      console.warn("[agent] routing runtime gagal, fallback legacy:", e?.message ?? e);
+      return false;
+    }
+    // Keluaran director sudah lewat runtime; sisa bidang defensif tetap
+    // di-apply, keluaran director dilewati.
+    this.applyActions(seg.actions, segIdx, seg.text, { skipDirectorOutputs: true });
+    return true;
   }
 
   /**
@@ -684,9 +771,19 @@ bila memang pas.
   // ── Apply actions to the model (AI-driven, EASED) ──
   // Pose dikirim sebagai TARGET nested {head,eyes,mouth,body} ke setAIPose();
   // engine yang ease menuju target dan menumpuk ambient fidget di atasnya.
-  private applyActions(actions: ParsedActions, segmentIndex = 0, segmentText = ""): void {
+  private applyActions(
+    actions: ParsedActions,
+    segmentIndex = 0,
+    segmentText = "",
+    opts?: { skipDirectorOutputs?: boolean },
+  ): void {
     const agent = l2d();
     if (!agent || !agent.isReady?.()) return;
+
+    // TAHAP A: saat segmen diputar lewat Character Runtime, keluaran director
+    // (emotion/motion/paramDrive/gesture) TIDAK di-apply legacy — runtime yang
+    // mengarbitrasenya lewat intent. Pose/aksesori/property defensif tetap jalan.
+    const skipDirectorOutputs = opts?.skipDirectorOutputs === true;
 
     // Emotion — pakai intensity (default 0.85) dan fallback preset
     // "user:<nama>" untuk sheet preset yang bukan emosi param/native bawaan.
@@ -696,7 +793,7 @@ bila memang pas.
     // jalurnya; emosi sintetis hardcode TIDAK diiklankan di vocab — nama
     // asing jatuh ke "user:<nama>" (preset user) atau fallback engine.
     let emotionVia: string | undefined;
-    if (actions.emotion) {
+    if (actions.emotion && !skipDirectorOutputs) {
       const vocab =
         (agent.getExpressibleEmotions && agent.getExpressibleEmotions()) || {};
       emotionVia = vocab[actions.emotion];
@@ -774,7 +871,7 @@ bila memang pas.
     // tidak pernah ada dua penulis satu parameter — preset mengisi sisa
     // field (mata, badan) yang tidak disentuh motion user. Bila id motion
     // asing (playMotion false) preset tetap jalan sendirian seperti dulu.
-    if (actions.motion && agent.playMotion) {
+    if (!skipDirectorOutputs && actions.motion && agent.playMotion) {
       const handledByMotion = agent.playMotion(actions.motion, {
         fromLLM: true,
         intensity: actions.intensity != null ? actions.intensity : undefined,
@@ -793,7 +890,7 @@ bila memang pas.
     // & di-clamp ke range oleh server) — lapisan ekspresif tambahan biar lebih
     // menjiwai. Ditulis absolut lewat rawDrive; id-nya dicatat agar dilepas
     // saat lock AI selesai (lihat unlock() di playSegments).
-    if (actions.paramDrive && agent.applyParamDrive) {
+    if (!skipDirectorOutputs && actions.paramDrive && agent.applyParamDrive) {
       try {
         agent.applyParamDrive(actions.paramDrive);
         for (const id of Object.keys(actions.paramDrive))
@@ -807,7 +904,8 @@ bila memang pas.
     // memakai nama dari daftar capability) atau gerak tubuh bawaan emosi via
     // aset model (.exp3/klip).
     const gestureToPlay = actions.gesture || null;
-    if (gestureToPlay && agent.playGesture) agent.playGesture(gestureToPlay);
+    if (!skipDirectorOutputs && gestureToPlay && agent.playGesture)
+      agent.playGesture(gestureToPlay);
   }
 
   setPresence(p: boolean | null): void {

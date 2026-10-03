@@ -82,6 +82,9 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/tts/test", axum::routing::post(post_tts_test))
         .route("/api/tts/translate", axum::routing::post(post_tts_translate))
         .route("/api/stt", axum::routing::post(post_stt))
+        .route("/api/media/status", axum::routing::get(get_media_status))
+        .route("/api/media/download", axum::routing::post(post_media_download))
+        .route("/api/media/delete", axum::routing::post(post_media_delete))
         .route("/api/mode", get(get_mode).post(post_mode))
         .route("/api/pet/launch", axum::routing::post(post_pet_launch))
         .route("/api/pet/close", axum::routing::post(post_pet_close))
@@ -348,7 +351,7 @@ async fn get_tts_options(
             .trim()
             .to_string();
     }
-    if provider == "supertonic" || provider == "native" || provider.is_empty() {
+    if provider == "auto" || provider == "supertonic" || provider == "native" || provider.is_empty() {
         let mut voices = media::tts_voices(&paths);
         if voices.is_empty() {
             voices = ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"].iter().map(|s| s.to_string()).collect();
@@ -845,12 +848,55 @@ async fn post_vtuber_operator(body: axum::body::Bytes) -> Response {
     }
 }
 
+/// GET /api/media/status — ketersediaan mesin native (SuperTonic TTS, whisper
+/// STT) untuk status UI. Model tidak dibundel & tidak diunduh otomatis: yang
+/// dilaporkan apa adanya (tersedia/belum + path pencariannya).
+async fn get_media_status(State(paths): State<AppPaths>) -> Response {
+    let cfg_path = paths.data_dir.join("config.json");
+    json_status(StatusCode::OK, media::media_status(&paths, &cfg_path))
+}
+
+/// POST /api/media/download {target: "supertonic"|"whisper", model?} — mulai
+/// unduhan model native (per-engine terpisah, background). Idempoten bila
+/// masih berjalan. Progres dibaca lewat /api/media/status → `downloads`.
+async fn post_media_download(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("");
+    let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("base");
+    if target.is_empty() {
+        return json_status(StatusCode::BAD_REQUEST, json!({ "error": "target kosong (supertonic|whisper)" }));
+    }
+    match media::start_media_download(paths, target, model) {
+        Ok(()) => json_status(StatusCode::ACCEPTED, json!({ "ok": true })),
+        Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
+    }
+}
+
+/// POST /api/media/delete {target: "supertonic"|"whisper", model?} — hapus
+/// model native dari SEMUA lokasi yang dikenal (padanan tombol hapus di panel
+/// mesin native). Return {deleted: [{path, bytes}], freed_bytes}.
+async fn post_media_delete(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("");
+    let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
+    if target.is_empty() {
+        return json_status(StatusCode::BAD_REQUEST, json!({ "error": "target kosong (supertonic|whisper)" }));
+    }
+    match media::delete_media_model(&paths, target, model) {
+        Ok(rep) => json_status(StatusCode::OK, rep),
+        Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
+    }
+}
+
 /// POST /api/stt — transkripsi audio WAV. Provider "local" = whisper in-process
 /// (butuh build feature engine-stt); tanpa feature → 503. Provider "openai" =
 /// cloud OpenAI-compatible, HANYA bila user eksplisit menyetelnya di config.
 async fn post_stt(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let cfg_path = paths.data_dir.join("config.json");
     let (provider, model, lang) = media::stt_provider_model(&cfg_path);
+    // "auto" = resolusi di klien (native bila tersedia, else browser); di
+    // server diperlakukan sama dengan "local" supaya pemanggil lama tetap jalan.
+    let provider = if provider == "auto" || provider.is_empty() { "local".to_string() } else { provider };
     if body.is_empty() {
         return json_status(StatusCode::BAD_REQUEST, json!({ "error": "audio kosong" }));
     }
@@ -1648,6 +1694,10 @@ mod tests {
             ("GET", "/api/assistant/memory", None),
             ("POST", "/api/assistant/start", Some(json!({"workDir":""}))),
             ("POST", "/api/stt", Some(json!([]))),
+            ("GET", "/api/media/status", None),
+            // target tak dikenal → 400 tanpa menyentuh jaringan (uji klaim rute).
+            ("POST", "/api/media/download", Some(json!({"target":"aneh"}))),
+            ("POST", "/api/media/delete", Some(json!({"target":"aneh"}))),
         ];
         for (method, path, body) in cases {
             let (status, json) = call(method, path, body).await;

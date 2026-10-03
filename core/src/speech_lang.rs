@@ -90,6 +90,13 @@ fn strip_quotes(s: &str) -> String {
 
 /// Terjemahkan satu baris ke bahasa `tts_lang` via LLM role "chat".
 /// Teks sudah berbahasa target / gagal → teks asli.
+/// Bahasa target yang deteksinya andal (skrip tulisan unik). Untuk target
+/// latin (id/en/...) heuristik tidak bisa dipercaya — hasil terjemahan
+/// diterima apa adanya, tanpa penalti tebakan salah.
+fn deteksi_andal(target: &str) -> bool {
+    matches!(target, "ja" | "zh" | "ko")
+}
+
 pub async fn translate_for_speech(config_path: &Path, text: &str, tts_lang: &str) -> String {
     let src = text.trim().to_string();
     let target = speech_lang_of(tts_lang);
@@ -107,17 +114,38 @@ pub async fn translate_for_speech(config_path: &Path, text: &str, tts_lang: &str
          If it is already in {name}, output it unchanged."
     );
     let clipped: String = src.chars().take(2000).collect();
-    let messages = [ChatMessage { role: "user".into(), content: clipped }];
-    match llm::llm_for_role(config_path, "chat", &messages, &sys).await {
-        Ok(ok) => {
-            let out = strip_quotes(&ok.reply);
-            if out.is_empty() {
-                src
-            } else {
+    let messages = [ChatMessage { role: "user".into(), content: clipped.clone() }];
+    let first = match llm::llm_for_role(config_path, "chat", &messages, &sys).await {
+        Ok(ok) => strip_quotes(&ok.reply),
+        Err(_) => return src, // gagal = teks asli (bukan jalur kritis)
+    };
+    if first.is_empty() {
+        return src;
+    }
+    // Model kadang melenceng (balasan bukan bahasa target, atau campuran) —
+    // inilah sumber suara "nyampur". Untuk target ber-skrip unik deteksinya
+    // pasti: cek, lalu minta ulang SEKALI dengan penegasan. Tetap meleset →
+    // teks asli (jangan bunuh jalur suara karena terjemahan).
+    if !deteksi_andal(&target) || detect_speech_lang_base(&first) == target {
+        return first;
+    }
+    let sys2 = format!(
+        "{sys} Your previous answer was NOT in {name}. Answer again with ONLY the full line in {name}."
+    );
+    let messages2 = [ChatMessage {
+        role: "user".into(),
+        content: format!("{clipped}\n\nPrevious wrong answer: {first}"),
+    }];
+    match llm::llm_for_role(config_path, "chat", &messages2, &sys2).await {
+        Ok(ok2) => {
+            let out = strip_quotes(&ok2.reply);
+            if !out.is_empty() && detect_speech_lang_base(&out) == target {
                 out
+            } else {
+                src
             }
         }
-        Err(_) => src, // gagal = teks asli (bukan jalur kritis)
+        Err(_) => src,
     }
 }
 
@@ -146,6 +174,18 @@ mod tests {
         assert_eq!(speech_lang_of("en-US"), "en");
         assert_eq!(speech_lang_of("auto"), "auto");
         assert_eq!(speech_lang_of(""), "");
+    }
+
+    #[test]
+    fn target_skrip_andal_untuk_validasi() {
+        // Validasi + retry hanya untuk target ber-skrip unik (deteksi pasti);
+        // target latin (heuristik lemah) diterima apa adanya — hindari retry
+        // palsu atas terjemahan yang sebenarnya benar.
+        assert!(deteksi_andal("ja"));
+        assert!(deteksi_andal("zh"));
+        assert!(deteksi_andal("ko"));
+        assert!(!deteksi_andal("id"));
+        assert!(!deteksi_andal("en"));
     }
 
     #[tokio::test]

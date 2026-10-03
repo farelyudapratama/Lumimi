@@ -52,14 +52,16 @@ describe("toMotion3 (ekspor)", () => {
     expect(j.Curves).toHaveLength(2);
     expect(j.Curves[0].Id).toBe("ParamAngleX");
     // Skala referensi: role ±30 → nilai nyata dalam range model.
-    expect(j.Curves[0].Segments).toEqual([0, 0, 1, 15]);
+    // Format Cubism: [t0, v0, tipe, t, v] → [0, 0, LINEAR, 1, 15].
+    expect(j.Curves[0].Segments).toEqual([0, 0, 0, 1, 15]);
     // Meta dihitung dari isi kurva.
     expect(j.Meta.CurveCount).toBe(2);
     expect(j.Meta.Duration).toBe(2);
-    // Titik = nilai awal kurva + ujung tiap segmen (bezier menyumbang 3).
+    // Titik = titik awal kurva [t0,v0] + ujung tiap segmen (bezier menyumbang 3).
+    // Segmen mulai di indeks 2 (dua angka pertama = titik awal).
     const points = j.Curves.reduce((s: number, c: any) => {
       let n = 1;
-      for (let i = 1; i < c.Segments.length; ) {
+      for (let i = 2; i < c.Segments.length; ) {
         const bezier = c.Segments[i] === 1;
         n += bezier ? 3 : 1;
         i += bezier ? 7 : 3;
@@ -69,7 +71,7 @@ describe("toMotion3 (ekspor)", () => {
     expect(j.Meta.TotalPointCount).toBe(points);
     const segments = j.Curves.reduce((s: number, c: any) => {
       let n = 0;
-      for (let i = 1; i < c.Segments.length; ) {
+      for (let i = 2; i < c.Segments.length; ) {
         n++;
         i += c.Segments[i] === 1 ? 7 : 3;
       }
@@ -95,9 +97,9 @@ describe("toMotion3 (ekspor)", () => {
     });
     const j = toMotion3(a, { roleMap: ROLE_MAP, ranges: RANGES }).json as any;
     const segs = j.Curves[0].Segments;
-    // v0, stepped(2) ke (1,5), bezier(1) 3 titik kontrol ke (2,10).
+    // [t0, v0], stepped(2) ke (1,5), bezier(1) 3 titik kontrol ke (2,10).
     expect(segs).toEqual([
-      0,
+      0, 0,
       2, 1, 5,
       1, 1.42, 5, 1.58, 10, 2, 10,
     ]);
@@ -134,7 +136,8 @@ describe("motion3ToAsset (impor)", () => {
         {
           Target: "Parameter",
           Id: "ParamAngleX",
-          Segments: [0, 2, 1, 7, 0, 2, 10],
+          // [t0=0, v0=0], stepped(2)→(1,7), linear(0)→(2,10).
+          Segments: [0, 0, 2, 1, 7, 0, 2, 10],
         },
       ],
     }, { id: "uji_impor", sourceModelId: "hana" });
@@ -150,6 +153,20 @@ describe("motion3ToAsset (impor)", () => {
     ]);
   });
 
+  it("kurva datar 2-titik tetap datar — durasi TIDAK bocor jadi nilai (regresi mtn_03)", () => {
+    // Native asli: [t0=0, v0=0, LINEAR, t1=4.4, v1=0] — param diam di 0
+    // sepanjang 4.4 dtk. Bug lama membaca indeks geser → nilai jadi 4.4.
+    const res = motion3ToAsset({
+      Meta: { Duration: 4.4 },
+      Curves: [{ Target: "Parameter", Id: "ParamCheek", Segments: [0, 0, 0, 4.4, 0] }],
+    }, { id: "datar" });
+    expect(res.errors).toEqual([]);
+    const keys = (res.asset as any).tracks[0].keys;
+    expect(keys).toEqual([{ t: 0, v: 0 }, { t: 4.4, v: 0 }]);
+    // Tidak boleh ada keyframe yang nilainya = durasi klip.
+    expect(keys.some((k: any) => k.v === 4.4)).toBe(false);
+  });
+
   it("bezier bentuk ease dikenali; bezier asing disubdividi linear", () => {
     // ease-in-out: kontrol (0.42,0)(0.58,1) fraksi → nilai absolut.
     const seg = (x1: number, y1: number, x2: number, y2: number) =>
@@ -157,7 +174,8 @@ describe("motion3ToAsset (impor)", () => {
         Meta: { Duration: 1 },
         Curves: [{ Target: "Model", Id: "ParamAngleZ" }].map((c: any) => ({
       ...c,
-      Segments: [0, 1, x1, y1, x2, y2, 1, 1],
+      // [t0=0, v0=0], bezier(1) kontrol (x1,y1)(x2,y2) → (1,1).
+      Segments: [0, 0, 1, x1, y1, x2, y2, 1, 1],
     })),
       }, { id: "bz" });
     const known = seg(0.42, 0, 0.58, 1).asset as any;
@@ -174,8 +192,8 @@ describe("motion3ToAsset (impor)", () => {
     const res = motion3ToAsset({
       Meta: { Duration: 2 },
       Curves: [
-        { Target: "PartOpacity", Id: "PartHair", Segments: [1, 0, 0.5, 1] },
-        { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 3, 1, 9, 0, 2, 9] },
+        { Target: "PartOpacity", Id: "PartHair", Segments: [0, 1, 0, 0.5, 1] },
+        { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 0, 3, 1, 9, 0, 2, 9] },
       ],
     }, { id: "campur" });
     expect(res.asset).not.toBeNull();
@@ -191,7 +209,7 @@ describe("motion3ToAsset (impor)", () => {
     const res = motion3ToAsset({
       Meta: { Duration: 30 },
       Curves: [
-        { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 0, 25, 5, 0, 30, 0] },
+        { Target: "Parameter", Id: "ParamAngleX", Segments: [0, 0, 0, 25, 5, 0, 30, 0] },
       ],
     }, { id: "panjang" });
     expect(res.asset).not.toBeNull();

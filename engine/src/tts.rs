@@ -315,3 +315,103 @@ fn split_sentences(text: &str) -> Vec<String> {
     }
     out
 }
+
+// ── DSP pasca-sintesis (untuk efek pitch/cempreng) ──────────────────
+// Pitch-shift ala kartun: resample linear + kompensasi durasi di pemanggil
+// (synth dengan speed lebih lambat, lalu resample naik) — pitch naik, tempo
+// kembali normal. Sengaja tanpa dependensi; untuk faktor moderat (≤1.5×)
+// kualitasnya cukup dan karakter "saluran suara kecil" justru tercapai.
+
+/// Resample linear sebesar `factor` (>1 = lebih pendek + pitch naik).
+/// factor di luar (0, ∞) atau ≈1 → salinan apa adanya.
+pub fn pitch_resample(samples: &[f32], factor: f32) -> Vec<f32> {
+    if !factor.is_finite() || factor <= 0.0 || (factor - 1.0).abs() < 1e-6 || samples.len() < 2 {
+        return samples.to_vec();
+    }
+    let out_len = ((samples.len() as f32 - 1.0) / factor).floor() as usize + 1;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let pos = i as f32 * factor;
+        let i0 = pos.floor() as usize;
+        let i1 = (i0 + 1).min(samples.len() - 1);
+        let t = pos - i0 as f32;
+        out.push(samples[i0] * (1.0 - t) + samples[i1] * t);
+    }
+    out
+}
+
+/// Penekanan resonansi "hidung" (cempreng) via peaking biquad (RBJ cookbook)
+/// di sekitar 1.8 kHz — pita formant yang membuat suara terdengar nasal.
+/// `amount` 0..1 → gain 0..+8 dB. amount ≤ 0 → salinan apa adanya.
+pub fn nasal_filter(samples: &[f32], sample_rate: u32, amount: f32) -> Vec<f32> {
+    if amount <= 0.0 || !amount.is_finite() || samples.is_empty() {
+        return samples.to_vec();
+    }
+    let gain_db = (amount.clamp(0.0, 1.0)) * 8.0;
+    let a = 10.0f32.powf(gain_db / 40.0);
+    let w0 = 2.0 * std::f32::consts::PI * 1800.0 / sample_rate.max(8000) as f32;
+    let cos = w0.cos();
+    let alpha = w0.sin() / (2.0 * 1.4f32); // Q = 1.4
+    let a0 = 1.0 + alpha / a;
+    let (b0, b1, b2) = ((1.0 + alpha * a) / a0, (-2.0 * cos) / a0, (1.0 - alpha * a) / a0);
+    let (a1, a2) = ((-2.0 * cos) / a0, (1.0 - alpha / a) / a0);
+    let mut x1 = 0.0f32;
+    let mut x2 = 0.0f32;
+    let mut y1 = 0.0f32;
+    let mut y2 = 0.0f32;
+    samples
+        .iter()
+        .map(|&x| {
+            let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+            x2 = x1;
+            x1 = x;
+            y2 = y1;
+            y1 = y;
+            y
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod dsp_tests {
+    use super::*;
+
+    #[test]
+    fn resample_mengubah_panjang_dan_frekuensi() {
+        // Sinus dengan periode tak bulat (hindari nol eksak di indeks sampel —
+        // deteksi crossing sensitif float): ~10 siklus per 1000 sampel.
+        let sr_period = 100.3f32;
+        let samples: Vec<f32> = (0..1000)
+            .map(|i| (2.0 * std::f32::consts::PI * i as f32 / sr_period).sin())
+            .collect();
+        let up = pitch_resample(&samples, 2.0);
+        // Panjang mendekati setengah; jumlah siklus (≈ frekuensi) terjaga ±1.
+        assert!((up.len() as f32 - 500.0).abs() <= 2.0);
+        let crossings = |s: &[f32]| -> usize {
+            s.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count()
+        };
+        let c0 = crossings(&samples);
+        let c1 = crossings(&up);
+        assert!(c1.abs_diff(c0) <= 1, "crossings {c0} vs {c1}");
+        // factor 1.0 / tak valid → salinan.
+        assert_eq!(pitch_resample(&samples, 1.0), samples);
+        assert_eq!(pitch_resample(&samples, 0.0), samples);
+    }
+
+    #[test]
+    fn nasal_filter_identity_di_nol_dan_boost_di_pusat() {
+        let sr = 22050u32;
+        let sine = |f: f32, n: usize| -> Vec<f32> {
+            (0..n).map(|i| (2.0 * std::f32::consts::PI * f * i as f32 / sr as f32).sin()).collect()
+        };
+        let s = sine(1800.0, sr as usize / 2);
+        // amount 0 = identik.
+        assert_eq!(nasal_filter(&s, sr, 0.0), s);
+        // RMS di frekuensi pusat naik, jauh di bawah (200 Hz) hampir netral.
+        let rms = |x: &[f32]| -> f32 { (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt() };
+        let boosted = nasal_filter(&s, sr, 1.0);
+        let low = nasal_filter(&sine(200.0, sr as usize / 2), sr, 1.0);
+        assert!(rms(&boosted) > rms(&s) * 1.2);
+        assert!(rms(&low) < rms(&sine(200.0, sr as usize / 2)) * 1.35);
+    }
+}

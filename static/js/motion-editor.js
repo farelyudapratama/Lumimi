@@ -171,7 +171,7 @@
 
   // ── Akses track / keyframe (track = satu parameter mentah) ───────
   function trackFor(paramId, create) {
-    if (!state.draft) return null;
+    if (!state.draft || !Array.isArray(state.draft.tracks)) return null;
     let t = state.draft.tracks.find(x => x.kind === 'param' && x.param === paramId);
     if (!t && create) {
       const meta = state.paramById.get(paramId);
@@ -248,6 +248,7 @@
   function applyScrubPose() {
     const l2d = L2D();
     if (!l2d || !l2d.setRawDrive || !state.draft) return;
+    if (!Array.isArray(state.draft.tracks)) return; // draft tidak sah — jangan crash
     const patch = {};
     for (const tr of state.draft.tracks) {
       if (tr.kind !== 'param' || !tr.keys.length) continue;
@@ -691,8 +692,21 @@
     const sel = $('#ms-lib');
     if (!sel) return;
     const cur = state.draft ? state.draft.id : '';
+    const draftIsSaved = !!state.draft && state.userMotions.some(m => m.id === cur);
     sel.innerHTML = '';
-    if (!state.userMotions.length) {
+    // Draft yang belum tersimpan (hasil impor / draft baru) tampil sebagai opsi
+    // terpilih tersendiri supaya nama di dropdown COCOK dengan yang sedang
+    // diedit — bukan nyangkut di motion tersimpan pertama. Value sentinel
+    // '__draft__' diabaikan handler change (memilihnya tidak menimpa draft).
+    if (state.draft && !draftIsSaved) {
+      const o = document.createElement('option');
+      o.value = '__draft__';
+      const nm = (state.draft.name || state.draft.id || '').trim();
+      o.textContent = nm ? (nm + '  ' + __t('ms.draftUnsaved')) : __t('ms.draftNew');
+      o.selected = true;
+      sel.appendChild(o);
+    }
+    if (!state.userMotions.length && !state.draft) {
       const o = document.createElement('option');
       o.value = ''; o.textContent = __t('ms.libEmpty');
       sel.appendChild(o);
@@ -703,7 +717,7 @@
       // Motion dari model lain ditandai: parameternya mungkin tidak cocok.
       const foreign = m.sourceModelId && m.sourceModelId !== modelKey();
       o.textContent = (m.name || m.id) + (foreign ? '  (model lain)' : '');
-      if (m.id === cur) o.selected = true;
+      if (draftIsSaved && m.id === cur) o.selected = true;
       sel.appendChild(o);
     }
   }
@@ -894,6 +908,30 @@
   function loadDraft(id) {
     const found = state.userMotions.find(m => m.id === id);
     let draft = found ? JSON.parse(JSON.stringify(found)) : blankDraft();
+    // .motion3.json mentah (hasil copas dari tool lain / versi lama) tidak punya
+    // `tracks` — tanpa ini editor crash di trackFor dan popup nyangkut saat
+    // ditutup. File berformat Cubism (punya Curves) dikonversi jadi draft DSL;
+    // sisanya di-blank-kan agar editor tetap terbuka dan BISA ditutup.
+    if (draft && !Array.isArray(draft.tracks)) {
+      if (Array.isArray(draft.Curves)) {
+        const io = window.__motionIO;
+        const res = io && io.motion3ToAsset
+          ? io.motion3ToAsset(draft, {
+              id: (found && found.id) || id,
+              name: (found && (found.name || found.id)) || id,
+              sourceModelId: modelKey(),
+            })
+          : null;
+        if (res && res.asset) {
+          draft = res.asset;
+          setStatus(__t('ms.importedOk', { name: draft.name || id }));
+        } else {
+          draft = blankDraft();
+        }
+      } else {
+        draft = blankDraft();
+      }
+    }
     // Normalkan sekali: track lama tidak punya `kind`.
     for (const tr of (draft.tracks || [])) {
       if (!tr.kind) tr.kind = tr.param ? 'param' : 'role';
@@ -1135,7 +1173,7 @@
       card.appendChild(nm); card.appendChild(src); card.appendChild(play);
       if (a.source === 'user') {
         const edit = document.createElement('button');
-        edit.className = 'mini-btn ms-icon';
+        edit.className = 'mini-btn ms-icon ms-hover';
         edit.textContent = __t('ms.editBtn');
         edit.title = __t('ms.editTip');
         edit.addEventListener('click', async () => { await openStudio(); loadDraft(a.id); });
@@ -1145,13 +1183,16 @@
         // Impor = salin isi klip native jadi draft milikmu (file model tidak
         // disentuh); rename = overlay alias di data/, bukan edit model3.json.
         const imp = document.createElement('button');
-        imp.className = 'mini-btn ms-icon';
+        imp.className = 'mini-btn ms-icon ms-hover';
         imp.textContent = '⤓';
         imp.title = __t('ms.importNativeTip');
-        imp.addEventListener('click', () => importNativeClip(a));
+        // Buka studio DULU baru impor: openStudio() memanggil loadDraft() yang
+        // me-reset state.draft, jadi impor harus jadi tulisan terakhir supaya
+        // klip native yang dipilih tidak ketimpa draft default.
+        imp.addEventListener('click', async () => { await openStudio(); await importNativeClip(a); });
         card.appendChild(imp);
         const ren = document.createElement('button');
-        ren.className = 'mini-btn ms-icon';
+        ren.className = 'mini-btn ms-icon ms-hover';
         ren.textContent = '✎';
         ren.title = __t('ms.renameNativeTip');
         ren.addEventListener('click', () => renameNativeClip(a));
@@ -1306,16 +1347,21 @@
   function closeStudio() {
     const pop = $('#motion-studio-popup');
     if (!pop) return;
-    stopPreview();
-    // Lepas semua parameter yang dikemudikan editor SEBELUM unfreeze, kalau
-    // tidak nilai terakhir menempel dan model terlihat nyangkut di pose edit.
-    releaseAllDriven();
-    const l2d = L2D();
-    if (l2d && l2d.clearRawDrive) l2d.clearRawDrive();
+    // Sembunyikan DULU sebelum pembersihan: langkah cleanup tidak boleh bisa
+    // membuat popup nyangkut (pernah terjadi via stopPreview→applyScrubPose
+    // pada draft rusak). Pose aneh sisa cleanup gagal bisa diterima — stuck tidak.
     pop.classList.add('hidden');
     pop.setAttribute('aria-hidden', 'true');
     state.open = false;
-    if (l2d && l2d.unfreezeForEdit) l2d.unfreezeForEdit();
+    try {
+      stopPreview();
+      // Lepas semua parameter yang dikemudikan editor SEBELUM unfreeze, kalau
+      // tidak nilai terakhir menempel dan model terlihat nyangkut di pose edit.
+      releaseAllDriven();
+      const l2d = L2D();
+      if (l2d && l2d.clearRawDrive) l2d.clearRawDrive();
+      if (l2d && l2d.unfreezeForEdit) l2d.unfreezeForEdit();
+    } catch (e) { /* popup tetap tertutup */ }
     if (state.dirty) {
       const st = $('#motion-open-status');
       if (st) st.textContent = __t('ms.unsavedChanges');
@@ -1486,6 +1532,8 @@
     on('#motion-studio-close', 'click', closeStudio);
 
     on('#ms-lib', 'change', (e) => {
+      // Opsi draft belum tersimpan: bukan tujuan pindah — biarkan draft apa adanya.
+      if (e.target.value === '__draft__') return;
       if (state.dirty && !confirm(__t('ms.confirmSwitch'))) { renderLibrary(); return; }
       releaseAllDriven();
       loadDraft(e.target.value);

@@ -79,9 +79,10 @@ cpSync(join(REPO, "static"), join(OUT, "static"), { recursive: true });
 }
 
 // Mesin inferensi native (TTS SuperTonic + STT Whisper) adalah LIB yang
-// di-link in-process — tidak ada exe sidecar. Model TIDAK dibundel — diunduh
-// on-demand saat provider native pertama dipakai (~/.cache/supertonic3,
-// ggml-<model>.bin).
+// di-link in-process — tidak ada exe sidecar. Model TIDAK dibundel dan TIDAK
+// diunduh otomatis (on-demand belum diport ke core): taruh manual di
+// ~/.cache/supertonic3 atau <root>/engines/models/supertonic3 (TTS), dan
+// <root>/engines/models/ggml-<model>.bin (STT; butuh build --features engine-stt).
 
 writeFileSync(
   join(OUT, "BACA-SAYA.txt"),

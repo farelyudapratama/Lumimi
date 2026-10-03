@@ -26,6 +26,14 @@ import type { CubismMotion } from "./cubism/motion/cubismmotion";
 import { ACubismMotion } from "./cubism/motion/acubismmotion";
 import { CubismFramework } from "./cubism/live2dcubismframework";
 import type { CubismIdHandle } from "./cubism/id/cubismid";
+import { CubismMotionCurveTarget } from "./cubism/motion/cubismmotioninternal";
+import {
+  applyBaselineRelease,
+  collectMotionCurveIds,
+  CURVE_TARGET_PARAMETER,
+  planBaselineRelease,
+  type BaselineReleasePlan,
+} from "./baseline-release";
 
 /** Konvensi prioritas motion sample resmi (LAppDefine). */
 export const MotionPriority = {
@@ -34,6 +42,10 @@ export const MotionPriority = {
   Normal: 2,
   Force: 3,
 } as const;
+
+/** Durasi ease pose terakhir klip → default model saat window play berakhir
+ * (pelepasan kepemilikan motion atas parameter). */
+const BASELINE_RELEASE_MS = 450;
 
 /** Updater lipsync: menulis param mulut (role-resolved) dari penyedia
  * nilai 0..1, diskalakan ke range aktual param. Provider null = tidak
@@ -132,6 +144,16 @@ export class Live2DUserModel extends CubismUserModel {
   private _eyeBlinkIds: CubismIdHandle[] = [];
   private _lipSyncIds: CubismIdHandle[] = [];
   private _look: CubismLook | null = null;
+  /** Kurva param klip yang main pada window play berjalan (akumulasi lintas
+   * penggantian klip — klip baru tak selalu menganimasi param klip lama).
+   * Isinya id mentah (CubismIdHandle) — diteruskan apa adanya ke
+   * getParameterIndex. */
+  private _playCurveIds = new Set<unknown>();
+  private _wasMotionPlaying = false;
+  private _baselineRelease: {
+    plan: BaselineReleasePlan;
+    elapsedMs: number;
+  } | null = null;
 
   /** Kaitkan manifest + direktori dasar setelah moc termuat.
    * Id blink/lipsync dari grup resmi manifest (by-name, bukan indeks). */
@@ -238,6 +260,16 @@ export class Live2DUserModel extends CubismUserModel {
   update(dtSeconds: number): void {
     const model = this.getModel();
     if (!model) return;
+    // Kurva klip yang main direkam SEBELUM updateMotion — entri yang selesai
+    // dihapus di dalamnya. Isinya dipakai saat window play berakhir untuk
+    // melepas baseline kembali ke default model (pelepasan kepemilikan).
+    if (!this._motionManager.isFinished()) {
+      collectMotionCurveIds(
+        this._motionManager.getCubismMotionQueueEntries(),
+        CURVE_TARGET_PARAMETER,
+        this._playCurveIds,
+      );
+    }
     model.loadParameters();
     this._motionUpdated = false;
     // updateMotion dipanggil TANPA syarat: reset _currentPriority hidup di
@@ -245,12 +277,58 @@ export class Live2DUserModel extends CubismUserModel {
     // motion terakhir "lengket" selamanya — reserveMotion menolak semua play
     // sesama band, akar "klip native cuma bisa diputar sekali".
     this._motionUpdated = this._motionManager.updateMotion(model, dtSeconds);
-    if (this._motionManager.isFinished() && this.autoIdle) {
+    const finishedNow = this._motionManager.isFinished();
+    if (this._wasMotionPlaying && finishedNow) this._beginBaselineRelease(model);
+    this._wasMotionPlaying = !finishedNow;
+    if (finishedNow) {
+      // Tulis SEBELUM saveParameters supaya baseline-nya ikut pulang (bukan
+      // tulisan frame-transien yang dibuang loadParameters berikutnya).
+      this._applyBaselineRelease(model, dtSeconds);
+    } else {
+      // Motion baru masuk → pelepasan yang berjalan dibatalkan; motion yang
+      // memegang param itu lagi adalah pemilik sah barunya.
+      this._baselineRelease = null;
+    }
+    if (finishedNow && this.autoIdle) {
       this.startIdleIfAvailable();
     }
     model.saveParameters();
     this.updateScheduler.onLateUpdate(model, dtSeconds);
     model.update();
+  }
+
+  /** Awali pelepasan baseline: param kurva window play terakhir di-ease ke
+   * default model selama BASELINE_RELEASE_MS. Tanpa ini pose terakhir klip
+   * tertahan selamanya di buffer saveParameters — sistem aditif (gaze/
+   * liveliness/breath) hanya menulis offset di atasnya dan Core meng-clamp
+   * hasilnya ke range param, jadi bagian yang dianimasikan klip tampak
+   * beku/kaku setelah klip selesai. */
+  private _beginBaselineRelease(model: CubismModel): void {
+    this._baselineRelease = null;
+    const core = (model as any)._model;
+    const defaults = core?.parameters?.defaultValues;
+    if (!defaults) {
+      this._playCurveIds.clear();
+      return;
+    }
+    const plan = planBaselineRelease(
+      this._playCurveIds,
+      (id) => model.getParameterIndex(id),
+      () => model.getParameterCount(),
+      (i) => model.getParameterValueByIndex(i),
+      (i) => Number(defaults[i]),
+    );
+    this._playCurveIds.clear();
+    if (plan) this._baselineRelease = { plan, elapsedMs: 0 };
+  }
+
+  private _applyBaselineRelease(model: CubismModel, dtSeconds: number): void {
+    const rel = this._baselineRelease;
+    if (!rel) return;
+    rel.elapsedMs += dtSeconds * 1000;
+    const k = Math.min(1, rel.elapsedMs / BASELINE_RELEASE_MS);
+    applyBaselineRelease(rel.plan, k, (i, v) => model.setParameterValueByIndex(i, v, 1));
+    if (k >= 1) this._baselineRelease = null;
   }
 
   /** Grup "Idle" dicari by-name dari manifest; model tanpa grup ini

@@ -319,11 +319,13 @@ fn main() {
                 WebviewUrl::App("index.html".into()),
             )
             .title("Lumimi");
-            // Jendela utama: aplikasi biasa — berdekorasi, bisa diresize.
+            // Jendela utama: aplikasi biasa — berdekorasi, bisa diresize,
+            // dibuka langsung maximize (permintaan user 2026-10-01).
             builder
                 .inner_size(1280.0, 800.0)
                 .min_inner_size(700.0, 520.0)
                 .center()
+                .maximized(true)
                 .build()?;
             if !ready {
                 // Server belum ada saat jendela dibuat → WebView menampilkan

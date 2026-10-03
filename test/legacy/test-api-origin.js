@@ -143,6 +143,12 @@ ok('app.js: refreshApiBase() ada (IPC server_port saat embedded)',
   /function refreshApiBase\(\)/.test(appSrc) && /server_port/.test(appSrc));
 ok('app.js: boot menunggu basis sebelum fetch pertama',
   /await refreshApiBase\(\)/.test(appSrc));
+// Boot fetcher yang jalan saat eval (sebelum boot utama) WAJIB menunggu basis
+// dulu — di exe, API awal = tauri.localhost sampai IPC server_port selesai.
+ok('loadAppConfig menunggu basis sebelum fetch (race embedded)',
+  /async function loadAppConfig\(\) \{[\s\S]{0,500}await refreshApiBase\(\)/.test(appSrc), 'synced');
+ok('updateTTSNativeStatus menunggu basis sebelum fetch (race embedded)',
+  /async function updateTTSNativeStatus\(\) \{[\s\S]{0,300}await refreshApiBase\(\)/.test(appSrc), 'synced');
 ok('app.js: loader model pakai URL absolut (origin embed)',
   /const modelUrl = \/\^https/.test(appSrc) && /loadModel\(modelUrl, settings\)/.test(appSrc));
 ok('app.js: settings.url berbasis API (bukan location.href)',
@@ -152,6 +158,39 @@ ok('app.js: settings.url berbasis API (bukan location.href)',
 section('brain.ts via transport (perilaku di test/transport.test.ts)');
 ok('brain.ts tidak lagi menanam derivasi origin sendiri',
   !/typeof location/.test(agentSrc), 'single source: transport');
+
+// ── 6. src/client: dilarang fetch relatif mentah (origin embed salah arah) ──
+section('src/client: semua panggilan API lewat seam transport');
+// fetch("/api/..") benar di dev (same-origin) tapi TIDAK di exe — halaman
+// embedded ber-origin tauri.localhost, bukan loopback; /api tak ada di sana.
+// Kelas bug yang sama dengan literal :8310, hanya lebih senyap. Dilarang:
+// fetch/EventSource/WebSocket dengan string literal relatif ("/...").
+function walkTs(dir, acc) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walkTs(p, acc);
+    else if (/\.ts$/.test(e.name) && !/\.test\.ts$/.test(e.name)) acc.push(p);
+  }
+  return acc;
+}
+{
+  const tsFiles = walkTs(path.join(ROOT, 'src', 'client'), []);
+  const rawCalls = [];
+  for (const f of tsFiles) {
+    // Seam transport adalah satu-satunya pengecualian — di situlah fetch
+    // langsung memang duplikat seam (komentar dokumennya pun memuat contoh).
+    if (/transport[\\/]/.test(path.relative(path.join(ROOT, 'src', 'client'), f))) continue;
+    const src = fs.readFileSync(f, 'utf8');
+    const rel = src.match(/(?:fetch|new EventSource|new WebSocket)\(\s*['"`]\/[^'"`]/g) || [];
+    if (rel.length) rawCalls.push(path.relative(ROOT, f) + ' → ' + rel.join(' | '));
+  }
+  ok('tidak ada fetch/EventSource/WebSocket relatif mentah di src/client',
+    rawCalls.length === 0, rawCalls.length ? rawCalls.join(' | ') : 'clean');
+  const seamUsers = tsFiles.filter(
+    (f) => /from\s*["'][./]*transport["']/.test(fs.readFileSync(f, 'utf8')),
+  ).length;
+  ok('seam transport dipakai modul TS (bukan pola acuh)', seamUsers > 0, seamUsers + ' file');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
