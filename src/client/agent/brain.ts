@@ -6,7 +6,8 @@
  * legacy static/js/app.js (engine/UI) already calls:
  *   think(text) · reactEvent(type) · setUserMood(m, src) · setCameraMood(m)
  *   setPresence(p) · history · guessEmotion(text) · loadCapabilityProfile()
- *   invalidateCapabilityProfile() · _reactiveState() · _pickSupportedEmotion()
+ *   invalidateCapabilityProfile() · clearSession() · _reactiveState()
+ *   _pickSupportedEmotion()
  *
  * It also builds a richer capability-aware system prompt and delegates actual
  * model driving to window.__live2dAgent (proven in app.js). The TS version is the
@@ -28,14 +29,23 @@ import {
 import { httpBase, transport } from "../transport";
 import { dropApertureParamCtx, directorToIntents } from "../character/adapters";
 import { estimateSpeechMs as estimateSpeechMsShared } from "../../shared/speech-timing";
+import {
+  SessionContext,
+  buildContextMessages,
+  sessionSummaryBlock,
+  memoryBlock,
+  looksTaskish,
+  handoffAcks,
+  composeHandoffText,
+  EXTRACT_EVERY,
+} from "./companion-memory";
+import type { MemoryEntry } from "./companion-memory";
 import type {
   ChatMessage,
   ParsedSegment,
   CapabilityProfile,
   ParsedActions,
 } from "../../shared/types";
-
-const HISTORY_LIMIT = 12;
 // Basis HTTP via seam transport (satu binary: embedded → loopback proses
 // sendiri + initLoopback di bundle-entry; dev → origin halaman). Domain MODE
 // lewat helper IPC-nya (modeGet). Guard origin kini di transport.test.ts.
@@ -165,9 +175,20 @@ export class AgentBrain {
   static AWAY_DELAY_MIN_MS = 10 * 60 * 1000;
   static AWAY_DELAY_MAX_MS = 15 * 60 * 1000;
 
+  // Context sesi (RAM, mati saat app ditutup): giliran penuh user+assistant,
+  // kompresi bergulir + retrieval potongan lama. Long-term memory yang
+  // persisten ada di core (data/companion-memory.json).
+  private ctx = new SessionContext();
   // Live history — app.js membaca array yang sama lewat window.__agent.history,
   // jadi field ini TIDAK boleh dibuat private (QA/debug membacanya langsung).
-  history: ChatMessage[] = [];
+  // Sekarang berisi giliran user DAN assistant (dulu hanya user — balasan
+  // tidak pernah masuk context; itu kelemahan yang ikut diperbaiki).
+  history: ChatMessage[] = this.ctx.turns;
+  // Hand-off tugas ke Agent berjalan? Chat tetap hidup selama agent bekerja.
+  private handoffBusy = false;
+  // Kompresi sesi & ekstraksi memori berjalan post-reply (latar), didebounce.
+  private housekeepingTimer: ReturnType<typeof setTimeout> | null = null;
+  private housekeepingBusy = false;
   private busy = false;
   // Generasi request (§33 ARSITEKTUR-TARGET): setiap think/reactEvent baru
   // menaikkan gen; reply telat dari generasi lama dibuang, dan hanya
@@ -181,6 +202,9 @@ export class AgentBrain {
   private modelEpoch = 0;
   // Batas tunggu /api/chat (§32) — statis supaya test bisa memperpendek.
   static REQUEST_TIMEOUT_MS = 90_000;
+  // Jeda debounce kompresi/ekstraksi post-reply — statis supaya test bisa
+  // mempercepat (housekeeping tidak pernah menunda bicara).
+  static HOUSEKEEPING_DELAY_MS = 1500;
   private capProfile: CapabilityProfile | null = null;
   // Param mentah yang sedang di-drive director untuk balasan aktif — dilepas
   // (applyParamDrive → releaseParamDrive) saat lock AI dilepas, supaya ekspresi
@@ -417,10 +441,10 @@ bila memang pas.
     // Setiap permintaan user = generasi baru (§33).
     const myGen = ++this.gen;
     // MERGE (§6): pesan baru saat masih MIKIR tidak diabaikan — request lama
-    // dibatalkan, kedua teks sudah ada di history, satu fetch baru menjawab
-    // keduanya (server stateless, balasan digenerate dari history penuh).
-    // Input user juga otomatis menggulingkan reactEvent yang sedang mikir
-    // (§18: input user eksplisit > proactive).
+    // dibatalkan, kedua teks sudah ada di context sesi, satu fetch baru
+    // menjawab keduanya (server stateless, balasan digenerate dari context
+    // penuh). Input user juga otomatis menggulingkan reactEvent yang sedang
+    // mikir (§18: input user eksplisit > proactive).
     if (this.busy) {
       this.ctrl?.abort();
       console.log("[agent] merge: pesan baru saat masih mikir — request lama dibatalkan");
@@ -428,9 +452,7 @@ bila memang pas.
     // busy diset SINKRON sebelum await pertama — menutup race dua think yang
     // sama-sama lolos cek (dulu diset setelah await loadProfile).
     this.busy = true;
-    this.history.push({ role: "user", content: userText });
-    if (this.history.length > HISTORY_LIMIT * 2)
-      this.history.splice(0, this.history.length - HISTORY_LIMIT * 2);
+    this.ctx.pushUser(userText);
     setThinking(true);
     // Fase mikir: alih pandang ke atas-samping (intent "think"); balik
     // menghadap user otomatis saat mulai bicara (lockAI) atau lewat timer.
@@ -447,13 +469,34 @@ bila memang pas.
           console.warn("[agent] profile unavailable", e);
         }
       if (this.gen !== myGen) return; // digulingkan saat menunggu profile
+
+      // ── Intent routing (Chat/Pet → Agent) ──
+      // Gerbang recall murah dulu; hanya pesan ber-isyarat permintaan yang
+      // diadukan ke klasifikasi makna (LLM role "memory", fail-soft). Kata
+      // kerja tunggal TIDAK pernah memutuskan routing.
+      const decision = await this.classifyIntent(userText, myGen);
+      if (this.gen !== myGen) return; // digulingkan selama klasifikasi
+      if (decision?.isTask) {
+        // Slot thinking dilepas di finally; hand-off berjalan di alur
+        // sendiri — agent bisa mengerjakan lama, chat tetap hidup (§36:
+        // companion history & worker task state terisolasi).
+        void this.handoffToAgent(decision.task || userText, userText);
+        return;
+      }
+
+      // ── Context: memori relevan + potongan lama + jendela terakhir ──
+      const mem = await this.retrieveMemory(userText);
+      if (this.gen !== myGen) return;
+      const { messages, olderUsed } = buildContextMessages(this.ctx.turns, userText);
+      const system =
+        this.buildSystemPrompt("") +
+        sessionSummaryBlock(this.ctx.summary, olderUsed) +
+        memoryBlock(mem) +
+        this.moodSuffix();
       const resp = await fetch(httpBase() + "/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: this.history,
-          system: this.buildSystemPrompt("") + this.moodSuffix(),
-        }),
+        body: JSON.stringify({ messages, system }),
         signal: ctrl.signal,
       });
       if (!resp.ok) {
@@ -465,6 +508,9 @@ bila memang pas.
       const reply = (data.reply || "").trim();
       if (reply) {
         const clean = stripDirectives(reply);
+        // Giliran assistant ikut context sesi — dulu balasan TIDAK pernah
+        // disimpan, jadi model tidak pernah tahu apa yang sudah diucapkannya.
+        this.ctx.pushAssistant(clean);
         // Topologi ekspresi: Animation Director (role "motion"; nanti bisa
         // Jev/Laya) = SATU-SATUNYA pemilik ekspresi per segmen — emosi, gerak,
         // param mentah, durasi. Chat LLM cukup menulis teks; directive inline
@@ -474,8 +520,10 @@ bila memang pas.
         if (this.gen !== myGen) return; // digulingkan saat director pass
         console.log("[agent] speaking reply with", segments.length, "animation segments");
         this.playSegments(segments);
+        this.afterReplyHousekeeping();
       } else {
         const msg = "Hmm, aku bingung jawabnya...";
+        this.ctx.pushAssistant(msg);
         l2d()?.speak?.(msg, undefined, { cls: "companion" });
         addChat("agent", msg);
       }
@@ -484,6 +532,7 @@ bila memang pas.
       console.error("[agent]", err);
       const msg =
         "Maaf, aku lagi gak bisa mikir sekarang. Cek koneksi atau api key ya.";
+      this.ctx.pushAssistant(msg);
       l2d()?.speak?.(msg, undefined, { cls: "companion" });
       addChat("agent", msg);
     } finally {
@@ -496,6 +545,210 @@ bila memang pas.
         this.ctrl = null;
       }
     }
+  }
+
+  // ── Intent routing & hand-off (Chat/Pet → Agent) ─────────────────────
+  // Keputusan makna di core (POST /api/companion/intent, LLM role "memory").
+  // Fail-soft total: gerbang gagal / LLM gagal → perlakukan sebagai chat.
+
+  private async classifyIntent(
+    userText: string,
+    myGen: number,
+  ): Promise<{ isTask: boolean; task: string } | null> {
+    if (!looksTaskish(userText)) return null;
+    try {
+      const resp = await fetch(httpBase() + "/api/companion/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: userText,
+          summary: this.ctx.summary,
+          recent: this.ctx.turns.slice(-6),
+        }),
+      });
+      if (!resp.ok) return null;
+      const d = await resp.json();
+      if (this.gen !== myGen) return null; // digulingkan — buang keputusan
+      return {
+        isTask: !!d.isTask,
+        task: typeof d.task === "string" ? d.task : "",
+      };
+    } catch (e: any) {
+      console.warn("[agent] klasifikasi intent gagal — anggap chat:", e?.message ?? e);
+      return null;
+    }
+  }
+
+  /** Entri memori jangka panjang yang relevan untuk query (server-side
+   *  scoring). Gagal → kosong: chat tidak boleh mati karena memori. */
+  private async retrieveMemory(query: string): Promise<MemoryEntry[]> {
+    try {
+      const resp = await fetch(
+        httpBase() +
+          "/api/companion/memory?q=" +
+          encodeURIComponent(query) +
+          "&limit=6",
+      );
+      if (!resp.ok) return [];
+      const d = await resp.json();
+      const arr = Array.isArray(d?.entries) ? d.entries : [];
+      return arr.filter(
+        (e: any) => e && typeof e.text === "string" && e.text.trim(),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** Kirim tugas ke Agent dengan konteks sesi + memori. Tidak memegang slot
+   *  chat: worker bisa mengerjakan lama, companion tetap bisa diajak bicara.
+   *  Hasil akhir diumumkan sebagai bicara companion (kelanjutan percakapan). */
+  private async handoffToAgent(task: string, originalText: string): Promise<void> {
+    const lang =
+      typeof window !== "undefined" &&
+      (window as any).__i18n &&
+      typeof (window as any).__i18n.getLang === "function"
+        ? (window as any).__i18n.getLang()
+        : "id";
+    const ack = handoffAcks(lang);
+    try {
+      // Slot worker dicek dulu: Rust belum punya antrean parked, ask kedua
+      // saat busy akan saling menumpuk di history yang sama. Sementara itu
+      // companion menolak dengan sopan (bukan antrean diam-diam).
+      if (this.handoffBusy) {
+        this.announce(ack.busy);
+        return;
+      }
+      let status: any = null;
+      try {
+        const r = await fetch(httpBase() + "/api/assistant/status");
+        status = await r.json();
+      } catch {
+        status = null;
+      }
+      if (status?.busy) {
+        this.announce(ack.busy);
+        return;
+      }
+      this.handoffBusy = true;
+      this.ctx.pushAssistant(ack.ok);
+      this.announce(ack.ok);
+      const mem = await this.retrieveMemory(task);
+      const text = composeHandoffText({
+        task,
+        summary: this.ctx.summary,
+        memoryEntries: mem,
+        recentTurns: this.ctx.turns.slice(-6),
+        originalText,
+      });
+      const resp = await fetch(httpBase() + "/api/assistant/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const d = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(d.error || "HTTP " + resp.status);
+      if (d.paused) {
+        // Loop agent berhenti menunggu approval tool mutating.
+        this.ctx.pushAssistant(ack.paused);
+        this.announce(ack.paused);
+      } else if (d.reply) {
+        const clean = stripDirectives(d.reply);
+        this.ctx.pushAssistant(clean);
+        // Diumumkan ringkas sebagai bicara; hasil penuh tetap ada di panel
+        // Assistant (transcript) — companion bukan tempat laporan panjang.
+        const spoken = clean.length > 500 ? clean.slice(0, 500).trim() + "…" : clean;
+        this.announce(spoken);
+        this.afterReplyHousekeeping();
+      } else {
+        this.ctx.pushAssistant(ack.failed);
+        this.announce(ack.failed);
+      }
+    } catch (e: any) {
+      console.error("[agent] hand-off gagal:", e?.message ?? e);
+      this.announce(ack.failed);
+    } finally {
+      this.handoffBusy = false;
+    }
+  }
+
+  /** Ucapkan satu teks lewat jalur ekspresi normal (director → segments). */
+  private async announce(text: string): Promise<void> {
+    try {
+      const segments = await this.animateTextViaDirector(text, this.capProfile);
+      this.playSegments(segments);
+    } catch (e: any) {
+      console.warn("[agent] announce gagal:", e?.message);
+    }
+  }
+
+  // ── Pemeliharaan konteks post-reply (latar, tidak pernah menunda bicara) ──
+
+  private afterReplyHousekeeping(): void {
+    if (this.housekeepingTimer) clearTimeout(this.housekeepingTimer);
+    this.housekeepingTimer = setTimeout(() => {
+      this.housekeepingTimer = null;
+      void this.runHousekeeping();
+    }, AgentBrain.HOUSEKEEPING_DELAY_MS);
+  }
+
+  private async runHousekeeping(): Promise<void> {
+    if (this.housekeepingBusy) return;
+    this.housekeepingBusy = true;
+    try {
+      // 1) Kompresi konteks: giliran lama menumpuk → ringkas bertahap.
+      const block = this.ctx.pendingCompress();
+      if (block) {
+        try {
+          const resp = await fetch(httpBase() + "/api/companion/summarize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ summary: block.prior, turns: block.turns }),
+          });
+          if (resp.ok) {
+            const d = await resp.json();
+            if (typeof d.summary === "string" && d.summary.trim()) {
+              this.ctx.applyCompress(d.summary, block.turns.length);
+              console.log(
+                "[agent] sesi dikompres:", block.turns.length, "giliran → ringkasan",
+                d.summary.length, "char",
+              );
+            }
+          }
+        } catch (e: any) {
+          console.warn("[agent] kompresi sesi gagal (diulang nanti):", e?.message ?? e);
+        }
+      }
+      // 2) Ekstraksi long-term memory tiap EXTRACT_EVERY giliran user.
+      const extractBlock = this.ctx.pendingExtract();
+      const userCount = extractBlock.filter((t) => t.role === "user").length;
+      if (userCount >= EXTRACT_EVERY) {
+        try {
+          const resp = await fetch(httpBase() + "/api/companion/memory/extract", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ turns: extractBlock }),
+          });
+          if (resp.ok) {
+            const d = await resp.json();
+            this.ctx.advanceExtract(extractBlock.length);
+            if (d.added > 0)
+              console.log("[agent] memori jangka panjang +", d.added, "entri");
+          }
+        } catch (e: any) {
+          console.warn("[agent] ekstraksi memori gagal (diulang nanti):", e?.message ?? e);
+        }
+      }
+    } finally {
+      this.housekeepingBusy = false;
+    }
+  }
+
+  /** Reset sesi percakapan (tombol clear chat). Long-term memory TIDAK
+   *  ikut terhapus — itu memori lintas sesi, bukan transcript. */
+  clearSession(): void {
+    this.ctx.reset();
+    console.log("[agent] sesi percakapan direset — long-term memory tetap ada");
   }
 
   async reactEvent(type: string): Promise<void> {
@@ -1297,6 +1550,8 @@ if (typeof window !== "undefined") {
     setPresence: (p: boolean | null) => brain.setPresence(p),
     // Ekspresi/gerak balasan VTuber (§7) — audio diputar terpisah (__debugSpeak).
     expressReply: (t: string) => brain.expressReply(t),
+    // Reset sesi percakapan (clear chat) — long-term memory tetap ada.
+    clearSession: () => brain.clearSession(),
     // Array HIDUP — app.js mengonsumsi referensi yang sama, bukan snapshot kosong.
     history: brain.history,
     guessEmotion,

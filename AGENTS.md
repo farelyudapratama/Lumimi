@@ -192,6 +192,13 @@ core/                        backend Rust (axum, loopback), SATU-SATUNYA backend
   motion_vision.rs           critic visual: harness render → filmstrip 8 frame
                              → LLM role `motion-vision` (koneksi HARUS
                              ditandai eksplisit; model harus menerima gambar)
+  companion_memory.rs        memory jangka panjang companion (data/
+                             companion-memory.json) + keputusan latar role
+                             "memory": intent chat→agent, ringkas sesi,
+                             ekstraksi memori — semua fail-soft. Agent membaca
+                             lewat tool memory_recall (shared, read-only).
+                             Session context (RAM) ada di src/client/agent/
+                             companion-memory.ts (lihat MODES.md)
 static/harness-motion.html   halaman harness render critic visual (juga
 src/client/harness/          entry build ke-4 harness-motion.mjs) — capture
                              sinkron canvas.toDataURL, tanpa rAF/kompositor

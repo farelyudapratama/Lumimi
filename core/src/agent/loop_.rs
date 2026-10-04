@@ -31,6 +31,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef { name: "run_command", params: "command: string", level: "mutating" },
     ToolDef { name: "remember", params: "key: string, value: string", level: "safe" },
     ToolDef { name: "recall", params: "key: string opsional", level: "safe" },
+    ToolDef { name: "memory_recall", params: "query: string, limit: number opsional — cari MEMORI USER lintas sesi (fakta/preferensi/keputusan companion; beda store dgn recall)", level: "safe" },
     ToolDef { name: "spawn_subagent", params: "tasks: [{task: deskripsi goal}] — delegasi riset/analisa INDEPENDEN ke subagent read-only paralel (maks 4)", level: "safe" },
     ToolDef { name: "browser_status", params: "", level: "safe" },
     ToolDef { name: "browser_open", params: "url: string opsional (default https://example.com) — buka browser terisolasi", level: "mutating" },
@@ -87,7 +88,7 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "5. Task done → stop calling tools. If unclear, ask ONE specific question.",
             "6. NEVER write/delete beyond the request or run destructive commands — mutating tools ask permission.",
             "7. MOTION: the active Live2D model is ALREADY loaded (see 'Active model'). Do NOT search the filesystem for model files (a path in the user's text is NOT the model). REQUIRED chain, one tool per turn: motion_analyze → emit the FULL draft JSON via motion_validate (fix until ok) → motion_save. A prose description of the motion is NOT a motion and NOT completion — you must output the draft JSON and save it. Do NOT say 'done'/stop before motion_save succeeds. (motion_verify is optional, only if a vision connection exists.)",
-            "9. MEMORY: user prefs / key decisions → remember (short key). Need context → recall.",
+            "9. MEMORY: user prefs / key decisions → remember (short key). Need context → recall. Need USER FACTS across sessions (favorite color, city, decisions) → memory_recall with a free-form query.",
         ]
     } else {
         &[
@@ -99,7 +100,7 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "5. Tugas selesai → berhenti memanggil tool. Kalau tak jelas, tanya SEKALI yang spesifik.",
             "6. DILARANG menulis/menghapus di luar kebutuhan atau perintah merusak — tool mutating minta izin.",
             "7. MOTION: model Live2D aktif SUDAH dimuat (lihat 'Model aktif'). JANGAN cari file model di folder (path di teks user BUKAN modelnya). Alur WAJIB, satu tool per giliran: motion_analyze → keluarkan draft JSON LENGKAP lewat motion_validate (perbaiki sampai ok) → motion_save. Deskripsi gerakan dalam prosa BUKAN motion dan BUKAN penyelesaian — kamu HARUS mengeluarkan draft JSON-nya lalu menyimpannya. JANGAN bilang 'selesai'/berhenti sebelum motion_save berhasil. (motion_verify opsional, hanya bila ada koneksi vision.)",
-            "9. MEMORY: preferensi/keputusan penting → remember (key singkat). Butuh konteks → recall.",
+            "9. MEMORY: preferensi/keputusan penting → remember (key singkat). Butuh konteks → recall. Butuh FAKTA/PREFERENSI USER lintas sesi (warna favorit, kota, keputusan) → memory_recall dengan query bebas.",
         ]
     };
     let final_line = if en {
@@ -338,6 +339,16 @@ pub fn exec_tool(root: &Path, work_dir: &Path, name: &str, args: &Value) -> Stri
             let key = args.get("key").and_then(|x| x.as_str());
             Ok(memory::recall(root, key))
         }
+        // Memory companion = infrastruktur SHARED: agent bisa menarik sendiri
+        // fakta/preferensi user lintas sesi saat tugas membutuhkannya — bukan
+        // hanya menerima pilihan caller di teks hand-off. Read-only di sini;
+        // jalur tulis tetap terkurasi (ekstraksi companion + POST manual).
+        "memory_recall" => {
+            let query = s(args, "query");
+            let limit = args.get("limit").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
+            let store = crate::companion_memory::retrieve(&root.join("data"), &query, limit);
+            Ok(crate::companion_memory::entries_as_text(&store))
+        }
         other => Err(format!("tool belum diport ke core: {other}")),
     };
     match res {
@@ -391,6 +402,26 @@ mod tests {
         assert!(r.to_lowercase().contains("halo"), "{r}");
         // tool belum diport
         assert!(exec_tool(&d, &d, "browser_open", &json!({})).contains("belum diport"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn memory_recall_tool_baca_store_companion() {
+        // Memory companion = shared infrastructure: agent menarik sendiri fakta
+        // user lewat tool read-only ini (root/data/companion-memory.json).
+        let d = std::env::temp_dir().join(format!("l2dloopmem-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert_eq!(
+            exec_tool(&d, &d, "memory_recall", &json!({ "query": "apa saja" })),
+            "(tidak ada memori user yang relevan)"
+        );
+        crate::companion_memory::add_entries(
+            &d.join("data"),
+            &[json!({ "text": "Warna favorit user hijau lumut." })],
+        );
+        let out = exec_tool(&d, &d, "memory_recall", &json!({ "query": "warna favorit user" }));
+        assert!(out.contains("hijau lumut"), "{out}");
+        assert!(out.starts_with("- [m_"), "hasil memuat id entri: {out}");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -376,6 +376,7 @@ export const DICT_ID: Record<string, string> = {
   "conn.role.sheet": "sheet (analisa parameter)",
   "conn.role.motionVision": "motion-vision (menilai gambar — wajib model vision)",
   "conn.role.behavior": "behavior (keputusan perilaku saat idle)",
+  "conn.role.memory": "memory (intent chat→agent, ringkas sesi, ekstraksi memori)",
   "conn.save": "Simpan",
   "conn.cancel": "Batal",
 

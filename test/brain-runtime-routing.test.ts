@@ -103,6 +103,14 @@ function makeHarness(routing: { on?: boolean; runtime?: any } = {}) {
 
   const chatDs: Array<{ promise: Promise<any>; resolve: (v: any) => void }> = [];
   g.fetch = async (url: string) => {
+    // Endpoint companion memory/intent (fitur 2026-10-04): jawaban netral
+    // (tanpa memori, intent chat) — alur think() lama tetap yang diuji.
+    if (url.includes("/api/companion/memory")) {
+      return { ok: true, json: async () => ({ entries: [] }) };
+    }
+    if (url.includes("/api/companion/intent")) {
+      return { ok: true, json: async () => ({ isTask: false, task: "" }) };
+    }
     if (url.includes("/api/animate-text")) {
       // Satu segmen director: emosi + gesture (tanpa motion/paramDrive).
       return {

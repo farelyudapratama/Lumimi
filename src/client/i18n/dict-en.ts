@@ -368,6 +368,7 @@ export const DICT_EN: Record<string, string> = {
   "conn.role.sheet": "sheet (parameter analysis)",
   "conn.role.motionVision": "motion-vision (judges images — vision model required)",
   "conn.role.behavior": "behavior (idle behaviour decisions)",
+  "conn.role.memory": "memory (chat→agent intent, session summary, memory extraction)",
   "conn.save": "Save",
   "conn.cancel": "Cancel",
 

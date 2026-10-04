@@ -14,6 +14,7 @@ pub mod agent;
 pub mod behavior;
 pub mod browser;
 pub mod config;
+pub mod companion_memory;
 pub mod director;
 pub mod expressions;
 pub mod jsonx;
@@ -132,6 +133,11 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/assistant/sessions/switch", axum::routing::post(post_sessions_switch))
         .route("/api/assistant/sessions/delete", axum::routing::post(post_sessions_delete))
         .route("/api/animate-text", axum::routing::post(post_animate_text))
+        .route("/api/companion/memory", get(get_companion_memory).post(post_companion_memory))
+        .route("/api/companion/memory/forget", axum::routing::post(post_companion_memory_forget))
+        .route("/api/companion/memory/extract", axum::routing::post(post_companion_memory_extract))
+        .route("/api/companion/intent", axum::routing::post(post_companion_intent))
+        .route("/api/companion/summarize", axum::routing::post(post_companion_summarize))
         .route("/api/behavior/decide", axum::routing::post(post_behavior_decide))
         .route("/api/model/classify-params", axum::routing::post(post_classify_params))
         .route("/api/model/analyze-sheet", axum::routing::post(post_analyze_sheet))
@@ -586,6 +592,102 @@ async fn post_memory_forget(State(paths): State<AppPaths>, body: axum::body::Byt
     let key = v.get("key").and_then(|x| x.as_str()).unwrap_or("");
     let (status, out) = agent::memory::memory_delete(&paths.root, key);
     json_status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK), out)
+}
+
+// ── Companion memory (stage/chat & pet) — store + keputusan latar ──────
+
+/// GET /api/companion/memory?q=&limit= — retrieval memori jangka panjang
+/// (skor relevansi di sisi server supaya semua surface berbagi logika).
+async fn get_companion_memory(
+    State(paths): State<AppPaths>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let query = q.get("q").cloned().unwrap_or_default();
+    let limit: usize = q
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .filter(|l: &usize| *l > 0)
+        .unwrap_or(companion_memory::DEFAULT_RETRIEVE_LIMIT);
+    json_status(
+        StatusCode::OK,
+        companion_memory::retrieve(&paths.data_dir, &query, limit),
+    )
+}
+
+/// POST /api/companion/memory {entries:[{text,tags?}]} — tambah (dedupe di
+/// store). Entry hasil ekstraksi LLM dari client, atau tulisan manual.
+async fn post_companion_memory(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let items = v
+        .get("entries")
+        .and_then(|e| e.as_array())
+        .cloned()
+        .unwrap_or_default();
+    json_status(
+        StatusCode::OK,
+        companion_memory::add_entries(&paths.data_dir, &items),
+    )
+}
+
+/// POST /api/companion/memory/forget {id} | {all:true}.
+async fn post_companion_memory_forget(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+    let all = v.get("all").and_then(|x| x.as_bool()).unwrap_or(false);
+    let removed = companion_memory::forget(&paths.data_dir, id, all);
+    json_status(StatusCode::OK, json!({ "removed": removed }))
+}
+
+/// POST /api/companion/memory/extract {turns:[{role,content}]} — ekstraksi
+/// memori layak-ingat dari giliran sejak ekstraksi terakhir (LLM role
+/// "memory"), langsung disimpan. Fail-soft → entries kosong.
+async fn post_companion_memory_extract(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let turns = v
+        .get("turns")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let cfg = paths.data_dir.join("config.json");
+    json_status(
+        StatusCode::OK,
+        companion_memory::extract_and_store(&cfg, &paths.data_dir, &turns).await,
+    )
+}
+
+/// POST /api/companion/intent {text, summary?, recent?} — TUGAS atau OBROLAN?
+/// Keputusan berdasar makna (LLM role "memory"); fail-soft → isTask:false.
+async fn post_companion_intent(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+    let summary = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
+    let recent = v
+        .get("recent")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let cfg = paths.data_dir.join("config.json");
+    json_status(
+        StatusCode::OK,
+        companion_memory::decide_intent(&cfg, text, summary, &recent).await,
+    )
+}
+
+/// POST /api/companion/summarize {summary?, turns:[{role,content}]} —
+/// kompresi konteks sesi. Fail-soft → ringkasan lama dipertahankan.
+async fn post_companion_summarize(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let prior = v.get("summary").and_then(|x| x.as_str()).unwrap_or("");
+    let turns = v
+        .get("turns")
+        .and_then(|t| t.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let cfg = paths.data_dir.join("config.json");
+    json_status(
+        StatusCode::OK,
+        companion_memory::summarize_session(&cfg, prior, &turns).await,
+    )
 }
 
 /// GET /api/assistant/sessions — daftar sesi (ringkasan).

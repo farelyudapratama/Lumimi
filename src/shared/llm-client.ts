@@ -499,8 +499,10 @@ async function callStreamWithOneRetry(conn: Connection, messages: ChatMessage[],
 // role, prompt berat pindah ke connection yang memang bertugas memetakan
 // gerak, dan user bisa memakai "yang murah untuk gerak, yang pintar untuk
 // teks". Role kanonik SENGAJA kecil — tambah role baru berarti menambah
-// entri di sini + satu checkbox di UI, bukan sistem baru.
-export const LLM_ROLES = ["chat", "motion", "sheet", "assistant", "motion-vision", "behavior"];
+// entri di sini + satu checkbox di UI, bukan sistem baru. "memory" = keputusan
+// latar companion (intent chat→agent, kompresi sesi, ekstraksi memori —
+// core/src/companion_memory.rs); fallback koneksi aktif bila tak dibind.
+export const LLM_ROLES = ["chat", "motion", "sheet", "assistant", "motion-vision", "behavior", "memory"];
 
 /** Bersihkan field `roles`: buang non-string, trim/lowercase, dedupe,
  *  drop role tak dikenal (dengan warning — jangan gagalkan boot). */

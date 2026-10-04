@@ -103,6 +103,14 @@ function makeHarness(
       id === "toggle-brain" ? { checked: opts.brainOn ?? true } : null,
   };
   g.fetch = async (url: string, init?: any) => {
+    // Endpoint companion memory/intent (fitur 2026-10-04): dijawab netral —
+    // tanpa memori, intent chat — supaya alur think() identik dengan dulu.
+    if (url.includes("/api/companion/memory/extract"))
+      return { ok: true, json: async () => ({ entries: [], added: 0 }) };
+    if (url.includes("/api/companion/memory"))
+      return { ok: true, json: async () => ({ entries: [] }) };
+    if (url.includes("/api/companion/intent"))
+      return { ok: true, json: async () => ({ isTask: false, task: "" }) };
     if (url.includes("/api/mode")) {
       if (opts.modeFails) throw new Error("server restart");
       if (opts.modeDelay) await new Promise((r) => setTimeout(r, opts.modeDelay));
@@ -209,11 +217,16 @@ describe("§6 MERGE — pesan baru saat masih mikir", () => {
     b.think("Pertama");
     b.think("Kedua"); // satu tick, tanpa jeda — dulu bisa lolos bareng
     await settle();
-    expect(h.chatCalls().length).toBe(2);
+    // Retrieve memori menambah satu await sebelum fetch chat: think pertama
+    // kini gugur di gen-guard SEBELUM fetch chat dimulai (tidak ada request
+    // sia-sia yang di-abort) — tetap SATU fetch menjawab KEDUA teks.
+    expect(h.chatCalls().length).toBe(1);
     expect((b.busy = b.busy)).toBe(true); // masih thinking
-    h.resolveChat(0, "[EMOTION:senang] harus dibuang.");
-    h.resolveChat(1, "[EMOTION:senang] jawaban final.");
+    h.resolveChat(0, "[EMOTION:senang] jawaban final.");
     await settle();
+    const body = JSON.parse(h.chatCalls()[0].init.body);
+    expect(body.messages.some((m: any) => m.content === "Pertama")).toBe(true);
+    expect(body.messages.some((m: any) => m.content === "Kedua")).toBe(true);
     expect(h.speakLog.some((s) => s.text.includes("harus dibuang"))).toBe(false);
     expect(h.speakLog.some((s) => s.text.includes("jawaban final"))).toBe(true);
   });

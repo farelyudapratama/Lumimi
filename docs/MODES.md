@@ -218,6 +218,64 @@ actor / view / panel) di-bundle ke `bundle.js` sebagai `window.__agentPanel`;
 - Kontrak lama utuh: CLI `bun run agent` memakai runtime yang sama; panel
   hanya LAYAR — destroy() melepas UI, runtime tetap hidup.
 
+## Companion memory & routing Chat/Pet → Agent (2026-10-04)
+
+Dua lapis yang TERPISAH (transcript ≠ memori) untuk mode stage/chat dan pet:
+
+1. **Session context** (client, RAM — mati saat app/browser ditutup; TIDAK
+   ada persistensi transcript):
+   `src/client/agent/companion-memory.ts`. Giliran user+assistant penuh
+   disimpan dalam sesi (cap 400 giliran FIFO); per request dikirim:
+   potongan lama paling relevan (skor tumpang-tindih token, maks 6) +
+   jendela terakhir (16 giliran) — splice mentah 24-entry lama DIHAPUS,
+   tidak ada lagi limit efektif ±20 pesan. Giliran lama yang menumpuk
+   dikompres bergulir via LLM role "memory" (`POST /api/companion/summarize`
+   — fail-soft: gagal → dicoba lagi; tidak ada data hilang karena potongan
+   masih di RAM). Balasan assistant SEKARANG ikut context (dulu hanya pesan
+   user yang tersimpan — model tidak pernah tahu apa yang sudah diucapkannya).
+2. **Long-term memory** (persisten, core): `core/src/companion_memory.rs`,
+   store `data/companion-memory.json` (cap 120 entri, dedupe Jaccard 0.7,
+   eviksi entri terlemah — hits + recency). Ekstraksi otomatis tiap ±6
+   giliran user via LLM role "memory" (`POST /api/companion/memory/extract`,
+   post-reply, tidak pernah menunda bicara); retrieval server-side
+   (`GET /api/companion/memory?q=`) supaya semua surface berbagi logika yang
+   sama. Hanya fakta/preferensi/keputusan layak-ingat yang disimpan — batch
+   percakapan TIDAK otomatis jadi memori (LLM yang kurasi; gagal/parse
+   gagal → tidak ada yang ditulis). Kontradiksi ditangani eksplisit: item
+   ekstraksi boleh membawa `replacesId` untuk MENGGANTI memori lama yang
+   sudah tidak benar (pindah kota, preferensi berubah) — bukan menumpuk
+   versi lama dan baru. Lupa: `POST /api/companion/memory/forget {id}`
+   atau `{all:true}`.
+   **Shared infrastructure**: Agent punya tool `memory_recall` (safe,
+   read-only) untuk menarik sendiri fakta user saat tugas membutuhkannya —
+   bukan hanya menerima pilihan caller di teks hand-off. Jalur tulis tetap
+   terkurasi (ekstraksi companion + POST manual); agent tidak menulis memori
+   companion (memori agent sendiri tetap `remember`/`recall` di
+   `.agent-memory/`).
+
+**Routing intent** (Chat/Pet → Agent, tanpa command khusus): gerbang recall
+longgar (`looksTaskish`) HANYA menentukan layak-tidaknya pesan diadu ke
+`POST /api/companion/intent` (LLM role "memory" — keputusan berdasar makna
+keseluruhan; fail-soft → chat biasa). Kata kerja tunggal ("cari/cek/bikin")
+tidak pernah memutuskan routing. Tugas diteruskan ke `POST /api/assistant/ask`
+lengkap dengan ringkasan sesi + memori relevan (user tidak mengulang
+penjelasan); slot worker dicek dulu (Rust belum punya antrean parked — ask
+kedua saat busy akan menumpuk di history yang sama). Hasil akhir diumumkan
+companion sebagai bicara ringkas; laporan penuh tetap di panel Assistant.
+Role baru **"memory"** bisa di-bind ke model murah di panel ⚙️ (tanpa bind →
+koneksi aktif; sengaja TANPA has_explicit_role guard agar fitur jalan
+zero-config).
+
+Session context & task state tetap terisolasi (ARSITEKTUR-TARGET §44):
+memory companion tidak menyentuh `assistant-sessions.json` maupun
+`.agent-memory/` milik worker. Clear chat (`clearSession()` di brain)
+mengosongkan sesi IN PLACE (giliran + ringkasan); long-term memory tidak
+tersentuh dan tetap mengalir ke percakapan berikutnya. Ringkasan sesi
+TIDAK PERNAH otomatis ditulis ke store memori — jalur tulis long-term
+memory hanya ekstraksi terkurasi dan POST manual. Pet conversation sengaja
+belum diintegrasikan — infrastruktur shared-nya siap dipakai saat
+arsitektur Pet/Agent berkembang.
+
 ## Desktop Pet (`core/src/pet.rs` + `static/pet.html`)
 
 Web murni tidak bisa menembus desktop; pet berjalan di jendela aplikasi

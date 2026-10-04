@@ -27,8 +27,8 @@ const conn = (id: string, roles?: string[]) =>
   ({ id, name: id, provider: "mock", apiKey: "mock", roles } as any);
 
 describe("normalizeRoles / connHasRole", () => {
-  test("role kanonik: chat, motion, sheet, assistant, motion-vision, behavior", () => {
-    expect(LLM_ROLES).toEqual(["chat", "motion", "sheet", "assistant", "motion-vision", "behavior"]);
+  test("role kanonik: chat, motion, sheet, assistant, motion-vision, behavior, memory", () => {
+    expect(LLM_ROLES).toEqual(["chat", "motion", "sheet", "assistant", "motion-vision", "behavior", "memory"]);
   });
 
   test("absen / kosong / invalid → wildcard (semua role)", () => {

@@ -3659,6 +3659,10 @@
         const av = log.querySelector(".msg-avatar");
         if (av) paintAvatarEl(av, characterInitial());
         if (window.__agent) {
+          // Reset sesi lewat brain (dulu: mengganti referensi properti di
+          // sini TIDAK mengosongkan array internal brain). Ringkasan sesi
+          // ikut dibuang; long-term memory tetap ada.
+          window.__agent.clearSession?.();
           window.__agent.history = [];
         }
         window.showToast?.(__t("chat.clearedToast"), "info");
