@@ -23,7 +23,7 @@
 #define MyAppExeName "Lumimi.exe"
 
 #ifndef APP_VERSION
-  #define APP_VERSION "0.1.0"
+  #define APP_VERSION "0.1.1"
 #endif
 
 [Setup]

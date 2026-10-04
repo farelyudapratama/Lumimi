@@ -1,6 +1,6 @@
 [package]
 name = "lumimi"
-version = "0.1.0"
+version = "0.1.1"
 description = "Lumimi — satu exe satu proses: shell Tauri (WebView2) + server Rust in-process"
 edition = "2021"
 rust-version = "1.77"

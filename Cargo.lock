@@ -2301,7 +2301,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
 name = "live2d-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "live2d-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ndarray",
  "ort",
@@ -2357,7 +2357,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "lumimi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "live2d-core",
  "rfd",

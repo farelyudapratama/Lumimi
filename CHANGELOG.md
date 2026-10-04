@@ -9,6 +9,37 @@
 > belum pernah punya trace rilis (nol tag). Rilis pertama yang ditandai
 > karena itu mulai dari `0.1.0`.
 
+## [0.1.1] — 2026-10-04
+
+### Added
+- **Memory companion dua lapis** — session context di RAM (jendela terakhir +
+  retrieval potongan lama berdasar relevansi + kompresi bergulir via LLM) dan
+  long-term memory persisten (`data/companion-memory.json`): retrieval
+  relevansi di sisi server, dedupe, `replacesId` untuk koreksi/kontradiksi,
+  forget satu/semua, eviksi entri terlemah. Balasan assistant kini ikut masuk
+  context; limit efektif 24-pesan dihapus — percakapan panjang tetap menemukan
+  konteks awal lewat recent + ringkasan + retrieval.
+- **Routing intent chat→agent tanpa command** — gerbang recall longgar +
+  klasifikasi makna oleh LLM (role baru `memory`, bisa di-bind ke model murah
+  di panel koneksi); tugas diteruskan ke Agent lengkap dengan ringkasan sesi
+  + memori relevan; gagal LLM/429 → jatuh ke chat biasa (fail-soft).
+- **Tool `memory_recall`** (safe, read-only) di agent — memori companion jadi
+  infrastruktur shared: agent bisa menarik fakta user sendiri saat tugas
+  membutuhkannya.
+- Endpoint `/api/companion/*`: memory (GET/POST/forget/extract), intent,
+  summarize.
+
+### Fixed
+- Tombol "Clear" chat kini benar-benar mengosongkan sesi otak — dulu hanya
+  mengganti referensi properti di `window.__agent`, array internal brain tetap
+  terisi. Long-term memory tidak ikut terhapus.
+
+### Tests
+- Gate hijau penuh: unit bun 563 (+4), cargo 201 (+5), guard 324, tsc, build.
+- Verifikasi E2E lewat browser: binding role `memory` dari panel koneksi
+  (simpan → reload → persist), handoff tugas sampai hasil agent muncul di
+  chat, clear chat mengosongkan sesi.
+
 ## [0.1.0] — 2026-09-24
 
 Rilis pertama dengan trace: tag git + changelog. Merangkum seluruh sejarah

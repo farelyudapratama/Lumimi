@@ -5,7 +5,7 @@
 # Lihat docs/ARCHITECTURE-TAURI-RUST.md §2 (single-exe).
 [package]
 name = "live2d-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Application core (Rust) untuk Lumimi: server HTTP in-process di Tauri"
 edition = "2021"
 rust-version = "1.77"

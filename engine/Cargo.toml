@@ -6,7 +6,7 @@
 # konsumen tersisa (dulu hanya dijalankan server Bun yang kini arsip).
 [package]
 name = "live2d-engine"
-version = "0.1.0"
+version = "0.1.1"
 description = "Library inferensi native (SuperTonic TTS + Whisper STT) untuk Lumimi, dipakai in-process oleh Rust core"
 edition = "2021"
 rust-version = "1.77"
