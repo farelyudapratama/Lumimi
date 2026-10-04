@@ -624,14 +624,34 @@ bila memang pas.
       const segIdx = i;
       i++;
 
+      // Dua fase (tanpa fixed delay):
+      // - PRE-SPEECH (sekarang, saat TTS masih loading): reaksi — expression,
+      //   pose antisipasi, paramDrive. Karakter tetap hidup, bukan freeze.
+      // - SPEECH (onAudioStart, saat audio benar-benar bunyi): motion/gesture
+      //   timed. Setiap segmen mengikuti audio-start-nya sendiri.
       // TAHAP A migrasi: tiap segmen dinilai lewat gerbang toggle. Runtime
-      // nyala → keluaran director segmen ini jadi intent yang diarbitrase
-      // runtime (R1–R10), apply legacy untuk bidang itu DILEWATI; runtime
-      // mati atau fail-safe → jalur legacy persis seperti dulu.
-      if (!this.applySegmentViaRuntime(seg, segIdx)) {
-        // Apply this segment's actions (with inference fallback)
-        this.applyActions(seg.actions, segIdx, seg.text);
+      // nyala → intent di-submit deferred + defensif legacy langsung; runtime
+      // mati atau fail-safe → jalur legacy split reaksi/speech.
+      const useRuntime = resolveCharacterRuntime(L) != null;
+      let runtimeOk = false;
+      if (useRuntime) {
+        runtimeOk = this.applySegmentReactionViaRuntime(seg, segIdx);
+        if (!runtimeOk) {
+          this.applyActions(seg.actions, segIdx, seg.text, { reactionOnly: true });
+        }
+      } else {
+        this.applyActions(seg.actions, segIdx, seg.text, { reactionOnly: true });
       }
+      const startSpeechMotion = () => {
+        if (preempted) return;
+        if (useRuntime) {
+          if (!this.submitSegmentSpeechToRuntime(seg, segIdx)) {
+            this.applyActions(seg.actions, segIdx, seg.text, { speechOnly: true });
+          }
+        } else {
+          this.applyActions(seg.actions, segIdx, seg.text, { speechOnly: true });
+        }
+      };
       // Chat log per-segment: teks baru muncul SESUDAH (seiring) TTS segmen ini
       if (seg.text) addChat("agent", seg.text);
       console.log(
@@ -643,18 +663,31 @@ bila memang pas.
       // Speak with callback — next segment starts when THIS one finishes.
       // Speech yang dipotong policy ≠ completed (§6): onDone tidak jalan,
       // onPreempted yang membersihkan chain + lock.
-      L.speak(seg.text, () => {
-        if (preempted) return;
-        // Small pause between segments for natural rhythm
-        setTimeout(nextSegment, 180);
-      }, {
-        cls,
-        onPreempted: () => {
-          preempted = true;
-          unlock();
-          console.log("[agent] chain preempted by speech policy, AI lock released");
-        },
-      });
+      let speakStatus: unknown = undefined;
+      try {
+        speakStatus = L.speak(seg.text, () => {
+          if (preempted) return;
+          // Small pause between segments for natural rhythm
+          setTimeout(nextSegment, 180);
+        }, {
+          cls,
+          onAudioStart: startSpeechMotion,
+          onPreempted: () => {
+            preempted = true;
+            unlock();
+            console.log("[agent] chain preempted by speech policy, AI lock released");
+          },
+        });
+      } catch (e) {
+        speakStatus = undefined;
+      }
+      // SUPPRESS (mis. proactive ditahan saat user bicara): onDone/onAudioStart
+      // tidak akan pernah datang — majukan chain agar lock tidak bocor.
+      if (speakStatus === "SUPPRESS") {
+        setTimeout(() => {
+          if (!preempted) nextSegment();
+        }, 180);
+      }
     };
     nextSegment();
   }
@@ -716,6 +749,60 @@ bila memang pas.
   }
 
   /**
+   * TAHAP A dua-fase — reaksi SEGERA (pre-speech) saat routing aktif:
+   * expression + pose + paramDrive legacy langsung (karakter tetap hidup
+   * selama TTS loading); intent runtime BELUM di-submit (deferred ke
+   * onAudioStart agar motion/gesture ikut audio, bukan ikut LLM selesai).
+   * Duplikasi expression (legacy now + runtime intent later, nilai sama)
+   * disengaja & idempoten; bila submit nanti gagal, ekspresi sudah tampil.
+   * Return true bila routing aktif (pemanggil menunda submit ke onAudioStart).
+   */
+  private applySegmentReactionViaRuntime(seg: ParsedSegment, segIdx: number): boolean {
+    const rt = resolveCharacterRuntime(l2d());
+    if (!rt) return false;
+    try {
+      this.applyActions(seg.actions, segIdx, seg.text, { reactionOnly: true });
+      return true;
+    } catch (e: any) {
+      console.warn("[agent] routing reaksi gagal, fallback legacy:", e?.message ?? e);
+      return false;
+    }
+  }
+
+  /**
+   * TAHAP A dua-fase — submit intent SPEECH saat audio benar-benar mulai.
+   * Return true bila submit berhasil; false → pemanggil fallback ke legacy
+   * speechOnly agar motion tetap ada walau runtime melempar.
+   */
+  private submitSegmentSpeechToRuntime(seg: ParsedSegment, segIdx: number): boolean {
+    const rt = resolveCharacterRuntime(l2d());
+    if (!rt) return false;
+    try {
+      const { intents } = directorToIntents(
+        [{ ...seg.actions, text: seg.text }],
+        undefined,
+      );
+      for (const intent of intents) {
+        try {
+          rt.submit(intent);
+        } catch (e: any) {
+          console.warn(
+            "[agent] runtime submit speech gagal, fallback legacy segmen",
+            segIdx + 1,
+            ":",
+            e?.message ?? e,
+          );
+          return false;
+        }
+      }
+      return true;
+    } catch (e: any) {
+      console.warn("[agent] routing speech gagal, fallback legacy:", e?.message ?? e);
+      return false;
+    }
+  }
+
+  /**
    * Ekspresi + gerak untuk balasan yang AUDIONYA diputar di luar brain
    * (VTuber §7: app utama membicarakan balasan lewat pipeline speech policy
    * kelas "vtuber" + feed streaming terpisah). Visual-SAJA: tidak memanggil
@@ -771,11 +858,21 @@ bila memang pas.
   // ── Apply actions to the model (AI-driven, EASED) ──
   // Pose dikirim sebagai TARGET nested {head,eyes,mouth,body} ke setAIPose();
   // engine yang ease menuju target dan menumpuk ambient fidget di atasnya.
+  //
+  // Dua fase sinkronisasi motion↔audio (tanpa fixed delay):
+  // - reactionOnly (PRE-SPEECH, dipanggil SEGERA setelah LLM): expression,
+  //   pose antisipasi, aksesori/property, paramDrive. Karakter tetap hidup
+  //   selama TTS loading, tetapi TIDAK memainkan speech-motion timed.
+  // - speechOnly (SPEECH, dipanggil dari onAudioStart saat audio benar-benar
+  //   bunyi): motion timed + gesture. fitToMs dihitung di sini (estimasi
+  //   durasi, bukan jangkar mulai).
+  // Default (tanpa flag) = penuh, untuk jalur visual-tanpa-audio
+  // (expressReply VTuber) dan kompat tes lama.
   private applyActions(
     actions: ParsedActions,
     segmentIndex = 0,
     segmentText = "",
-    opts?: { skipDirectorOutputs?: boolean },
+    opts?: { skipDirectorOutputs?: boolean; reactionOnly?: boolean; speechOnly?: boolean },
   ): void {
     const agent = l2d();
     if (!agent || !agent.isReady?.()) return;
@@ -784,6 +881,8 @@ bila memang pas.
     // (emotion/motion/paramDrive/gesture) TIDAK di-apply legacy — runtime yang
     // mengarbitrasenya lewat intent. Pose/aksesori/property defensif tetap jalan.
     const skipDirectorOutputs = opts?.skipDirectorOutputs === true;
+    const reactionOnly = opts?.reactionOnly === true;
+    const speechOnly = opts?.speechOnly === true;
 
     // Emotion — pakai intensity (default 0.85) dan fallback preset
     // "user:<nama>" untuk sheet preset yang bukan emosi param/native bawaan.
@@ -793,7 +892,7 @@ bila memang pas.
     // jalurnya; emosi sintetis hardcode TIDAK diiklankan di vocab — nama
     // asing jatuh ke "user:<nama>" (preset user) atau fallback engine.
     let emotionVia: string | undefined;
-    if (actions.emotion && !skipDirectorOutputs) {
+    if (actions.emotion && !skipDirectorOutputs && !speechOnly) {
       const vocab =
         (agent.getExpressibleEmotions && agent.getExpressibleEmotions()) || {};
       emotionVia = vocab[actions.emotion];
@@ -808,61 +907,66 @@ bila memang pas.
     // Build a pose target. Add a small per-segment offset so consecutive
     // segments of the same emotion don't land on the EXACT same pose — this
     // is what sells "alive" rather than "reading a script".
-    const vary = segmentIndex || 0;
-    const jitter = (n: number) => Math.sin(vary * 1.3 + n) * 2.5; // ±2.5° organic drift
-    const pose: {
-      head?: { x: number; y: number };
-      eyes?: { x: number; y: number };
-      mouth?: { form: number };
-      body?: { x: number; y: number; z: number };
-    } = {};
-    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+    // Fase SPEECH (speechOnly) tidak menyentuh pose/aksesori/property:
+    // itu milik reaksi pre-speech yang sudah jalan.
+    if (!speechOnly) {
+      const vary = segmentIndex || 0;
+      const jitter = (n: number) => Math.sin(vary * 1.3 + n) * 2.5; // ±2.5° organic drift
+      const pose: {
+        head?: { x: number; y: number };
+        eyes?: { x: number; y: number };
+        mouth?: { form: number };
+        body?: { x: number; y: number; z: number };
+      } = {};
+      const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-      // Pose eksplisit head/eyes/body dipakai bila ada (mis. jalur directive
-      // legacy). Pose emosi HARDCODE (inferMovementFromEmotion) sudah DICABUT
-      // (2026-09-28): untuk model tanpa aset ekspresi, kehidupan datang dari param-drive
-    // Director (param mentah nyata milik model), bukan pose kaleng generik.
-    if (actions.head) {
-      pose.head = {
-        x: clamp(actions.head.x + jitter(0.7), -30, 30),
-        y: clamp(actions.head.y + jitter(1.9), -30, 30),
-      };
+        // Pose eksplisit head/eyes/body dipakai bila ada (mis. jalur directive
+        // legacy). Pose emosi HARDCODE (inferMovementFromEmotion) sudah DICABUT
+        // (2026-09-28): untuk model tanpa aset ekspresi, kehidupan datang dari param-drive
+      // Director (param mentah nyata milik model), bukan pose kaleng generik.
+      if (actions.head) {
+        pose.head = {
+          x: clamp(actions.head.x + jitter(0.7), -30, 30),
+          y: clamp(actions.head.y + jitter(1.9), -30, 30),
+        };
+      }
+
+      if (actions.eyes) {
+        pose.eyes = {
+          x: clamp(actions.eyes.x + jitter(0.3) * 0.02, -1, 1),
+          y: clamp(actions.eyes.y + jitter(0.5) * 0.02, -1, 1),
+        };
+      }
+
+      if (actions.mouth) {
+        pose.mouth = { form: clamp(actions.mouth.form, -1, 1) };
+      }
+
+      if (actions.body) {
+        // BODY BOUND = ±30, DELIBERATE — jangan dipersempit; samakan dengan
+        // preset user (sanitizeSteps 'gerak') agar dua jalur konsisten.
+        pose.body = {
+          x: clamp(actions.body.x + jitter(1.1), -30, 30),
+          y: clamp(actions.body.y, -30, 30),
+          z: clamp(actions.body.z + jitter(0.4), -30, 30),
+        };
+      }
+
+      if (Object.keys(pose).length) agent.setAIPose(pose);
+
+      // Accessories
+      if (actions.accessories)
+        for (const [param, val] of Object.entries(actions.accessories))
+          agent.setAccessory(param, val);
+
+      // Property / Expression
+      if (actions.property) agent.setExpression(actions.property);
     }
 
-    if (actions.eyes) {
-      pose.eyes = {
-        x: clamp(actions.eyes.x + jitter(0.3) * 0.02, -1, 1),
-        y: clamp(actions.eyes.y + jitter(0.5) * 0.02, -1, 1),
-      };
-    }
-
-    if (actions.mouth) {
-      pose.mouth = { form: clamp(actions.mouth.form, -1, 1) };
-    }
-
-    if (actions.body) {
-      // BODY BOUND = ±30, DELIBERATE — jangan dipersempit; samakan dengan
-      // preset user (sanitizeSteps 'gerak') agar dua jalur konsisten.
-      pose.body = {
-        x: clamp(actions.body.x + jitter(1.1), -30, 30),
-        y: clamp(actions.body.y, -30, 30),
-        z: clamp(actions.body.z + jitter(0.4), -30, 30),
-      };
-    }
-
-    if (Object.keys(pose).length) agent.setAIPose(pose);
-
-    // Accessories
-    if (actions.accessories)
-      for (const [param, val] of Object.entries(actions.accessories))
-        agent.setAccessory(param, val);
-
-    // Property / Expression
-    if (actions.property) agent.setExpression(actions.property);
-
-    // Motion verb — played AFTER the pose target above, so its deltas
-    // compose on top of whatever HEAD/EMOTION just set for this segment.
-    //
+    // Motion verb — TIMED speech layer: hanya dimainkan dari onAudioStart
+    // (fase SPEECH), bukan dari reaksi pre-speech. fitToMs dihitung DI SINI
+    // (saat audio sudah bunyi) sehingga estimasi sesuai durasi ucapan, bukan
+    // latensi tunggu. estimateSpeechMs = estimasi durasi saja, bukan jangkar.
       // [MOTION:id] dari Motion Studio didahulukan bila ada: itu gerakan yang
       // user rancang sendiri dan beri deskripsi, jadi lebih spesifik daripada
       // preset 'gerak' biasa (priority 80 = "explicit LLM motion", SPEC §12).
@@ -871,7 +975,7 @@ bila memang pas.
     // tidak pernah ada dua penulis satu parameter — preset mengisi sisa
     // field (mata, badan) yang tidak disentuh motion user. Bila id motion
     // asing (playMotion false) preset tetap jalan sendirian seperti dulu.
-    if (!skipDirectorOutputs && actions.motion && agent.playMotion) {
+    if (!skipDirectorOutputs && !reactionOnly && actions.motion && agent.playMotion) {
       const handledByMotion = agent.playMotion(actions.motion, {
         fromLLM: true,
         intensity: actions.intensity != null ? actions.intensity : undefined,
@@ -887,10 +991,11 @@ bila memang pas.
     }
 
     // Param mentah dari director (id NYATA milik model, nilai sudah divalidasi
-    // & di-clamp ke range oleh server) — lapisan ekspresif tambahan biar lebih
-    // menjiwai. Ditulis absolut lewat rawDrive; id-nya dicatat agar dilepas
-    // saat lock AI selesai (lihat unlock() di playSegments).
-    if (!skipDirectorOutputs && actions.paramDrive && agent.applyParamDrive) {
+    // & di-clamp ke range oleh server) — lapisan ekspresif REAKSI (pre-speech),
+    // ditulis absolut lewat rawDrive; id-nya dicatat agar dilepas saat lock AI
+    // selesai (lihat unlock() di playSegments). Fase SPEECH tidak menulis ulang:
+    // reaksi sudah memegangnya sejak loading.
+    if (!skipDirectorOutputs && !speechOnly && actions.paramDrive && agent.applyParamDrive) {
       try {
         agent.applyParamDrive(actions.paramDrive);
         for (const id of Object.keys(actions.paramDrive))
@@ -899,12 +1004,13 @@ bila memang pas.
         console.warn("[agent] paramDrive gagal:", e?.message);
       }
     }
+    // Gesture = TIMED speech layer seperti motion: hanya dari onAudioStart.
     // Gesture fallback (hardcode per-emosi) SUDAH DIHAPUS bersama tabel
     // gesture bawaan. Gerakan hanya dari [GESTURE:] eksplisit LLM (yang wajib
     // memakai nama dari daftar capability) atau gerak tubuh bawaan emosi via
     // aset model (.exp3/klip).
     const gestureToPlay = actions.gesture || null;
-    if (!skipDirectorOutputs && gestureToPlay && agent.playGesture)
+    if (!skipDirectorOutputs && !reactionOnly && gestureToPlay && agent.playGesture)
       agent.playGesture(gestureToPlay);
   }
 

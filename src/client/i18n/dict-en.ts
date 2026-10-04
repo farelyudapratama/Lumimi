@@ -432,6 +432,7 @@ export const DICT_EN: Record<string, string> = {
   "cfg.bgReset": "background reset to default — press Save Settings",
   "cfg.testingVoice": "testing voice…",
   "cfg.voiceOk": "voice test ok",
+  "cfg.playBlocked": "synthesis ok, but the player refused to play audio — click test once more",
   "cfg.voiceFail": "voice test failed: {msg}",
   "cfg.idleResumed": "✓ idle motion resumed",
   "cfg.camModuleMissing": "camera module not loaded",

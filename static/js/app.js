@@ -2751,10 +2751,13 @@
     applyFallbackPresence(!document.hidden);
   }
 
-  function browserTTS(text, markDone, fallbackTimer) {
+  function browserTTS(text, markDone, fallbackTimer, onAudioStart) {
     if (fallbackTimer) clearTimeout(fallbackTimer);
     try {
       if (typeof speechSynthesis === "undefined") {
+        try {
+          if (typeof onAudioStart === "function") onAudioStart();
+        } catch (e) {}
         markDone();
         return;
       }
@@ -2774,11 +2777,19 @@
       // umur mulut adalah state.talking. Re-arm saat suara BENAR-BENAR mulai
       // dan tiap batas kata (progress nyata) — estimasi panjang teks saja
       // kerap lebih pendek dari suara yang lambat.
+      // `onstart` = jangkar audio-start paling akurat di jalur ini (bukan
+      // reveal/speak): speech-motion brain mulai dari sini.
       u.onstart = () => {
+        try {
+          if (typeof onAudioStart === "function") onAudioStart();
+        } catch (e) {}
         if (state.extendMouth)
           state.extendMouth(Math.max(1400, text.length * 75) + 2500);
       };
       u.onboundary = () => {
+        try {
+          if (typeof onAudioStart === "function") onAudioStart();
+        } catch (e) {}
         if (state.extendMouth)
           state.extendMouth(Math.max(1400, text.length * 75) + 2500);
       };
@@ -2908,7 +2919,7 @@
     }
   }
 
-  function playTTSAudio(blob, onDone, sess) {
+  function playTTSAudio(blob, onDone, sess, onAudioStart) {
     const url = URL.createObjectURL(blob);
     // URL dicatat di sesi claim — preempt me-revoke semuanya. Tanpa ini,
     // handler elemen audio yang ditimpa claim baru bikin URL lama bocor.
@@ -2932,8 +2943,20 @@
     }
     state.activeLip = lip;
 
+    // `playing` = jangkar paling akurat: audio benar-benar keluar speaker
+    // (bukan sekadar blob tiba / play() dipanggil). Brain memulai
+    // speech-motion dari sini. `onplay` sebagai cadangan (sekali saja).
+    const fireStart = () => {
+      try {
+        if (typeof onAudioStart === "function") onAudioStart();
+      } catch (e) {}
+    };
     audio.onplaying = () => {
+      fireStart();
       if (lip && !lip.active) lip.attach(audio);
+    };
+    audio.onplay = () => {
+      fireStart();
     };
     audio.onended = () => {
       URL.revokeObjectURL(url);
@@ -2964,10 +2987,10 @@
     return out;
   }
 
-  async function doRemoteTTS(text, markDone, sess, reveal, ttsLang) {
+  async function doRemoteTTS(text, markDone, sess, reveal, ttsLang, onAudioStart) {
     if (!ttsRemoteActive()) {
       reveal && reveal();
-      browserTTS(text, markDone, sess.fallbackTimer);
+      browserTTS(text, markDone, sess.fallbackTimer, onAudioStart);
       return;
     }
     if (sess.fallbackTimer) clearTimeout(sess.fallbackTimer);
@@ -3038,12 +3061,13 @@
             markDone();
           },
           sess,
+          onAudioStart,
         );
       } catch (e) {
         console.warn("[TTS] remote gagal, fallback ke browser:", e && e.message);
         if (!sess.isActive()) return;
         reveal && reveal();
-        browserTTS(text, markDone, null);
+        browserTTS(text, markDone, null, onAudioStart);
       }
       return;
     }
@@ -3102,7 +3126,7 @@
         // Watchdog fetch masih terpasang — cabut dulu, pemutaran browser
         // dijaga onend/onerror milik speechSynthesis.
         if (sess.fallbackTimer) clearTimeout(sess.fallbackTimer);
-        browserTTS(remaining, markDone, null);
+        browserTTS(remaining, markDone, null, onAudioStart);
         return;
       }
       if (aborted || dead()) return;
@@ -3141,6 +3165,9 @@
             resolve();
           },
           sess,
+          // Satu jangkar per runSpeech: sub-segmen pertama yang bunyi
+          // memicu speech-motion brain; sisanya no-op (guard sekali).
+          onAudioStart,
         );
         // playbackRate bisa 0.5 → durasi 2× — budget 150 ms/char + margin.
         guard(segText.length * 150 + 25000);
@@ -3168,6 +3195,12 @@
       onDone: typeof onDone === "function" ? onDone : null,
       onPreempted:
         opts && typeof opts.onPreempted === "function" ? opts.onPreempted : null,
+      // Jangkar sinkronisasi motion↔audio: dipanggil TEPAT SEKALI saat audio
+      // benar-benar mulai bunyi (elemen audio `playing` / utterance `onstart`),
+      // BUKAN saat speak()/fetch dimulai. Brain memakai ini untuk memulai
+      // speech-motion; fase reaksi pre-speech sudah jalan lebih dulu.
+      onAudioStart:
+        opts && typeof opts.onAudioStart === "function" ? opts.onAudioStart : null,
     };
     let r = null;
     if (window.__speech && typeof window.__speech.request === "function") {
@@ -3180,14 +3213,15 @@
     }
     if (!r) {
       runSpeech(job, null);
-      return;
+      return "ALLOW";
     }
     if (r.status === "SUPPRESS") {
       console.log("[speech] suppress kelas", job.cls);
-      return;
+      return "SUPPRESS";
     }
-    if (r.status === "QUEUED") return; // controller mengeksekusi saat slot bebas
+    if (r.status === "QUEUED") return "QUEUED"; // controller mengeksekusi saat slot bebas
     runSpeech(job, r.claim);
+    return "ALLOW";
   }
 
   /** Hentikan bicara aktif + kosongkan antrean (CANCEL §15) — teardown & model switch. */
@@ -3211,9 +3245,24 @@
     const text = job.text;
     const onDone = job.onDone;
     const isActive = () => (claim ? claim.isActive() : true);
+    // Jangkar audio-start: tepat sekali per runSpeech, hanya bila claim masih
+    // aktif. Semua jalur pemutar (remote/browser/no-model) wajib lewat sini —
+    // brain memulai speech-motion dari sini, bukan dari waktu speak() dipanggil.
+    let audioStarted = false;
+    const fireAudioStart = () => {
+      if (audioStarted) return;
+      audioStarted = true;
+      if (!isActive()) return;
+      try {
+        if (typeof job.onAudioStart === "function") job.onAudioStart();
+      } catch (e) {
+        console.warn("[speech] onAudioStart gagal:", (e && e.message) || e);
+      }
+    };
 
     if (!state.model) {
       showBubble(text);
+      fireAudioStart();
       setTimeout(() => {
         const alive = isActive();
         if (claim && alive && window.__speech) {
@@ -3380,7 +3429,7 @@
     window.__debugSpeak = (t, cls) =>
       speak(String(t || ""), null, { cls: cls || "vtuber" });
     if (ttsRemoteActive()) {
-      doRemoteTTS(text, markDone, sess, reveal, fixedLang);
+      doRemoteTTS(text, markDone, sess, reveal, fixedLang, fireAudioStart);
       return;
     }
     // Jalur suara browser: Web Speech membaca teks lokal → terjemahkan dulu
@@ -3408,11 +3457,11 @@
           if (!isActive()) return; // digulingkan saat menerjemahkan
           rearmFallback();
           reveal();
-          browserTTS(spoken, markDone, sess.fallbackTimer);
+          browserTTS(spoken, markDone, sess.fallbackTimer, fireAudioStart);
         });
     } else {
       reveal();
-      browserTTS(text, markDone, sess.fallbackTimer);
+      browserTTS(text, markDone, sess.fallbackTimer, fireAudioStart);
     }
   }
 
@@ -4768,11 +4817,23 @@
         state.modelConfig = normalizeModelConfig(
           Object.assign({}, prev, readConfigForm()),
         );
-        // Provider remote → tes lewat server dengan nilai form yang belum
-        // disimpan; provider browser → tes speechSynthesis seperti dulu.
+        // Engine efektif yang diuji: provider remote/supertonic/auto+tersedia
+        // → lewat server dengan nilai form yang belum disimpan (audio ujinya
+        // diputar); provider browser (atau auto saat fallback) → tes
+        // speechSynthesis seperti dulu — itulah engine yang benar-benar bunyi.
         if (ttsFormRemoteActive()) {
           setCfgStatus(__t("cfg.testingVoice"));
-          ttsTestRemote(readTTSForm())
+          // Slider gaya suara (per-model) ikut diuji — paritas dengan jalur
+          // browser yang membaca state.modelConfig hasil merge form di atas.
+          // Server menangangkan draft di atas stored, dan cache TTS
+          // mengunci pitch/rate/nasal: nilai baru = sintesis baru, bukan
+          // audio cache lama.
+          const draft = readTTSForm();
+          const mc = state.modelConfig || {};
+          draft.pitch = Number(mc.ttsPitch) || 1;
+          draft.rate = Number(mc.ttsRate) || 1;
+          draft.nasal = Number(mc.ttsNasal) || 0;
+          ttsTestRemote(draft)
             .then(() => setCfgStatus(__t("cfg.voiceOk"), "ok"))
             .catch((e) => setCfgStatus(__t("cfg.voiceFail", { msg: e.message }), "err"));
           return;
@@ -4857,6 +4918,15 @@
       if (TTS_NEEDS_KEY[p]) return !!cfgEls.ttsKey?.value.trim() || !!(TTS_CFG && TTS_CFG.apiKey);
       // supertonic/native: tes lewat server (tanpa prasyarat) — bukan browser.
       if (p === "supertonic" || p === "native") return true;
+      // auto mengikuti ENGINE EFEKTIF: SuperTonic tersedia → tes lewat server;
+      // fallback browser → tes browser memang benar, karena itulah yang bunyi.
+      if (p === "auto") {
+        const sup =
+          state._mediaStatus && state._mediaStatus.tts
+            ? state._mediaStatus.tts.supertonic
+            : null;
+        return !!(sup && sup.available);
+      }
       return false;
     }
 
@@ -5213,6 +5283,30 @@
     // supaya buka-pertama tidak pernah menampilkan tombol tanpa penjelasan.
     updateTTSNativeStatus();
 
+    // Elemen audio khusus test — TERPISAH dari state.ttsAudio (pipa speech
+    // chat) supaya tombol test tidak pernah menghijack sesi pemutaran atau
+    // klaim lipsync yang sedang jalan.
+    let testAudioEl = null;
+    function playTestTtsBlob(blob) {
+      try {
+        if (testAudioEl) {
+          testAudioEl.pause();
+          testAudioEl.src = "";
+        }
+        const url = URL.createObjectURL(blob);
+        const audio = (testAudioEl = new Audio(url));
+        audio.onended = audio.onerror = () => URL.revokeObjectURL(url);
+        audio.play().catch(() => {
+          // Pemutar menolak (autoplay policy) — status "ok" sunyi menipu;
+          // laporkan eksplisit supaya user tahu sintesisnya sendiri berhasil.
+          URL.revokeObjectURL(url);
+          setCfgStatus(__t("cfg.playBlocked"), "err");
+        });
+      } catch (e) {
+        /* pemutar tak tersedia — status sintesis tetap ditampilkan */
+      }
+    }
+
     function ttsTestRemote(ttsDraft) {
       // apiKey kosong di form = tetap pakai yang tersimpan (sama seperti
       // pola connection update).
@@ -5224,6 +5318,13 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tts: payload }),
       }).then(async (r) => {
+        const ctype = (r.headers.get("content-type") || "").toLowerCase();
+        // Server sukses = audio uji biner — mainkan supaya voice yang
+        // dipilih benar-benar terdengar. Gagal = JSON {ok:false,error}.
+        if (r.ok && ctype.startsWith("audio/")) {
+          playTestTtsBlob(await r.blob());
+          return;
+        }
         const d = await r.json().catch(() => ({}));
         if (!r.ok || !d.ok) throw new Error(d.error || "HTTP " + r.status);
       });
@@ -11330,6 +11431,11 @@
   // Scheduler saat AI bicara: tiap beberapa detik pilih intent sesuai konteks
   // (emosi) dan terapkan sebagai pose absolut. Directive AI ([HEAD:]/[EYES:])
   // lewat setAIPose() tetap menang — scheduler mundur selama directive segar.
+  // Ownership: saat layer MotionRuntime aktif, pose dimiliki motion runtime
+  // (applyPoseDelta unwind-then-apply tiap frame) — scheduler TIDAK menimpa
+  // state.aiPose di sini, melainkan menunggu (paritas guard clipIsPlaying).
+  // Saat talking tanpa motion aktif, gaze dibiaskan ke user dengan amplitudo
+  // kecil (tidak ada glance/think besar yang merebut parameter speech).
   function startGestureScheduler() {
     stopGestureScheduler();
     const tick = () => {
@@ -11344,6 +11450,21 @@
         return;
       }
 
+      // Layer DSL aktif → pose milik motion runtime; scheduler mundur.
+      try {
+        if (
+          typeof haveMotionSystem !== "undefined" &&
+          haveMotionSystem &&
+          typeof motionRuntime !== "undefined" &&
+          motionRuntime &&
+          typeof motionRuntime.isPlaying === "function" &&
+          motionRuntime.isPlaying()
+        ) {
+          state.gesture.timer = setTimeout(tick, 300);
+          return;
+        }
+      } catch (e) {}
+
       const now = Date.now();
       if (now - (state.aiPoseDirectiveAt || 0) < 3500) {
         state.gazeIntent = {
@@ -11355,12 +11476,43 @@
         return;
       }
 
-      const kind = pickGazeIntent();
-      const def = GAZE_INTENTS[kind];
       const R = (a, b) => a + Math.random() * (b - a);
-      const hold = R(def.hold[0], def.hold[1]);
-      state.gazeIntent = { kind, startedAt: now, until: now + hold };
-      playGazePose(def.pose(R));
+      // Saat benar-benar bicara (audio jalan): bias kuat ke user, gerakan
+      // kecil. Glance/think besar hanya untuk fase non-talking (mikir/idle).
+      if (state.talking) {
+        const r = Math.random();
+        const defFace = GAZE_INTENTS["face-user"];
+        const holdFace = R(defFace.hold[0], defFace.hold[1]);
+        if (r < 0.85) {
+          state.gazeIntent = {
+            kind: "face-user",
+            startedAt: now,
+            until: now + holdFace,
+          };
+          playGazePose(defFace.pose(R));
+        } else {
+          // Lirik kecil yang kalem: ±2-4° kepala, ±0.1-0.22 mata.
+          const s = R() < 0.5 ? -1 : 1;
+          const soft = {
+            ax: s * R(2, 4),
+            ay: R(-1.5, 1.5),
+            ex: s * R(0.1, 0.22),
+            ey: R(-0.05, 0.05),
+          };
+          state.gazeIntent = {
+            kind: "glance-soft",
+            startedAt: now,
+            until: now + Math.min(holdFace, 1400),
+          };
+          playGazePose(soft);
+        }
+      } else {
+        const kind = pickGazeIntent();
+        const def = GAZE_INTENTS[kind];
+        const hold = R(def.hold[0], def.hold[1]);
+        state.gazeIntent = { kind, startedAt: now, until: now + hold };
+        playGazePose(def.pose(R));
+      }
 
       // Kedip sesekali tetap dipertahankan supaya bicara terasa hidup.
       if (Math.random() < 0.3) {

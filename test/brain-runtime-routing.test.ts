@@ -203,8 +203,8 @@ describe("applyActions skipDirectorOutputs — bidang defensif tetap jalan", () 
   });
 });
 
-describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
-  test("toggle nyala → intent di-submit ke runtime, legacy dilewati, speech jalan", async () => {
+describe("TAHAP A routing di playSegments dua-fase (reaksi vs speech)", () => {
+  test("toggle nyala → reaksi langsung, intent deferred ke onAudioStart", async () => {
     const rt = makeFakeRuntime();
     const h = makeHarness({ on: true, runtime: rt });
     const p = h.brain.think("Halo");
@@ -218,8 +218,17 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
     expect(h.speakLog[0].text).toBe("Hai ada apa?");
     expect(h.speakLog[0].opts?.cls).toBe("companion");
     expect(h.locks).toBe(1);
+    expect(typeof h.speakLog[0].opts?.onAudioStart).toBe("function");
 
-    // Keluaran director jadi intent: emotion → expression, gesture → action.
+    // PRE-SPEECH: reaksi legacy langsung (expression), intent BELUM di-submit.
+    expect(h.legacy.setExpression.length).toBe(1);
+    expect(h.legacy.setExpression[0][0]).toBe("user:senang");
+    expect(rt.submits.length).toBe(0);
+    expect(h.legacy.playGesture.length).toBe(0);
+    expect(h.legacy.playMotion.length).toBe(0);
+
+    // SPEECH: audio mulai → intent di-submit, legacy motion/gesture tetap dilewati.
+    h.speakLog[0].opts?.onAudioStart?.();
     expect(rt.submits.length).toBe(2);
     expect(rt.submits[0]).toMatchObject({
       kind: "expression",
@@ -234,9 +243,6 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
       source: "director",
     });
     expect(typeof rt.submits[1].durationMs).toBe("number");
-
-    // Apply legacy untuk bidang itu DILEWATI.
-    expect(h.legacy.setExpression.length).toBe(0);
     expect(h.legacy.playGesture.length).toBe(0);
     expect(h.legacy.playMotion.length).toBe(0);
     expect(h.legacy.applyParamDrive.length).toBe(0);
@@ -248,7 +254,7 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
     await p;
   });
 
-  test("toggle mati (default) → tanpa submit, legacy jalan seperti dulu", async () => {
+  test("toggle mati (default) → reaksi langsung, speech-motion deferred", async () => {
     const rt = makeFakeRuntime();
     const h = makeHarness({ on: false, runtime: rt });
     const p = h.brain.think("Halo");
@@ -257,14 +263,18 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
     await h.settle();
 
     expect(rt.submits.length).toBe(0); // runtime tidak pernah disentuh
-    // Legacy: emosi tanpa vocab → preset "user:<nama>", gesture legacy jalan.
+    // PRE-SPEECH: emosi langsung (reaksi), gesture DITUNDA sampai audio.
     expect(h.legacy.setExpression.length).toBe(1);
     expect(h.legacy.setExpression[0][0]).toBe("user:senang");
-    expect(h.legacy.playGesture.length).toBe(1);
-    expect(h.legacy.playGesture[0][0]).toBe("nod");
+    expect(h.legacy.playGesture.length).toBe(0);
     // Speech tetap sama.
     expect(h.speakLog.length).toBe(1);
     expect(h.speakLog[0].text).toBe("Hai ada apa?");
+
+    // SPEECH: audio mulai → gesture jalan.
+    h.speakLog[0].opts?.onAudioStart?.();
+    expect(h.legacy.playGesture.length).toBe(1);
+    expect(h.legacy.playGesture[0][0]).toBe("nod");
 
     h.speakLog[0].onDone?.();
     await new Promise((r) => setTimeout(r, 200));
@@ -272,7 +282,7 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
     await p;
   });
 
-  test("submit melempar → fail-safe: legacy apply segmen itu, speech tetap jalan", async () => {
+  test("submit melempar → reaksi tetap jalan, fallback legacy saat audio", async () => {
     const rt = makeFakeRuntime({ throwOnSubmit: true });
     const h = makeHarness({ on: true, runtime: rt });
     const p = h.brain.think("Halo");
@@ -280,13 +290,18 @@ describe("TAHAP A routing di playSegments (lewat think penuh)", () => {
     h.resolveChat(0);
     await h.settle();
 
-    expect(rt.submits.length).toBe(0); // submit gagal sebelum merekam
-    // Fallback legacy penuh untuk segmen itu.
+    // PRE-SPEECH: reaksi legacy tetap tampil walau runtime akan gagal nanti.
     expect(h.legacy.setExpression.length).toBe(1);
-    expect(h.legacy.playGesture.length).toBe(1);
+    expect(h.legacy.playGesture.length).toBe(0);
+    expect(rt.submits.length).toBe(0);
     // Speech TIDAK mati karena runtime.
     expect(h.speakLog.length).toBe(1);
     expect(h.speakLog[0].text).toBe("Hai ada apa?");
+
+    // SPEECH: submit gagal → fallback legacy speechOnly (gesture jalan).
+    h.speakLog[0].opts?.onAudioStart?.();
+    expect(rt.submits.length).toBe(0); // submit gagal sebelum merekam
+    expect(h.legacy.playGesture.length).toBe(1);
 
     h.speakLog[0].onDone?.();
     await new Promise((r) => setTimeout(r, 200));

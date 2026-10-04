@@ -440,6 +440,7 @@ export const DICT_ID: Record<string, string> = {
   "cfg.bgReset": "latar kembali ke default — tekan Simpan Pengaturan",
   "cfg.testingVoice": "mengetes suara…",
   "cfg.voiceOk": "tes suara ok",
+  "cfg.playBlocked": "sintesis ok, tapi pemutar menolak memutar audio — klik test sekali lagi",
   "cfg.voiceFail": "tes suara gagal: {msg}",
   "cfg.idleResumed": "✓ gerak idle aktif kembali",
   "cfg.camModuleMissing": "modul kamera belum dimuat",

@@ -3682,6 +3682,11 @@ input[type="range"]::-moz-range-thumb {
   flex-direction: column;
   gap: 3px;
 }
+/* Tinggi .as-tl pasti (flex dalam sidebar) — tanpa kunci ini, kartu tool &
+   grup langkah (overflow:hidden → minimum flex 0) tertekan jadi ±1px begitu
+   isi transkrip melebihi tinggi kotak. Transkrip memang didesain scroll
+   internal, jadi anak-anaknya tak boleh ikut menyusut. */
+.as-tl > * { flex: none; }
 .as-blk {
   font-size: 12px;
   line-height: 1.45;

@@ -368,7 +368,8 @@ async fn get_tts_options(
 }
 
 /// POST /api/tts/test {tts?} — sintesis kalimat uji provider AKTIF.
-/// Return {ok, contentType} atau {ok: false, error}.
+/// Sukses → audio uji biner (mime mengikuti provider) supaya tombol test
+/// benar-benar TERDENGAR, bukan cuma label "OK"; gagal → JSON {ok:false,error}.
 async fn post_tts_test(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let stored = config::load(&paths.data_dir.join("config.json"));
@@ -376,7 +377,12 @@ async fn post_tts_test(State(paths): State<AppPaths>, body: axum::body::Bytes) -
     let draft = v.get("tts").cloned().unwrap_or_default();
     let cfg = media::tts_config_from_value(&stored_tts, &draft);
     match media::tts_audio_cached(&paths, &cfg, "Tes suara. Halo!").await {
-        Ok((_buf, mime)) => json_status(StatusCode::OK, json!({ "ok": true, "contentType": mime })),
+        Ok((buf, mime)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(buf))
+            .unwrap(),
         Err(e) => json_status(StatusCode::BAD_GATEWAY, json!({ "ok": false, "error": e })),
     }
 }
@@ -1542,6 +1548,26 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["core_version"], VERSION);
+    }
+
+    #[tokio::test]
+    async fn tts_test_provider_browser_502_json() {
+        // Jalur error kontrak /api/tts/test: provider "browser" tak pernah
+        // disintesis di server → 502 JSON {ok:false}, BUKAN audio biner.
+        // (Jalur sukses sengaja tak dites di sini: butuh model SuperTonic
+        // di disk / jaringan, keduanya dilarang di test.)
+        let body = serde_json::json!({ "tts": { "provider": "browser" } }).to_string();
+        let resp = app()
+            .oneshot(Request::builder().uri("/api/tts/test").method("POST").body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        assert!(ct.contains("application/json"));
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["ok"], serde_json::Value::Bool(false));
+        assert!(v["error"].as_str().unwrap_or("").contains("browser"));
     }
 
     #[tokio::test]
