@@ -69,10 +69,33 @@
 (function () {
   // Basis HTTP: dev/browser → origin halaman (same-origin); embedded
   // (Lumimi, origin tauri.localhost) → loopback proses-sendiri, port via
-  // IPC `server_port` (async sekali, di-cache). Halaman pet tidak memuat
-  // bundle.js → logika ini mandiri di sini (cermin transport/index.ts).
+  // IPC `server_port` + handshake token `server_token` (verifikasi
+  // /api/version → instance harus cocok; bila gagal → probe 8310..8399).
+  // Tanpa handshake, port yang sama bisa diduduki server asing/instalasi
+  // Lumimi lain dan pet menampilkan model milik instalasi itu. Halaman pet
+  // tidak memuat bundle.js → logika ini mandiri di sini (cermin
+  // transport/index.ts — rentang probe HARUS sinkron dengan pick_port shell).
   let API = location.origin;
   let __portReady = null;
+  const PROBE_FIRST = 8310, PROBE_LAST = 8399, PROBE_TIMEOUT_MS = 700;
+  function portIsOurs(p, token) {
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS);
+    return fetch("http://127.0.0.1:" + p + "/api/version", { signal: ctl.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || typeof d !== "object" || !d.core_version) return false;
+        return token == null || d.instance === token;
+      })
+      .catch(() => false)
+      .finally(() => clearTimeout(to));
+  }
+  async function probeLoopback(token) {
+    for (let p = PROBE_FIRST; p <= PROBE_LAST; p++) {
+      if (await portIsOurs(p, token)) return p;
+    }
+    return null;
+  }
   function refreshApiBase() {
     if (!__portReady) {
       __portReady = (async () => {
@@ -81,7 +104,19 @@
           const invoke = t?.core?.invoke ?? t?.invoke;
           if (typeof invoke === "function") {
             const p = await invoke("server_port");
-            if (typeof p === "number" && p > 0) API = "http://127.0.0.1:" + p;
+            let token = null;
+            try {
+              const tk = await invoke("server_token");
+              if (typeof tk === "string" && tk) token = tk;
+            } catch (e) {}
+            if (typeof p === "number" && p > 0 && (await portIsOurs(p, token))) {
+              API = "http://127.0.0.1:" + p;
+              return API;
+            }
+            // Port dari IPC tidak menjawab sebagai server kita (asing naik
+            // belakangan?) — jangan pernah dipakai; cari milik kita.
+            const found = await probeLoopback(token);
+            if (found) API = "http://127.0.0.1:" + found;
           }
         } catch (e) {}
         return API;

@@ -15,6 +15,7 @@
  */
 
 import { createLifecycle } from "../../lifecycle";
+import { httpBase } from "../../transport";
 import { createAssistantApi, bootThenPoll } from "./api";
 import { Transcript, CONTINUATION_PROMPT } from "./transcript";
 import type { Block } from "./transcript";
@@ -25,8 +26,14 @@ import { makeActor } from "./actor";
 import { createPanelView } from "./view";
 import type { TechnicalTab } from "./view";
 
-const API = location.origin;
-const assistantApi = createAssistantApi(API);
+// Basis API panel: httpBase() DINAMIS — embedded (exe) → loopback proses
+// sendiri via IPC `server_port`; dev → location.origin. Dulu `location.origin`
+// mentah: di exe origin halaman = aset ter-embed (tauri://localhost) sehingga
+// SEMUA fetch panel gagal diam-diam (status poll, transcript, kartu approval,
+// composer) — chat companion tetap hidup karena brain pakai httpBase().
+// Diperbarui lagi di start() karena initLoopback bisa selesai setelah load.
+let API = httpBase();
+let assistantApi = createAssistantApi(API);
 let activeDestroy: (() => void) | null = null;
 
 /** Peta role→paramId untuk tool motion (motion_*). Inferensi role tetap
@@ -65,6 +72,10 @@ function speakAsCharacter(text: string, cls: string = "worker_actor"): void {
 
 export function startAssistantPanel(): () => void {
   activeDestroy?.();
+  // Basis API bisa baru ter-resolve di sini (initLoopback async di boot);
+  // segarkan sebelum fetch pertama panel.
+  API = httpBase();
+  assistantApi = createAssistantApi(API);
   const t = getT();
   const root = document.getElementById("as-root");
   const techRoot = document.getElementById("as-tech-root");

@@ -10,6 +10,7 @@
  */
 
 import { createLifecycle } from "../lifecycle";
+import { httpBase } from "../transport";
 import {
   WORKSPACE_CEIL,
   WORKSPACE_FLOOR,
@@ -18,7 +19,12 @@ import {
   workspaceFloor,
 } from "./workspace";
 
-const API = location.origin;
+// Basis API: httpBase() DINAMIS (embedded/exe → loopback via IPC server_port;
+// dev → location.origin). Dulu `location.origin` mentah — di exe origin
+// halaman = aset ter-embed (tauri://localhost) sehingga rail sesi gagal
+// diam-diam. Diperbarui saat start + tiap siklus poll (initLoopback bisa
+// selesai setelah module load).
+let API = httpBase();
 const LS_KEY = "live2d.projekRail.open";
 let activeDestroy: (() => void) | null = null;
 
@@ -46,6 +52,8 @@ async function fetchJSON(url: string, init?: RequestInit): Promise<any> {
 
 export function startProjekRail(): () => void {
   activeDestroy?.();
+  // Segarkan basis API (initLoopback async bisa selesai setelah module load).
+  API = httpBase();
   const lifecycle = createLifecycle();
   const requestSignal = lifecycle.controller().signal;
   const requestJSON = (url: string, init?: RequestInit) =>
@@ -218,7 +226,7 @@ export function startProjekRail(): () => void {
 
   // Sesi bisa berubah dari luar (CLI menulis store) → segarkan saat rail
   // terbuka tiap 8 dtk (murah: satu GET ringan).
-  lifecycle.interval(() => { if (open) void draw(); }, 8000);
+  lifecycle.interval(() => { API = httpBase(); if (open) void draw(); }, 8000);
 
   // ── Indikator status agent GLOBAL (di activity bar) ─────────────
   // Dot kecil pada tombol Assistant: user melihat agent hidup/nunggu izin

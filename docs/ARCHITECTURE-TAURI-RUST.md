@@ -251,7 +251,22 @@ ter-embed, `WebviewUrl::App` → origin lokal) **dan** IPC per-domain.
 - `src/client/transport/index.ts` → helper IPC per-domain (`initLoopback` via
   `server_port`, `modeGet`/`modeSet` via `get_mode`/`set_mode`, `coreVersion`,
   `modelImportDialog`), dengan HTTP loopback sebagai jembatan transisi +
-  adapter eksternal (CLI/OBS/dev).
+  adapter eksternal (CLI/OBS/dev). **Jaminan koneksi exe + handshake
+  (2026-10-05):** port loopback tidak pernah diasumsikan — IPC `server_port`
+  + `server_token` dulu, lalu port DIVERIFIKASI lewat handshake `/api/version`
+  (`core_version` ada DAN `instance` == token instalasi dari
+  `live2d_core::instance_token`, deterministik per root app); bila gagal →
+  probe 8310..8399 dengan syarat token cocok — rentang WAJIB sinkron dengan
+  kandidat `pick_port` di shell. Server asing ATAU instalasi Lumimi lain
+  (portabel lama vs installer, dev vs exe) tidak pernah ditempeli meski
+  menjawab di port yang sama; dobel-klik kedua pada instalasi yang sama tetap
+  bisa attach (token sama). Kegagalan resolve tidak di-cache (boleh dicoba
+  ulang); `apiFetch` embedded yang kena kegagalan koneksi re-resolve port
+  sekali lalu mengulang request bila basis berganti (self-heal untuk kasus
+  historis "browser bisa, exe engga" saat server tergeser dari 8310).
+  `pet.html` memakai handshake yang sama (cermin mandiri — halaman itu tidak
+  memuat bundle.js). Dev/browser tidak tersentuh (same-origin by
+  construction).
 
 Jadi jalur internal = IPC per-domain (domain yang sudah migrasi) + HTTP loopback
 untuk sisanya; frontend TIDAK di-serve via `WebviewUrl::External`. §6b tinggal

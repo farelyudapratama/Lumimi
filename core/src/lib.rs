@@ -56,6 +56,23 @@ use static_serve::{mime_for, safe_join, Resolved};
 /// Versi core — dipakai endpoint `/api/version` (satu jalur HTTP).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Token identitas instalasi untuk handshake client↔server: frontend menolak
+/// menempel ke port yang tidak membalas token ini, jadi port yang diduduki
+/// server asing ATAU instalasi Lumimi lain (portabel lama vs installer, dev vs
+/// exe) tidak pernah tertukar. Deterministik dari root app — BUKAN acak per
+/// boot — supaya dobel-klik kedua pada instalasi yang sama tetap bisa attach
+/// ke instance pertama (perilaku pick_port yang disengaja).
+pub fn instance_token(paths: &AppPaths) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    paths
+        .root
+        .canonicalize()
+        .unwrap_or_else(|_| paths.root.clone())
+        .hash(&mut h);
+    format!("lumimi-{:016x}", h.finish())
+}
+
 /// Placeholder Stage 0: bukti crate ter-link.
 pub fn core_ready() -> bool {
     true
@@ -187,8 +204,12 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({ "status": "ok", "core": VERSION }))
 }
 
-async fn version() -> Json<serde_json::Value> {
-    Json(json!({ "core_version": VERSION, "engine": "rust-in-process" }))
+async fn version(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
+    Json(json!({
+        "core_version": VERSION,
+        "engine": "rust-in-process",
+        "instance": instance_token(&paths)
+    }))
 }
 
 /// GET /api/config — apiKey dimask, roles dinormalisasi (padanan handler TS).
@@ -1650,6 +1671,17 @@ mod tests {
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["core_version"], VERSION);
+        // Handshake: instance wajib ada supaya frontend bisa memverifikasi
+        // bahwa port yang dihubungi benar server milik instalasi ini.
+        assert!(v["instance"].as_str().unwrap_or("").starts_with("lumimi-"));
+    }
+
+    #[test]
+    fn instance_token_stabil_per_root_dan_beda_antar_root() {
+        let a = AppPaths::from_root(".");
+        assert_eq!(instance_token(&a), instance_token(&a), "root sama → token sama (attach dobel-klik tetap jalan)");
+        let b = AppPaths::from_root("folder-lain");
+        assert_ne!(instance_token(&a), instance_token(&b), "root beda → token beda (instalasi lain tak tertukar)");
     }
 
     #[tokio::test]

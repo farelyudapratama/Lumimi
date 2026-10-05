@@ -26,10 +26,13 @@
 //
 // Port (peluncuran TANPA argumen URL — dobel-klik shortcut installer): port
 // dasar 8310 dipakai bila kosong ATAU sudah dipakai server milik kita sendiri
-// (probe /api/mode — dobel-klik kedua menempel ke instance pertama, tanpa
+// (probe handshake /api/version + token instalasi — dobel-klik kedua
+// menempel ke instance pertama, tanpa
 // server baru). Bila port diduduki aplikasi ASING, shell bergeser ke
-// 8311..8319. URL argumen eksplisit (Lumimi.exe / pet yang diluncurkan server)
-// selalu dihormati apa adanya.
+// 8311..8399 — rentang ini HARUS sinkron dengan probe frontend
+// (src/client/transport/index.ts, PROBE_FIRST..PROBE_LAST) supaya fallback
+// probe frontend menemukan server yang pindah. URL argumen eksplisit
+// (Lumimi.exe / pet yang diluncurkan server) selalu dihormati apa adanya.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::net::TcpStream;
@@ -51,6 +54,14 @@ fn core_version() -> String {
 #[tauri::command]
 fn server_port(port: tauri::State<u16>) -> u16 {
     *port
+}
+
+/// Token handshake instalasi (live2d_core::instance_token) — frontend
+/// memverifikasi bahwa port yang dihubungi benar server milik instalasi ini
+/// sebelum memakainya (lihat transport/index.ts + pet.html).
+#[tauri::command]
+fn server_token(token: tauri::State<String>) -> String {
+    token.inner().clone()
 }
 
 /// Model awal jendela pet (?model= dari peluncur, via State karena URL App
@@ -169,48 +180,59 @@ fn can_connect(host_port: &str) -> bool {
     TcpStream::connect(host_port).is_ok()
 }
 
-/// Apakah listener di host_port adalah server milik kita? Probe HTTP singkat
-/// ke /api/mode dan cari kunci `"active"` khas JSON modeStatus(). Listener
-/// asing (aplikasi lain yang kebetulan memakai port 8310) tidak akan
-/// membalas dengan pola ini — tanpa cek ini, jendela pet bisa menampilkan
-/// halaman aplikasi orang lain.
-fn is_our_server(host_port: &str) -> bool {
+/// Apakah listener di host_port adalah server milik INSTALASI ini? Handshake
+/// via /api/version: jawaban harus memuat `core_version` (bentuk khas Lumimi)
+/// DAN token instance yang cocok — kunci `"active"` di /api/mode dulu
+/// digunakan, tapi pola JSON semacam itu bisa dikejar server asing, dan yang
+/// lebih penting: server milik INSTALASI Lumimi lain (portabel lama, dev
+/// `cargo run`) juga memenuhinya padahal data & versinya berbeda. Token
+/// (live2d_core::instance_token) deterministik per root app, jadi attach
+/// dobel-klik pada instalasi yang sama tetap jalan, lintas-instalasi tidak.
+fn is_our_server(host_port: &str, token: &str) -> bool {
     use std::io::{Read, Write};
     let Ok(mut stream) = TcpStream::connect(host_port) else {
         return false;
     };
     let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
-    let req = format!("GET /api/mode HTTP/1.0\r\nHost: {host_port}\r\n\r\n");
+    let req = format!("GET /api/version HTTP/1.0\r\nHost: {host_port}\r\n\r\n");
     if stream.write_all(req.as_bytes()).is_err() {
         return false;
     }
     let mut buf = [0u8; 2048];
     let n = stream.read(&mut buf).unwrap_or(0);
     let resp = String::from_utf8_lossy(&buf[..n]);
-    resp.contains("HTTP/1") && resp.contains("\"active\"")
+    resp.contains("HTTP/1")
+        && resp.contains("core_version")
+        && resp.contains(&format!("\"instance\":\"{token}\""))
 }
 
 /// Beri kesempatan kedua: server milik kita yang baru dinyalakan (boot <1 dtk)
 /// mungkin belum sempat membalas saat probe pertama.
-fn is_our_server_with_retry(host_port: &str) -> bool {
-    if is_our_server(host_port) {
+fn is_our_server_with_retry(host_port: &str, token: &str) -> bool {
+    if is_our_server(host_port, token) {
         return true;
     }
     std::thread::sleep(Duration::from_millis(300));
-    is_our_server(host_port)
+    is_our_server(host_port, token)
 }
 
 /// Pilih port bila peluncuran tanpa argumen URL (dobel-klik shortcut):
 ///   1) port kosong → pakai (server in-process menyusul di ensure_server);
-///   2) port berisi server MILIK KITA → pakai, menempel ke instance itu;
-///   3) port diduduki aplikasi asing → geser ke kandidat berikutnya.
+///   2) port berisi server MILIK INSTALASI INI (token cocok) → pakai,
+///      menempel ke instance itu;
+///   3) port diduduki aplikasi asing ATAU instalasi Lumimi lain → geser ke
+///      kandidat berikutnya.
 /// Semua kandidat gagal → kembali ke port dasar (perilaku lama).
-fn pick_port() -> u16 {
+fn pick_port(token: &str) -> u16 {
     const BASE_PORT: u16 = 8310;
-    const CANDIDATES: u16 = 10;
+    // 90 kandidat (8310..8399, sinkron dengan probe frontend di transport):
+    // dulu 10 — hasil akhir kandidat habis adalah kembali ke port dasar yang
+    // justru diduduki asing, dan exe mati total tanpa server. Dengan 90,
+    // kehabisan hampir mustahil; port mati (mayoritas) lolos probe instan.
+    const CANDIDATES: u16 = 90;
     for candidate in BASE_PORT..BASE_PORT + CANDIDATES {
         let hp = format!("127.0.0.1:{candidate}");
-        if !can_connect(&hp) || is_our_server_with_retry(&hp) {
+        if !can_connect(&hp) || is_our_server_with_retry(&hp, token) {
             return candidate;
         }
     }
@@ -220,22 +242,23 @@ fn pick_port() -> u16 {
 /// Pastikan ada server yang melayani `host_port`, dengan SATU PROSES sebagai
 /// prioritas: bila port masih kosong, nyalakan server Rust IN-PROCESS (thread
 /// runtime tokio sendiri, root path terdeteksi dari lokasi exe / cwd dev).
-/// Bila port sudah dilayani server milik kita (instance lain / dev
-/// `cargo run -p live2d-core`), menempel saja tanpa server baru. Bila
-/// diduduki aplikasi asing, bukan urusan kita (jendela menampilkan apa adanya,
-/// seperti dulu).
-fn ensure_server(host_port: &str, port: u16) {
-    if is_our_server_with_retry(host_port) {
+/// Bila port sudah dilayani server milik INSTALASI INI (token cocok — instance
+/// lain / dev `cargo run` pada root yang sama), menempel saja tanpa server
+/// baru. Bila diduduki aplikasi asing atau instalasi Lumimi lain, bukan urusan
+/// kita — frontend pun punya handshake yang sama dan tidak akan bicara ke
+/// sana (jendela menampilkan apa adanya, seperti dulu).
+fn ensure_server(host_port: &str, port: u16, token: &str, paths: &live2d_core::paths::AppPaths) {
+    if is_our_server_with_retry(host_port, token) {
         return;
     }
     if can_connect(host_port) {
         return;
     }
-    let paths = live2d_core::paths::AppPaths::detect();
     eprintln!(
         "[shell] server Rust in-process — root={} port={port}",
         paths.root.display()
     );
+    let paths = paths.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -252,6 +275,11 @@ fn ensure_server(host_port: &str, port: u16) {
 
 fn main() {
     let launch = parse_args();
+    // Paths + token handshake dihitung SEKALI di sini: dipakai pick_port /
+    // ensure_server (attach hanya ke server instalasi ini) dan disumbang ke
+    // frontend lewat command `server_token` (verifikasi di transport/pet.html).
+    let paths = live2d_core::paths::AppPaths::detect();
+    let token = live2d_core::instance_token(&paths);
     // Port: dari URL eksplisit bila ada, else shell memilih sendiri.
     // HALAMAN selalu dari aset ter-embed (WebviewUrl::App → origin lokal →
     // IPC hidup). URL eksplisit hanya menyumbang PORT (+ ?model= pet).
@@ -261,10 +289,10 @@ fn main() {
             .next()
             .and_then(|p| p.parse().ok())
             .unwrap_or(FALLBACK_PORT),
-        None => pick_port(),
+        None => pick_port(&token),
     };
     let host_port = format!("127.0.0.1:{port}");
-    ensure_server(&host_port, port);
+    ensure_server(&host_port, port, &token, &paths);
     // Tunggu server bind (maks 15 dtk) SEBELUM jendela dibuat — kasus normal.
     let ready = {
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -281,12 +309,17 @@ fn main() {
     let label = "main";
     tauri::Builder::default()
         .manage(port)
+        // Token handshake untuk verifikasi loopback di frontend (transport +
+        // pet.html): port yang sama bisa saja diduduki server asing/instalasi
+        // lain — tanpa token, frontend bisa bicara ke backend yang salah.
+        .manage(token.clone())
         // Command pet_model dipertahankan (pet.html memanggilnya; selalu None
         // di jalur in-process — pet memakai daftar model dari server).
         .manage(None::<String>)
         .invoke_handler(tauri::generate_handler![
             core_version,
             server_port,
+            server_token,
             pet_model,
             get_mode,
             set_mode,
