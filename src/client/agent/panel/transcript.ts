@@ -44,7 +44,7 @@ export type Block =
     }
   | { kind: "status"; id: number; rev: number; text: string; variant?: "ok" | "err" | "warn" }
   | { kind: "speak"; id: number; rev: number; text: string }
-  | { kind: "approval"; id: number; rev: number; apId: string; tool: string; args: any }
+  | { kind: "approval"; id: number; rev: number; apId: string; tool: string; args: any; /** Kartu rencana (Fase 2): args.todos dirender sebagai rencana kerja, bukan argumen tool. */ plan?: boolean }
   | { kind: "subagent"; id: number; rev: number; name: string; state: "spawned" | "done"; text: string }
   /** Ringkasan perubahan file per giliran (ala "N files changed +a −r"). */
   | { kind: "changes"; id: number; rev: number; files: FileChange[]; added: number; removed: number };
@@ -320,11 +320,16 @@ export class Transcript {
    * tanpa ini tombol Allow/Deny tak pernah muncul dan tugas mutating (mis.
    * motion_save) macet di "⚠ butuh izin". Idempoten by apId.
    */
-  ensureApproval(apId: string, tool: string, args: any): boolean {
+  ensureApproval(apId: string, tool: string, args: any, plan = false): boolean {
     if (!apId) return false;
-    const exists = this.blocks.some((b) => b.kind === "approval" && b.apId === apId);
-    if (exists) return false;
-    this.push({ kind: "approval", apId, tool, args: args ?? null });
+    const found = this.blocks.find((b) => b.kind === "approval" && b.apId === apId);
+    if (found) {
+      // Kartu dibuat duluan oleh jalur SSE tanpa konteks plan — /status adalah
+      // sumber kebenaran: upgrade di tempat (render berikutnya membacanya).
+      if (plan) (found as Extract<Block, { kind: "approval" }>).plan = true;
+      return false;
+    }
+    this.push({ kind: "approval", apId, tool, args: args ?? null, plan: plan || undefined });
     return true;
   }
 

@@ -564,6 +564,7 @@ export const DICT_ID: Record<string, string> = {
   "as.approve.title": "Butuh izin:",
   "as.approve.always": "Selalu izinkan {what} untuk sesi ini",
   "as.approve.thisCommand": "perintah ini",
+  "as.approve.planTitle": "Setujui rencana kerja ini sebelum eksekusi?",
   "as.deny": "Tolak",
   "as.tool.args": "argumen",
   "as.tool.result": "hasil",

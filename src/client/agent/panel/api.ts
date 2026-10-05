@@ -7,7 +7,8 @@ export type AssistantStatus = {
   /** Panjang history runtime — sumber re-sync transcript untuk task yang
    *  disubmit di luar panel (hand-off companion / CLI). */
   historyCount?: number;
-  pendingApprovals?: Array<{ id: string; tool: string; args: any }>;
+  /** kind: "plan" = kartu approval rencana kerja (Fase 2) — bukan izin tool. */
+  pendingApprovals?: Array<{ id: string; tool: string; args: any; kind?: string | null }>;
   plan?: any[];
   notes?: { filesTouched?: string[] };
   tools?: Array<{ name: string; level: "safe" | "mutating" }>;

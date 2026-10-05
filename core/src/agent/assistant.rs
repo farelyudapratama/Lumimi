@@ -48,6 +48,15 @@ pub struct Runtime {
     /// pernah disetujui dengan "selalu izinkan" — gate melewatinya tanpa
     /// pause. Kosong lagi saat stop().
     pub allowed: std::collections::HashSet<String>,
+    /// Kontrak plan-approval (Fase 2): ask_seq = penomor tugas berjalan;
+    /// plan_seq = ask_seq saat rencana terakhir disusun lewat update_plan.
+    /// Gate menyala hanya bila rencana disusun PADA tugas berjalan (lihat
+    /// plan_gate_required) dan dilucuti setelah approve/reject atau mutasi
+    /// pertama tereksekusi. Di-reset per tugas di ask().
+    ask_seq: u64,
+    plan_seq: u64,
+    plan_ok: bool,
+    mutated: bool,
     plan: Vec<Value>,          // update_plan items
     notes_files: Vec<String>,  // file tersentuh sesi ini (relatif)
     undo: Vec<UndoRec>,        // snapshot mutasi (cap MAX_UNDO)
@@ -85,6 +94,15 @@ fn allow_key(name: &str, args: &Value) -> String {
         }
     }
     name.to_string()
+}
+
+/// Kontrak plan-approval (Fase 2, murni): gate hanya untuk rencana yang
+/// disusun PADA tugas berjalan (plan_seq == ask_seq), belum disetujui
+/// (plan_ok), dan belum ada mutasi tereksekusi (mutated). Tugas tanpa plan,
+/// plan dari tugas lampau, dan kondisi setelah mutasi pertama TIDAK
+/// menggerbangi — mereka langsung ke gerbang izin tool (Fase 1) saja.
+fn plan_gate_required(r: &Runtime) -> bool {
+    r.plan_seq > 0 && r.plan_seq == r.ask_seq && !r.plan_ok && !r.mutated
 }
 
 /// Buang baris directive TOOL: + blok/tag reasoning yang bocor dari teks final
@@ -128,6 +146,7 @@ pub async fn status() -> Value {
         let args = ap.get("args").cloned().unwrap_or(json!({}));
         json!({
             "id": ap.get("id").cloned().unwrap_or(Value::Null),
+            "kind": ap.get("kind").cloned().unwrap_or(Value::Null),
             "tool": name,
             "args": loop_::public_tool_args(name, &args),
             "ts": ap.get("ts").cloned().unwrap_or(Value::Null),
@@ -159,6 +178,10 @@ pub async fn stop() -> Value {
     r.history.clear();
     r.approvals.clear();
     r.allowed.clear();
+    r.ask_seq = 0;
+    r.plan_seq = 0;
+    r.plan_ok = false;
+    r.mutated = false;
     r.plan.clear();
     r.notes_files.clear();
     r.undo.clear();
@@ -390,6 +413,27 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
         }
         seen.insert(call_key);
 
+        if level == Some("mutating") && plan_gate_required(&*rt().lock().await) {
+            // PLAN APPROVAL GATE (Fase 2) — rencana yang disusun pada tugas
+            // ini harus disetujui user SEBELUM mutasi pertama dieksekusi.
+            // Gate ini TERPISAH dari gerbang izin tool (Fase 1): setelah
+            // rencana disetujui, tool mutating tetap melewati gerbang izinnya
+            // sendiri (atau allowlist sesi). Tidak ada tool yang dieksekusi
+            // di jalur ini — hanya jeda + kartu rencana.
+            bus::emit("permission_request", "update_plan");
+            let id = format!("ap_{}", crate::config::base36_pub(now_ms() as u128));
+            let plan_snapshot = rt().lock().await.plan.clone();
+            let mut r = rt().lock().await;
+            while r.approvals.len() >= 8 {
+                r.approvals.remove(0);
+            }
+            r.approvals.push(json!({ "id": id, "kind": "plan", "tool": "update_plan", "args": { "todos": plan_snapshot }, "ts": now_ms() }));
+            push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+            push_msg(&mut r, "tool", &format!("MENUNGGU PERSETUJUAN RENCANA (id {id}) — eksekusi dijeda sebelum mutasi pertama."));
+            paused = true;
+            final_text = format!("{}\n\n⏳ Rencana kerja menunggu setujumu di panel — aku jeda sebelum mengubah apa pun.", strip_tool_directive(&reply));
+            break;
+        }
         if level == Some("mutating") && !rt().lock().await.allowed.contains(&allow_key(&name, &args)) {
             // PERMISSION GATE — jeda, minta izin. Tool yang sudah di-allowlist
             // sesi (approve dengan "selalu izinkan") melewati blok ini dan
@@ -436,6 +480,9 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
                     let mut r = rt().lock().await;
                     let (ok, why) = plan::apply_plan(&mut r.plan, todos, &reason);
                     if ok {
+                        // Rencana disusun pada tugas ini → plan-approval
+                        // ter-armed (kontrak plan_gate_required).
+                        r.plan_seq = r.ask_seq;
                         format!("Rencana diperbarui: {}", plan::plan_label(&r.plan))
                     } else {
                         format!("ERROR: {}", why.unwrap_or_default())
@@ -480,9 +527,14 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
             }
         }
         let mut r = rt().lock().await;
-        if is_mutating && !result.starts_with("ERROR") {
-            if let Some((rel, abs, prev)) = snap {
-                record_undo(&mut r, rel, abs, prev);
+        if is_mutating {
+            // Mutasi tereksekusi pada tugas ini → plan-approval dilucuti
+            // (kontrak: gate hanya SEBELUM mutasi pertama).
+            r.mutated = true;
+            if !result.starts_with("ERROR") {
+                if let Some((rel, abs, prev)) = snap {
+                    record_undo(&mut r, rel, abs, prev);
+                }
             }
         }
         push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
@@ -580,6 +632,11 @@ pub async fn ask(config_path: &Path, root: &Path, text: &str) -> AskResult {
         let t: String = text.chars().take(4000).collect();
         let tid = format!("t_{}", r.next_task_seq);
         r.next_task_seq += 1;
+        // Tugas baru = kontrak plan-approval di-reset: plan tugas lampau
+        // tetap terlihat tapi tidak menggerbangi tugas ini.
+        r.ask_seq += 1;
+        r.plan_ok = false;
+        r.mutated = false;
         r.active_task = Some(json!({ "taskId": tid, "prompt": t.chars().take(120).collect::<String>(), "status": "running" }));
         push_msg(&mut r, "user", &t);
     }
@@ -654,6 +711,22 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
     let work_dir = { rt().lock().await.work_dir.clone() };
     let wd = PathBuf::from(work_dir);
 
+    // Plan approval (Fase 2): bukan eksekusi tool — hanya menandai rencana
+    // disetujui (approve) atau dilucuti (reject, agar task tidak menggantung)
+    // lalu resume loop. `always` tidak berlaku di sini (bukan allowlist tool).
+    if pending.get("kind").and_then(|x| x.as_str()) == Some("plan") {
+        let mut r = rt().lock().await;
+        r.plan_ok = true;
+        if approve_it {
+            push_msg(&mut r, "tool", "User MENYETUJUI rencana kerja — lanjutkan eksekusi sesuai rencana.");
+        } else {
+            push_msg(&mut r, "tool", "User MENOLAK rencana kerja. Revisi pendekatan atau tanyakan user; jangan eksekusi rencana yang ditolak.");
+        }
+        drop(r);
+        bus::emit("permission_resolved", &format!("{}: rencana kerja", if approve_it { "disetujui" } else { "ditolak" }));
+        return run_loop(config_path, root).await;
+    }
+
     bus::emit("permission_resolved", &format!("{}: {name}", if approve_it { "disetujui" } else { "ditolak" }));
 
     if approve_it {
@@ -679,6 +752,10 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
         bus::emit("tool_call_end", &name);
         let ok = !result.starts_with("ERROR");
         let mut r = rt().lock().await;
+        // Mutasi tereksekusi pada tugas ini → plan-approval dilucuti.
+        if loop_::tool_level(&name) == Some("mutating") {
+            r.mutated = true;
+        }
         if ok {
             if let Some((rel, abs, prev)) = snap {
                 record_undo(&mut r, rel, abs, prev);
@@ -789,6 +866,85 @@ mod tests {
         stop().await;
         assert!(rt().lock().await.allowed.is_empty(), "stop() = batas sesi, allowlist kosong lagi");
         assert!(status().await["allowlist"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn plan_approval_lifecycle() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        // ── Kontrak keputusan (murni, tanpa LLM) ──
+        let mut r = Runtime::default();
+        assert!(!plan_gate_required(&r), "tanpa plan → tidak menggerbangi");
+        r.ask_seq = 3;
+        r.plan_seq = 2;
+        assert!(!plan_gate_required(&r), "plan tugas lampau tidak menggerbangi tugas baru");
+        r.plan_seq = 3;
+        assert!(plan_gate_required(&r), "plan tugas berjalan + belum disetujui + belum mutasi → gate");
+        r.plan_ok = true;
+        assert!(!plan_gate_required(&r), "setelah approve tidak menggerbangi ulang");
+        r.plan_ok = false;
+        r.mutated = true;
+        assert!(!plan_gate_required(&r), "setelah mutasi pertama gate dilucuti");
+
+        // ── Lifecycle approve/reject lewat jalur approval asli ──
+        // (LLM mock tidak scriptable — kartu plan dipush langsung persis
+        // seperti yang dilakukan gate di run_loop.)
+        let wd = tmp_dir("plan_gate");
+        start(&wd.to_string_lossy(), "", Value::Null).await;
+        let cfg = mock_config(&wd);
+        {
+            let mut r = rt().lock().await;
+            r.ask_seq = 1;
+            r.plan_seq = 1;
+            r.plan = plan::sanitize_plan(&json!([
+                { "id": "1", "task": "baca kode transport" },
+                { "id": "2", "task": "perbaiki cara ambil port" },
+                { "id": "3", "task": "jalankan test" },
+            ])).unwrap();
+        }
+        assert!(plan_gate_required(&*rt().lock().await), "update_plan pada tugas ini → gate armed");
+        let id = format!("ap_test_{}", crate::config::base36_pub(now_ms() as u128));
+        let todos_snapshot = rt().lock().await.plan.clone();
+        {
+            let mut r = rt().lock().await;
+            r.approvals.push(json!({ "id": id, "kind": "plan", "tool": "update_plan", "args": { "todos": todos_snapshot }, "ts": now_ms() }));
+        }
+        // Approve → rencana disetujui, loop resume, TIDAK ada eksekusi gantung.
+        let res_ok = approve(&cfg, &wd, &id, true, false).await;
+        assert!(res_ok.ok);
+        assert!(!res_ok.paused, "approve rencana → resume tanpa approval yang tersisa");
+        assert!(rt().lock().await.plan_ok, "approve menandai rencana disetujui");
+        assert!(rt().lock().await.history.iter().any(|m| m["content"].as_str().unwrap_or("").contains("MENYETUJUI rencana")));
+        assert!(rt().lock().await.approvals.is_empty(), "kartu rencana selesai dikonsumsi");
+
+        // Reject → juga tidak menggantung (gate dilucuti, agent diarahkan revisi).
+        let id2 = format!("ap_test_{}", crate::config::base36_pub(now_ms() as u128));
+        {
+            let mut r = rt().lock().await;
+            r.approvals.push(json!({ "id": id2, "kind": "plan", "tool": "update_plan", "args": { "todos": [] }, "ts": now_ms() }));
+        }
+        let res_no = approve(&cfg, &wd, &id2, false, false).await;
+        assert!(res_no.ok);
+        assert!(!plan_gate_required(&*rt().lock().await), "reject melucuti gate (tidak ping-pong)");
+        assert!(rt().lock().await.history.iter().any(|m| m["content"].as_str().unwrap_or("").contains("MENOLAK rencana")));
+
+        // Mutasi pertama tereksekusi → gate dilucuti walau plan disusun ulang.
+        run_approved_tool(&wd, "write_file", json!({ "path": "x.txt", "content": "v1" })).await;
+        assert!(rt().lock().await.mutated, "approve jalur tool menandai mutated");
+        {
+            let mut r = rt().lock().await;
+            r.plan_seq = r.ask_seq; // agent menyusun ulang rencana setelah mutasi
+        }
+        assert!(!plan_gate_required(&*rt().lock().await), "setelah mutasi, update_plan cuma pelacakan");
+
+        // Tugas baru via ask() sungguhan (LLM mock) → kontrak di-reset.
+        let res_task = ask(&cfg, &wd, "halo").await;
+        assert!(res_task.ok);
+        {
+            let r = rt().lock().await;
+            assert!(!r.plan_ok && !r.mutated, "tugas baru: kontrak plan-approval mulai bersih");
+            assert!(!plan_gate_required(&r), "plan tugas lampau tidak menggerbangi");
+        }
+        stop().await;
     }
 
     #[tokio::test]

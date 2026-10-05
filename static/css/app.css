@@ -3896,6 +3896,9 @@ input[type="range"]::-moz-range-thumb {
   user-select: none;
 }
 .as-appr-always input { accent-color: var(--lamp); cursor: pointer; }
+/* Daftar rencana di dalam kartu approval rencana (Fase 2) — kotak as-plan
+   dipakai ulang, cukup dirapatkan agar tak bergaya kotak-dalam-kotak. */
+.as-appr-plan { margin-bottom: 4px; max-height: 150px; }
 
 /* Chip subagent */
 .as-blk.as-sub {

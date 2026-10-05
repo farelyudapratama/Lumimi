@@ -556,6 +556,7 @@ export const DICT_EN: Record<string, string> = {
   "as.approve.title": "Needs approval:",
   "as.approve.always": "Always allow {what} this session",
   "as.approve.thisCommand": "this command",
+  "as.approve.planTitle": "Approve this plan before execution?",
   "as.deny": "Deny",
   "as.tool.args": "arguments",
   "as.tool.result": "result",

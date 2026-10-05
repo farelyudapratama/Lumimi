@@ -157,6 +157,26 @@ describe("Transcript — mode live (SSE)", () => {
     expect(tr.blocks.some((b) => b.kind === "approval")).toBe(false);
   });
 
+  it("ensureApproval: kartu plan dari /status meng-upgrade kartu SSE yang datang duluan", () => {
+    const tr = new Transcript();
+    tr.beginLive();
+    // Jalur SSE membuat kartu tanpa konteks plan (event bus tidak membawanya).
+    tr.applySse(sse({ type: "approval", id: "ap_plan", tool: "update_plan", args: { todos: [] } }));
+    expect(tr.blocks.find((b) => b.kind === "approval")?.plan).toBeUndefined();
+    // /status (sumber kebenaran) menandai kind=plan → upgrade di tempat, tanpa dobel kartu.
+    const changed = tr.ensureApproval("ap_plan", "update_plan", { todos: [{ id: "1", task: "baca", status: "pending" }] }, true);
+    expect(changed).toBe(false);
+    const blocks = tr.blocks.filter((b) => b.kind === "approval");
+    expect(blocks.length).toBe(1);
+    expect(blocks[0].plan).toBe(true);
+    // Kartu plan baru langsung terbawa saat belum ada dari SSE.
+    expect(tr.ensureApproval("ap_plan2", "update_plan", { todos: [] }, true)).toBe(true);
+    expect(tr.blocks.find((b) => b.kind === "approval" && b.apId === "ap_plan2")?.plan).toBe(true);
+    // Kartu izin tool biasa tidak terpengaruh.
+    expect(tr.ensureApproval("ap_tool", "write_file", { path: "x" }, false)).toBe(true);
+    expect(tr.blocks.find((b) => b.kind === "approval" && b.apId === "ap_tool")?.plan).toBeUndefined();
+  });
+
   it("metamorfosis approval klien lain → kartu tool ringkas running", () => {
     const tr = new Transcript();
     tr.beginLive();

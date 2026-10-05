@@ -444,7 +444,7 @@ export function startAssistantPanel(): () => void {
     // Allow/Deny (tanpa ini motion_save dkk. macet di "⚠ butuh izin").
     for (const ap of st.pendingApprovals || []) {
       if (localApprovals.has(ap.id)) continue; // sedang diselesaikan panel ini
-      transcript.ensureApproval(ap.id, ap.tool, ap.args);
+      transcript.ensureApproval(ap.id, ap.tool, ap.args, ap.kind === "plan");
     }
     const current = transcript.blocks
       .filter((b: Block): b is Extract<Block, { kind: "approval" }> => b.kind === "approval")
