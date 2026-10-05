@@ -17,7 +17,7 @@
 import { createLifecycle } from "../../lifecycle";
 import { httpBase } from "../../transport";
 import { createAssistantApi, bootThenPoll } from "./api";
-import { Transcript, CONTINUATION_PROMPT } from "./transcript";
+import { Transcript, CONTINUATION_PROMPT, historyNeedsSync } from "./transcript";
 import type { Block } from "./transcript";
 import { decideFallback, readSseStream, postJson } from "./stream";
 import type { AsSseEvent } from "./stream";
@@ -122,6 +122,8 @@ export function startAssistantPanel(): () => void {
   let destroy = false;
   let lastSeq = 0;
   let prevBusy = false;
+  // Panjang history terakhir yang sudah di-hydrate (deteksi task eksternal).
+  let lastHistoryCount = -1;
   let liveAsk: { abort: AbortController; receivedAnyEvent: boolean } | null = null;
   let localApprovals = new Set<string>(); // apId yang panel ini yang menyelesaikan
 
@@ -176,6 +178,9 @@ export function startAssistantPanel(): () => void {
       const hist = await assistantApi.history(requestSignal);
       if (destroy) return;
       transcript.syncFromHistory(hist);
+      // Tandai panjang yang sudah di-hydrate supaya poll tidak mengulang
+      // untuk data yang sama (start() dan poll saling menutup celah).
+      if (Array.isArray(hist)) lastHistoryCount = hist.length;
       render();
     } catch {}
   }
@@ -453,6 +458,14 @@ export function startAssistantPanel(): () => void {
     // Transisi busy→false: tarik history (jawaban final dari sesi CLI/drop).
     if (prevBusy && !st.busy && !liveAsk) await syncHistory();
     prevBusy = !!st.busy;
+    // Tugas dari LUAR panel (hand-off companion, CLI) menaikkan historyCount
+    // tanpa panel pernah tahu — dulu transcript tetap "Belum ada tugas aktif"
+    // sampai task selesai. Re-sync setiap panjang history berubah.
+    const histCount = typeof st.historyCount === "number" ? st.historyCount : null;
+    if (historyNeedsSync(histCount, lastHistoryCount, !!liveAsk)) {
+      lastHistoryCount = histCount as number;
+      await syncHistory();
+    }
     // Cermin workdir dari server (bila input sedang tidak diedit).
     // Title ikut nilai penuh — tampilan terpotong ellipsis, path lengkap
     // tetap terbaca lewat tooltip.

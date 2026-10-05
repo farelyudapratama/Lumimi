@@ -12,6 +12,7 @@ import {
   CONTINUATION_PROMPT,
   stripToolLine,
   parseToolLabel,
+  historyNeedsSync,
 } from "../src/client/agent/panel/transcript";
 import { diffLines, changeFromTool } from "../src/client/agent/panel/diff";
 import { parseMarkdown, parseInlines } from "../src/client/agent/panel/md";
@@ -755,5 +756,25 @@ describe("actor — mapping per-event", () => {
     actor.onActivity({ type: "error", label: "boom" });
     await waitMs(5);
     expect(calls.spoke).toEqual(["as.actor.error"]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Re-sync history — tugas dari luar panel (hand-off companion/CLI)
+// ═══════════════════════════════════════════════════════════════
+
+describe("historyNeedsSync", () => {
+  it("sync saat historyCount berubah (task eksternal masuk/selesai)", () => {
+    expect(historyNeedsSync(4, -1, false)).toBe(true); // pertama kali
+    expect(historyNeedsSync(5, 4, false)).toBe(true); // tugas baru dari companion
+    expect(historyNeedsSync(4, 4, false)).toBe(false); // tidak berubah
+  });
+
+  it("tidak sync saat panel sedang live-stream ask sendiri", () => {
+    expect(historyNeedsSync(9, 4, true)).toBe(false);
+  });
+
+  it("historyCount tidak tersedia → tidak sync", () => {
+    expect(historyNeedsSync(null, 4, false)).toBe(false);
   });
 });

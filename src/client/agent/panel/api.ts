@@ -4,6 +4,9 @@ export type AssistantStatus = {
   running?: boolean;
   busy?: boolean;
   workDir?: string | null;
+  /** Panjang history runtime — sumber re-sync transcript untuk task yang
+   *  disubmit di luar panel (hand-off companion / CLI). */
+  historyCount?: number;
   pendingApprovals?: Array<{ id: string; tool: string; args: any }>;
   plan?: any[];
   notes?: { filesTouched?: string[] };

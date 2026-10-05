@@ -547,3 +547,17 @@ export function parseToolLabel(label: string): { name: string; summary: string }
   if (!m) return { name: "tool", summary: label };
   return { name: m[1], summary: (m[2] || "").slice(0, 120) };
 }
+
+/** Kebijakan re-sync history panel: tarik ulang saat panjang history berubah
+ *  dan panel tidak sedang men-streaming ask sendiri. Menutup lubang tugas
+ *  yang disubmit di LUAR panel (hand-off companion / CLI) — dulu transcript
+ *  tetap "Belum ada tugas aktif" sampai task selesai. */
+export function historyNeedsSync(
+  histCount: number | null,
+  lastCount: number,
+  liveAsk: boolean,
+): boolean {
+  if (liveAsk) return false;
+  if (histCount === null) return false;
+  return histCount !== lastCount;
+}
