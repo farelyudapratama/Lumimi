@@ -68,15 +68,29 @@ function mountBrowserPanel(root: HTMLElement): () => void {
   const engine = el("span", "br-badge", "—");
   const connection = el("span", "br-badge", t("browser.closed"));
   const grant = el("span", "br-badge hidden", t("browser.granted"));
-  badges.append(engine, connection, grant);
+  const captcha = el("span", "br-badge br-captcha hidden");
+  badges.append(engine, connection, grant, captcha);
   meta.append(title, badges);
 
   const actions = el("div", "br-actions");
+  const engineSel = document.createElement("select") as HTMLSelectElement;
+  engineSel.className = "br-engine";
+  engineSel.setAttribute("aria-label", t("browser.engineLabel"));
+  for (const [value, key] of [
+    ["auto", "browser.engineAuto"],
+    ["edge", "browser.engineEdge"],
+    ["chrome", "browser.engineChrome"],
+  ] as const) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = t(key);
+    engineSel.append(option);
+  }
   const open = el("button", "br-btn", t("browser.open"));
   const focus = el("button", "br-btn", t("browser.focus"));
   const close = el("button", "br-btn br-danger", t("browser.close"));
   const allow = el("button", "br-btn br-allow hidden", t("browser.allowPrivate"));
-  actions.append(open, focus, close, allow);
+  actions.append(engineSel, open, focus, close, allow);
 
   const notice = el("div", "br-notice", t("browser.closedHint"));
   notice.setAttribute("aria-live", "polite");
@@ -117,12 +131,19 @@ function mountBrowserPanel(root: HTMLElement): () => void {
     engine.textContent = state.engine ? state.engine.toUpperCase() : t("browser.noEngine");
     connection.textContent = state.connected ? t("browser.connected") : state.running ? t("browser.disconnected") : t("browser.closed");
     grant.classList.toggle("hidden", !state.originGranted);
+    captcha.classList.toggle("hidden", !state.captcha);
+    if (state.captcha) {
+      captcha.textContent = t("browser.captchaBadge", { kind: state.captcha });
+      captcha.title = t("browser.captchaTitle");
+    }
+    if (document.activeElement !== engineSel) engineSel.value = state.enginePref || "auto";
     title.textContent = state.title || state.url || (state.available ? t("browser.closed") : t("browser.unavailable"));
     if (state.url && document.activeElement !== address) address.value = state.url;
     if (!state.available) setNotice(t("browser.unavailableHint"), true);
     else if (!state.running) setNotice(t("browser.closedHint"));
     else if (!state.connected) setNotice(t("browser.disconnectedHint"), true);
     else if (state.error) setNotice(state.error, true);
+    else if (state.captcha) setNotice(t("browser.captchaNotice"), true);
     else setNotice(t("browser.liveHint"));
   }
 
@@ -211,6 +232,9 @@ function mountBrowserPanel(root: HTMLElement): () => void {
     void run(() => post("/api/browser/open", { url }));
   });
   address.addEventListener("keydown", (event) => { if (event.key === "Enter") navigate(); });
+  engineSel.addEventListener("change", () => {
+    void run(() => post("/api/browser/engine", { engine: engineSel.value }));
+  });
   focus.addEventListener("click", () => void run(() => post("/api/browser/focus", {})));
   close.addEventListener("click", () => void run(() => post("/api/browser/close", {})));
   allow.addEventListener("click", () => {

@@ -22,7 +22,7 @@ use policy::{inspect_browser_url, OriginGrants, UrlDecision};
 use snapshot::{format_inspect, normalize_ax_tree, RefErr, SnapshotStore};
 
 // ── Discovery (Windows Edge/Chrome) ─────────────────────────────────────────
-fn chromium_candidates() -> Vec<String> {
+fn edge_candidates() -> Vec<String> {
     let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
     let mut c = Vec::new();
     if !local.is_empty() {
@@ -30,6 +30,12 @@ fn chromium_candidates() -> Vec<String> {
     }
     c.push("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe".into());
     c.push("C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe".into());
+    c
+}
+
+fn chrome_candidates() -> Vec<String> {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let mut c = Vec::new();
     if !local.is_empty() {
         c.push(format!("{local}\\Google\\Chrome\\Application\\chrome.exe"));
     }
@@ -38,8 +44,95 @@ fn chromium_candidates() -> Vec<String> {
     c
 }
 
-pub fn find_chromium() -> Option<String> {
-    chromium_candidates().into_iter().find(|f| Path::new(f).exists())
+/// Deteksi browser default Windows (ProgId di registry, dibaca via reg.exe —
+/// tanpa dep baru). Some("chrome"/"edge") bila default-nya Chromium yang bisa
+/// dikendalikan CDP; None bila lain (Firefox/dst) atau reg gagal (non-Windows).
+fn windows_default_chromium() -> Option<&'static str> {
+    let out = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "/v", "Progid"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    if text.contains("chromehtml") {
+        Some("chrome")
+    } else if text.contains("msedgehtm") {
+        Some("edge")
+    } else {
+        None
+    }
+}
+
+/// Kandidat exe sesuai pref ("auto"|"edge"|"chrome"). "auto" menaruh browser
+/// default Windows di depan bila Edge/Chrome, selain itu urutan lama
+/// Edge → Chrome (Edge praktis selalu ada di Windows).
+fn chromium_candidates(pref: &str) -> Vec<String> {
+    let (edge, chrome) = (edge_candidates(), chrome_candidates());
+    match pref {
+        "edge" => edge,
+        "chrome" => chrome,
+        _ if windows_default_chromium() == Some("chrome") => {
+            let mut c = chrome;
+            c.extend(edge);
+            c
+        }
+        _ => {
+            let mut c = edge;
+            c.extend(chrome);
+            c
+        }
+    }
+}
+
+pub fn find_chromium(pref: &str) -> Option<String> {
+    chromium_candidates(pref).into_iter().find(|f| Path::new(f).exists())
+}
+
+fn config_path(root: &Path) -> PathBuf {
+    root.join("data").join("config.json")
+}
+
+/// Pref engine dari config (`browser.engine`); nilai tak dikenal → "auto".
+fn engine_pref_from_config(root: &Path) -> String {
+    let cfg = crate::config::load(&config_path(root));
+    let e = cfg
+        .get("browser")
+        .and_then(|b| b.get("engine"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto")
+        .trim()
+        .to_lowercase();
+    if matches!(e.as_str(), "auto" | "edge" | "chrome") { e } else { "auto".to_string() }
+}
+
+// ── Deteksi captcha (advisory: berhenti + serahkan ke user, BUKAN dipecahkan) ──
+/// Marker pada haystack lowercase (url+title+teks AX) → nama kind.
+const CAPTCHA_MARKERS: &[(&str, &str)] = &[
+    ("recaptcha", "reCAPTCHA"),
+    ("hcaptcha", "hCaptcha"),
+    ("challenges.cloudflare.com", "Cloudflare"),
+    ("just a moment", "Cloudflare"),
+    ("verify you are human", "Cloudflare"),
+    ("verify you're human", "Cloudflare"),
+    ("checking your browser", "Cloudflare"),
+    ("attention required", "Cloudflare"),
+];
+
+/// Instruksi untuk agent saat captcha terdeteksi: berhenti & serahkan ke user.
+const CAPTCHA_HINT: &str = "Captcha terdeteksi di halaman ini. JANGAN mencoba menyelesaikannya (klik/otomasi tidak akan lolos dan melanggar aturan situs). Berhenti, beri tahu user untuk menyelesaikan captcha secara manual di jendela browser yang terbuka, lalu tunggu konfirmasi user sebelum melanjutkan.";
+
+/// Deteksi captcha dari teks halaman. Return nama kind (reCAPTCHA/hCaptcha/
+/// Cloudflare/captcha) — None bila tak ada indikasi. Advisory saja.
+pub fn detect_captcha(hay: &str) -> Option<&'static str> {
+    let h = hay.to_lowercase();
+    for (m, kind) in CAPTCHA_MARKERS {
+        if h.contains(m) {
+            return Some(kind);
+        }
+    }
+    if h.contains("captcha") {
+        return Some("captcha");
+    }
+    None
 }
 
 fn engine_of(exe: &Option<String>) -> Option<&'static str> {
@@ -57,6 +150,8 @@ fn engine_of(exe: &Option<String>) -> Option<&'static str> {
 #[derive(Default)]
 pub struct BrowserManager {
     executable: Option<String>,
+    engine_pref: Option<String>, // None = belum dimuat dari config
+    captcha: Option<String>,     // kind captcha di halaman aktif (advisory)
     profile_dir: Option<PathBuf>,
     client: Option<CdpClient>,
     process: Option<std::process::Child>,
@@ -72,9 +167,7 @@ pub struct BrowserManager {
 
 fn mgr() -> &'static Mutex<BrowserManager> {
     static M: OnceLock<Mutex<BrowserManager>> = OnceLock::new();
-    M.get_or_init(|| {
-        Mutex::new(BrowserManager { executable: find_chromium(), ..Default::default() })
-    })
+    M.get_or_init(|| Mutex::new(BrowserManager::default()))
 }
 
 const SPAWN_ARGS: &[&str] = &[
@@ -87,6 +180,18 @@ const SPAWN_ARGS: &[&str] = &[
 ];
 
 impl BrowserManager {
+    /// Pastikan engine_pref terisi (dari config, sekali per proses) dan
+    /// executable cocok dengannya. Dipanggil dari jalur yang punya root.
+    fn resolve_executable(&mut self, root: &Path) {
+        if self.engine_pref.is_none() {
+            self.engine_pref = Some(engine_pref_from_config(root));
+        }
+        if self.executable.is_none() {
+            let pref = self.engine_pref.clone().unwrap_or_else(|| "auto".into());
+            self.executable = find_chromium(&pref);
+        }
+    }
+
     fn connected(&self) -> bool {
         self.client.as_ref().map(|c| !c.is_closed()).unwrap_or(false)
     }
@@ -101,6 +206,8 @@ impl BrowserManager {
             "running": self.process.is_some(),
             "connected": self.connected(),
             "engine": engine_of(&self.executable),
+            "enginePref": self.engine_pref.clone().unwrap_or_else(|| "auto".into()),
+            "captcha": self.captcha,
             "url": self.url,
             "title": self.title,
             "canBack": self.can_back,
@@ -130,11 +237,13 @@ impl BrowserManager {
         self.can_back = false;
         self.can_forward = false;
         self.current_snapshot_id = None;
+        self.captcha = None;
         self.snapshots.clear();
         self.last_error = error;
     }
 
     async fn launch(&mut self, root: &Path) -> Result<(), String> {
+        self.resolve_executable(root);
         let exe = self.executable.clone().ok_or("Edge/Chrome tidak ditemukan")?;
         let profile = root.join("data").join("browser").join("profile");
         std::fs::create_dir_all(&profile).map_err(|e| e.to_string())?;
@@ -250,6 +359,7 @@ impl BrowserManager {
         self.url = url;
         self.title.clear();
         self.current_snapshot_id = None;
+        self.captcha = None;
         Ok(())
     }
 
@@ -268,6 +378,7 @@ impl BrowserManager {
         if live != self.url {
             self.url = d.url.unwrap_or(live);
             self.current_snapshot_id = None;
+            self.captcha = None;
         }
         Ok(())
     }
@@ -329,14 +440,33 @@ fn choose_page_target(targets: &[Value]) -> Option<&Value> {
 
 // ── API publik (dipakai handler lib.rs) ─────────────────────────────────────
 
-pub async fn status() -> Value {
+pub async fn status(root: &Path) -> Value {
     let mut m = mgr().lock().await;
     // sinkron: bila proses sudah exit, reset.
     let dead = m.process.as_mut().map(|p| matches!(p.try_wait(), Ok(Some(_)))).unwrap_or(false);
     if dead {
         m.reset(Some("browser ditutup".into()));
     }
+    m.resolve_executable(root);
     m.status_value()
+}
+
+/// Set pref engine (`auto`|`edge`|`chrome`), simpan ke config, lalu tutup
+/// browser yang sedang jalan agar buka berikutnya memakai engine baru.
+pub async fn set_engine(root: &Path, pref: &str) -> Result<Value, String> {
+    let p = pref.trim().to_lowercase();
+    if !matches!(p.as_str(), "auto" | "edge" | "chrome") {
+        return Err("engine harus auto, edge, atau chrome".into());
+    }
+    crate::config::save_browser(&config_path(root), &json!({ "engine": p }))
+        .map_err(|e| format!("gagal menyimpan: {e}"))?;
+    let mut m = mgr().lock().await;
+    m.engine_pref = Some(p.clone());
+    m.executable = find_chromium(&p);
+    if m.process.is_some() || m.connected() {
+        shutdown(&mut m).await;
+    }
+    Ok(m.status_value())
 }
 
 pub async fn grant_private_origin(raw_origin: &str) -> Result<String, String> {
@@ -403,11 +533,13 @@ pub async fn history(action: &str) -> Result<(), String> {
             let eid = entry.and_then(|e| e.get("id")).and_then(|v| v.as_i64()).ok_or_else(|| format!("tidak ada riwayat {action}"))?;
             m.require_client()?.send("Page.navigateToHistoryEntry", json!({ "entryId": eid }), 10_000).await?;
             m.current_snapshot_id = None;
+            m.captcha = None;
             Ok(())
         }
         "reload" => {
             m.require_client()?.send("Page.reload", json!({ "ignoreCache": false }), 10_000).await?;
             m.current_snapshot_id = None;
+            m.captcha = None;
             Ok(())
         }
         _ => Err("action harus back, forward, atau reload".into()),
@@ -427,7 +559,23 @@ pub async fn inspect(cursor: usize, max_chars: usize, snapshot_id: Option<&str>)
     let nodes = result.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let snap = normalize_ax_tree(&nodes, &url, &title);
     let sid = snap.snapshot_id.clone();
-    let out = format_inspect(&snap, cursor, max_chars);
+    // Deteksi captcha dari url+title+teks AX; hasil disimpan utk status & tool.
+    let hay = {
+        let mut parts = vec![snap.url.clone(), snap.title.clone()];
+        for n in &snap.nodes {
+            parts.push(n.name.clone());
+            if let Some(v) = &n.value { parts.push(v.clone()); }
+            if let Some(d) = &n.description { parts.push(d.clone()); }
+        }
+        parts.join(" ")
+    };
+    let kind = detect_captcha(&hay);
+    m.captcha = kind.map(|s| s.to_string());
+    let mut out = format_inspect(&snap, cursor, max_chars);
+    if let Some(k) = kind {
+        out["captcha"] = json!(k);
+        out["captchaHint"] = json!(CAPTCHA_HINT);
+    }
     m.snapshots.put(snap);
     m.current_snapshot_id = Some(sid);
     Ok(out)
@@ -557,13 +705,29 @@ pub async fn focus() -> bool {
         .unwrap_or(false)
 }
 
-pub async fn close() {
-    let mut m = mgr().lock().await;
+/// Matikan browser terkontrol (CDP + proses + grant sesi).
+async fn shutdown(m: &mut BrowserManager) {
     if let Some(c) = m.client.take() {
         c.close().await;
     }
     m.reset(None);
     m.grants.revoke_all();
+}
+
+pub async fn close() {
+    let mut m = mgr().lock().await;
+    shutdown(&mut m).await;
+}
+
+/// {captcha, captchaHint} bila captcha masih terdeteksi di halaman aktif,
+/// selain itu null — ditempelkan ke hasil tool click/type agar agent tidak
+/// mencoba berinteraksi dengan captcha.
+pub async fn captcha_note() -> Value {
+    let m = mgr().lock().await;
+    match &m.captcha {
+        Some(k) => json!({ "captcha": k, "captchaHint": CAPTCHA_HINT }),
+        None => Value::Null,
+    }
 }
 
 // ── Jalur tool agent (dipanggil loop assistant) ─────────────────────────────
@@ -577,7 +741,7 @@ pub async fn agent_exec(root: &Path, name: &str, args: &Value) -> String {
         if v.is_empty() { Err(format!("{k} wajib diisi")) } else { Ok(v) }
     };
     let out: Result<String, String> = match name {
-        "browser_status" => Ok(status().await.to_string()),
+        "browser_status" => Ok(status(root).await.to_string()),
         "browser_open" => {
             let url = args.get("url").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_URL);
             open(root, url, false).await.map(|v| v.to_string())
@@ -593,14 +757,26 @@ pub async fn agent_exec(root: &Path, name: &str, args: &Value) -> String {
             inspect(cursor, max, sid).await.map(|v| v.to_string())
         }
         "browser_click" => match (sreq("snapshotId"), sreq("ref")) {
-            (Ok(s), Ok(r)) => click(&s, &r).await.map(|_| json!({ "ok": true, "snapshotId": s, "ref": r }).to_string()),
+            (Ok(s), Ok(r)) => {
+                let note = captcha_note().await;
+                click(&s, &r).await.map(|_| {
+                    let mut v = json!({ "ok": true, "snapshotId": s, "ref": r });
+                    if let Some(k) = note.get("captcha") { v["captcha"] = k.clone(); v["captchaHint"] = note["captchaHint"].clone(); }
+                    v.to_string()
+                })
+            }
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
         "browser_type" => match (sreq("snapshotId"), sreq("ref")) {
             (Ok(s), Ok(r)) => {
                 let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let submit = args.get("submit").and_then(|v| v.as_bool()).unwrap_or(false);
-                type_text(&s, &r, text, submit).await.map(|_| json!({ "ok": true, "snapshotId": s, "ref": r, "chars": text.chars().count(), "submit": submit }).to_string())
+                let note = captcha_note().await;
+                type_text(&s, &r, text, submit).await.map(|_| {
+                    let mut v = json!({ "ok": true, "snapshotId": s, "ref": r, "chars": text.chars().count(), "submit": submit });
+                    if let Some(k) = note.get("captcha") { v["captcha"] = k.clone(); v["captchaHint"] = note["captchaHint"].clone(); }
+                    v.to_string()
+                })
             }
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
@@ -665,6 +841,47 @@ mod tests {
         assert_eq!(engine_of(&Some("google-chrome-stable".into())), Some("chrome"));
         assert_eq!(engine_of(&Some("firefox".into())), None);
         assert_eq!(engine_of(&None), None);
+    }
+
+    #[test]
+    fn kandidat_engine_sesuai_pref() {
+        let edge = chromium_candidates("edge");
+        assert!(!edge.is_empty());
+        assert!(edge.iter().all(|p| p.to_lowercase().contains("edge")));
+        let chrome = chromium_candidates("chrome");
+        assert!(!chrome.is_empty());
+        assert!(chrome.iter().all(|p| p.to_lowercase().contains("chrome")));
+        // auto menyertakan kedua kelompok (urutan tergantung default Windows).
+        let auto = chromium_candidates("auto");
+        assert!(auto.iter().any(|p| p.to_lowercase().contains("edge")));
+        assert!(auto.iter().any(|p| p.to_lowercase().contains("chrome")));
+        assert_eq!(auto.len(), edge.len() + chrome.len());
+        // pref tidak dikenal diperlakukan seperti auto.
+        assert_eq!(chromium_candidates("aneh"), auto);
+    }
+
+    #[test]
+    fn deteksi_captcha_dari_teks_halaman() {
+        assert_eq!(detect_captcha("https://x.test halo dunia selamat datang"), None);
+        assert_eq!(detect_captcha("protected by reCAPTCHA Privasi Persyaratan"), Some("reCAPTCHA"));
+        assert_eq!(detect_captcha("Please complete the hCaptcha verification"), Some("hCaptcha"));
+        assert_eq!(detect_captcha("https://challenges.cloudflare.com/turnstile/v0/api.js Just a moment..."), Some("Cloudflare"));
+        assert_eq!(detect_captcha("VERIFY YOU ARE HUMAN to continue"), Some("Cloudflare"));
+        assert_eq!(detect_captcha("silakan isi captcha di bawah ini"), Some("captcha"));
+    }
+
+    #[test]
+    fn pref_engine_dari_config() {
+        let dir = std::env::temp_dir().join(format!("l2dbrpref-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        let cfg = dir.join("data").join("config.json");
+        std::fs::write(&cfg, r#"{"browser":{"engine":"chrome"}}"#).unwrap();
+        assert_eq!(engine_pref_from_config(&dir), "chrome");
+        std::fs::write(&cfg, r#"{"browser":{"engine":"firefox"}}"#).unwrap();
+        assert_eq!(engine_pref_from_config(&dir), "auto");
+        std::fs::remove_file(&cfg).unwrap();
+        assert_eq!(engine_pref_from_config(&dir), "auto");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

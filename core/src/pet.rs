@@ -171,7 +171,7 @@ pub fn launch(root: &Path, port: u16) -> Value {
     }
 
     // Jalur 3: Chrome/Edge --app (fallback nol-build).
-    let exe = match crate::browser::find_chromium() {
+    let exe = match crate::browser::find_chromium("auto") {
         Some(e) => e,
         None => {
             return json!({ "ok": false, "error": "Shell belum dibangun (build agent-shell) dan Chrome/Edge tidak ditemukan" });

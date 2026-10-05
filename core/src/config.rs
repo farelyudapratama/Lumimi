@@ -43,7 +43,8 @@ pub fn default_config() -> Value {
             "language": "indonesian", "autoSend": true, "silenceMs": 1500,
             "maxMs": 30_000, "device": "",
             "endpoint": "", "apiKey": "", "apiModel": "whisper-1"
-        }
+        },
+        "browser": { "engine": "auto" }
     })
 }
 
@@ -154,6 +155,7 @@ pub fn api_config_response(path: &Path) -> Value {
         "motion": sect("motion"),
         "stt": stt_out,
         "i18n": sect("i18n"),
+        "browser": sect("browser"),
     })
 }
 
@@ -277,6 +279,23 @@ pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
     let data = merge_obj(&prev, &json!({ "i18n": merged.clone() }));
     crate::sheet::write_json_atomic(path, &data)?;
     Ok(merged)
+}
+
+/// Simpan browser ({...prev.browser, ...browser}); hanya engine yang dikenal
+/// yang diterima (auto|edge|chrome). Engine dipilih untuk browser terkontrol.
+pub fn save_browser(path: &Path, browser: &Value) -> std::io::Result<Value> {
+    let prev = read_raw(path);
+    let mut next = prev.get("browser").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    if let Some(e) = browser.get("engine").and_then(|v| v.as_str()) {
+        let k = e.trim().to_lowercase();
+        if matches!(k.as_str(), "auto" | "edge" | "chrome") {
+            next.insert("engine".into(), json!(k));
+        }
+    }
+    let out = Value::Object(next);
+    let data = merge_obj(&prev, &json!({ "browser": out.clone() }));
+    crate::sheet::write_json_atomic(path, &data)?;
+    Ok(out)
 }
 
 /// Field koneksi stream VTuber yang dipersist (merge per-field). apiKey masked/
@@ -428,6 +447,13 @@ pub fn handle_config_post(path: &Path, body: &Value) -> (u16, String) {
                 Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
             };
         }
+        "saveBrowser" => {
+            let b = body.get("browser").cloned().unwrap_or_else(|| json!({}));
+            return match save_browser(path, &b) {
+                Ok(out) => (200, json!({ "ok": true, "browser": out }).to_string()),
+                Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
+            };
+        }
         "save" => {
             if let Some(arr) = body.get("connections").and_then(|v| v.as_array()) {
                 conns = arr.clone();
@@ -547,6 +573,21 @@ mod tests {
         // file simpan key ASLI (bukan mask)
         let cfg = load(&f);
         assert_eq!(cfg["tts"]["apiKey"], "el-secretkey123");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_browser_engine_dikenal_saja() {
+        let dir = std::env::temp_dir().join(format!("l2dcfgbr-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        let (st, _) = handle_config_post(&f, &json!({ "action": "saveBrowser", "browser": { "engine": "Chrome" } }));
+        assert_eq!(st, 200);
+        assert_eq!(load(&f)["browser"]["engine"], "chrome");
+        // engine tidak dikenal → tidak menimpa yang tersimpan
+        let (st2, _) = handle_config_post(&f, &json!({ "action": "saveBrowser", "browser": { "engine": "firefox" } }));
+        assert_eq!(st2, 200);
+        assert_eq!(load(&f)["browser"]["engine"], "chrome");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

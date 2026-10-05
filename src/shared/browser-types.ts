@@ -1,9 +1,14 @@
 /** Tipe wire browser yang dipakai server CDP dan client. */
+export type BrowserEnginePref = "auto" | "edge" | "chrome";
+
 export type BrowserState = {
   available: boolean;
   running: boolean;
   connected: boolean;
   engine: "edge" | "chrome" | null;
+  enginePref: BrowserEnginePref;
+  /** Kind captcha terdeteksi di halaman aktif (advisory; null/absen = tidak ada). */
+  captcha?: string | null;
   url: string;
   title: string;
   canBack: boolean;

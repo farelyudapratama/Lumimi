@@ -128,6 +128,7 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/browser/focus", axum::routing::post(post_browser_focus))
         .route("/api/browser/close", axum::routing::post(post_browser_close))
         .route("/api/browser/grant", axum::routing::post(post_browser_grant))
+        .route("/api/browser/engine", axum::routing::post(post_browser_engine))
         .route("/api/assistant/start", axum::routing::post(post_assistant_start))
         .route("/api/assistant/status", get(get_assistant_status))
         .route("/api/assistant/stop", axum::routing::post(post_assistant_stop))
@@ -787,8 +788,8 @@ fn browser_result(r: Result<serde_json::Value, String>) -> Response {
     }
 }
 
-async fn get_browser_status() -> Response {
-    json_status(StatusCode::OK, browser::status().await)
+async fn get_browser_status(State(paths): State<AppPaths>) -> Response {
+    json_status(StatusCode::OK, browser::status(&paths.root).await)
 }
 
 async fn get_browser_screenshot(uri: Uri) -> Response {
@@ -891,6 +892,17 @@ async fn post_browser_grant(body: axum::body::Bytes) -> Response {
     let origin = v.get("origin").and_then(|x| x.as_str()).unwrap_or("");
     match browser::grant_private_origin(origin).await {
         Ok(o) => json_status(StatusCode::OK, json!({ "ok": true, "origin": o })),
+        Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
+    }
+}
+
+/// POST /api/browser/engine — pilih engine browser terkontrol
+/// (auto = ikuti default Windows bila Edge/Chrome, atau edge/chrome eksplisit).
+async fn post_browser_engine(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let engine = v.get("engine").and_then(|x| x.as_str()).unwrap_or("");
+    match browser::set_engine(&paths.root, engine).await {
+        Ok(v) => json_status(StatusCode::OK, v),
         Err(e) => json_status(StatusCode::BAD_REQUEST, json!({ "error": e })),
     }
 }

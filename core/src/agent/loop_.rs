@@ -36,7 +36,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef { name: "browser_status", params: "", level: "safe" },
     ToolDef { name: "browser_open", params: "url: string opsional (default https://example.com) — buka browser terisolasi", level: "mutating" },
     ToolDef { name: "browser_navigate", params: "url: string", level: "mutating" },
-    ToolDef { name: "browser_inspect", params: "cursor: number opsional, maxChars: number opsional (maks 3500), snapshotId: string opsional", level: "safe" },
+    ToolDef { name: "browser_inspect", params: "cursor: number opsional, maxChars: number opsional (maks 3500), snapshotId: string opsional — bila hasil memuat captcha+captchaHint: STOP, beri tahu user menyelesaikan captcha manual di jendela browser dan tunggu konfirmasi; jangan mencoba menyelesaikannya", level: "safe" },
     ToolDef { name: "browser_click", params: "snapshotId: string, ref: string (dari inspect terakhir)", level: "mutating" },
     ToolDef { name: "browser_type", params: "snapshotId: string, ref: string, text: string, submit: boolean opsional", level: "mutating" },
     ToolDef { name: "browser_history", params: "action: back|forward|reload", level: "mutating" },
