@@ -7,13 +7,19 @@
 
 import { createLifecycle } from "../../lifecycle";
 import type { Block } from "./transcript";
+import { computeSegments, formatDuration } from "./transcript";
+import type { WorkSegment } from "./transcript";
 import { changeFromTool, MAX_RENDER_ROWS } from "./diff";
 import type { FileChange } from "./diff";
 import { parseMarkdown } from "./md";
 import type { MdInline, MdToken } from "./md";
+import type { AgentStateView } from "./state";
 
 export type PlanItem = { id?: string; task: string; status: string; note?: string };
 export type TechnicalTab = "review" | "term" | "browser";
+
+/** Kartu approval untuk zona kontrol eksekusi (dari /status, sumber kebenaran). */
+export type ApprovalView = { apId: string; tool: string; args: any; plan?: boolean };
 
 /** Grup aktivitas hanya perlu terbuka selama minimal satu tool masih berjalan. */
 export function toolRunIsTerminal(run: Array<{ status: string }>): boolean {
@@ -29,6 +35,10 @@ export type PanelViewDeps = {
   toolLevel?: (name: string) => "safe" | "mutating" | null;
   /** Batalkan task tertentu dari antrean (§11 cancel per-task). */
   onCancelTask?: (taskId: string) => void;
+  /** Lipat/buka presence dock Live2D (body class + persist di panel). */
+  onToggleStageDock?: () => void;
+  /** Ringkas/kembalikan transkrip (class pada as-tl + persist di panel). */
+  onToggleCompact?: () => void;
 };
 
 /** Badge level tool di header kartu: "auto" (mint) / "izin" (amber). */
@@ -106,19 +116,66 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   const lifecycle = createLifecycle();
   const t = deps.t;
   // ── Skeleton panel ──────────────────────────────────────────────
-  const statusbar = el("div", "as-statusbar");
-  const pill = el("span", "as-pill");
-  const pillDot = el("span", "as-pill-dot");
-  const pillLabel = el("span", "as-pill-label");
-  let pillTimer: ReturnType<typeof setInterval> | null = null;
-  let pillBusySince = 0;
-  let pillPrevState: PillState | null = null;
-  pill.appendChild(pillDot);
-  pill.appendChild(pillLabel);
-  statusbar.appendChild(pill);
+  // Garis keadaan = anchor utama harness: state machine + objek kerja +
+  // elapsed + hitungan, dengan kontrol lipat di ujung kanan (Fase 3).
+  const statusbar = el("div", "as-statebar");
+  const stDot = el("span", "as-state-dot");
+  const stWord = el("span", "as-state-word");
+  const stWhat = el("span", "as-state-what");
+  const stElapsed = el("span", "as-state-elapsed");
+  const stCounts = el("span", "as-state-counts");
+  const btnCompact = el("button", "as-state-btn") as HTMLButtonElement;
+  const btnDock = el("button", "as-state-btn") as HTMLButtonElement;
+  btnCompact.type = "button";
+  btnDock.type = "button";
+  statusbar.append(stDot, stWord, stWhat, stElapsed, stCounts, btnCompact, btnDock);
+  let lastSv: AgentStateView | null = null;
+  let lastUi: { compact: boolean; stageHidden: boolean } = { compact: false, stageHidden: false };
+  lifecycle.interval(() => paintStateElapsed(), 1000); // detik berjalan tanpa poll
+
+  function paintStateElapsed(): void {
+    if (!lastSv) return;
+    const live = lastSv.state === "thinking" || lastSv.state === "executing"
+      || lastSv.state === "waitingPlan" || lastSv.state === "waitingApproval";
+    stElapsed.textContent = live && lastSv.elapsedMs > 0 ? formatDuration(lastSv.elapsedMs) : "";
+  }
+
+  const stateWordKey: Record<AgentStateView["state"], string> = {
+    off: "as.state.off",
+    idle: "as.state.idle",
+    thinking: "as.state.thinking",
+    executing: "as.state.executing",
+    waitingPlan: "as.state.waitingPlan",
+    waitingApproval: "as.state.waitingApproval",
+  };
+
+  function renderStateLine(sv: AgentStateView, ui: { compact: boolean; stageHidden: boolean }): void {
+    lastSv = sv;
+    lastUi = ui;
+    statusbar.dataset.state = sv.state;
+    stWord.textContent = t(stateWordKey[sv.state]);
+    stWhat.textContent = sv.what;
+    stWhat.hidden = !sv.what;
+    paintStateElapsed();
+    stCounts.textContent = [
+      sv.stepsTotal > 0 ? t("as.state.steps", { done: sv.stepsDone, total: sv.stepsTotal }) : "",
+      sv.filesTouched > 0 ? t("as.state.files", { n: sv.filesTouched }) : "",
+    ].filter(Boolean).join(" · ");
+    btnCompact.textContent = ui.compact ? t("as.compact.expand") : t("as.compact.collapse");
+    btnDock.textContent = ui.stageHidden ? t("as.dock.show") : t("as.dock.hide");
+    btnDock.title = btnDock.textContent;
+    tl.classList.toggle("compact", ui.compact);
+  }
+  lifecycle.listen(btnCompact, "click", () => deps.onToggleCompact?.());
+  lifecycle.listen(btnDock, "click", () => deps.onToggleStageDock?.());
 
   const tl = el("div", "as-tl");
   tl.setAttribute("aria-live", "polite");
+
+  // Zona kontrol eksekusi: kartu approval pinned di atas composer — bagian
+  // dari kontrol kerja agent, bukan pesan yang tenggelam di transkrip.
+  const controls = el("div", "as-controls empty");
+  const ctlRendered = new Map<string, HTMLElement>();
 
   // ── Tab teknis: Review / Terminal / Browser ──────────────────────
   let curTab: TechnicalTab = "review";
@@ -185,6 +242,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   root.appendChild(queueBox);
   root.appendChild(memBox);
   root.appendChild(tl);
+  root.appendChild(controls);
   if (techRoot) {
     techRoot.appendChild(tabsBar);
     techRoot.appendChild(reviewPage);
@@ -246,9 +304,116 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     return w;
   }
 
+  /**
+   * Kartu approval untuk zona kontrol eksekusi. Dua gate TETAP berbeda
+   * (Fase 2): kartu PLAN (setujui rencana kerja sebelum eksekusi, dirender
+   * sebagai rencana) vs kartu IZIN TOOL (mutating tunggal, bisa membawa
+   * checkbox "selalu izinkan" — allowlist sesi di core).
+   */
+  function buildApprovalCard(ap: ApprovalView): HTMLElement {
+    const w = el("div", "as-blk as-appr");
+    const hd = el("div", "as-appr-hd");
+    const isPlan = ap.plan === true;
+    hd.appendChild(el("span", "as-appr-ttl", isPlan ? t("as.approve.planTitle") : t("as.approve.title")));
+    if (!isPlan) {
+      hd.appendChild(el("span", "as-tool-name", ap.tool));
+      const apBadge = levelBadge(t, deps.toolLevel, ap.tool);
+      if (apBadge) hd.appendChild(apBadge);
+    }
+    w.appendChild(hd);
+    if (isPlan) {
+      const list = el("div", "as-plan as-appr-plan");
+      const todos = Array.isArray(ap.args?.todos) ? ap.args.todos : [];
+      for (const p of todos) {
+        const row = el("div", "as-plan-item");
+        row.appendChild(el("span", "st " + (p.status ?? "pending"), p.status ?? "pending"));
+        row.appendChild(el("span", "", String(p.task ?? "") + (p.note ? " — " : "")));
+        if (p.note) row.appendChild(el("span", "note", p.note));
+        list.appendChild(row);
+      }
+      w.appendChild(list);
+    } else {
+      const argsText = (() => {
+        try {
+          return ap.args == null ? "" : JSON.stringify(ap.args, null, 2);
+        } catch {
+          return String(ap.args);
+        }
+      })();
+      // Mutasi file → pratinjau diff (terbuka) agar keputusan Allow/Deny
+      // berbasis isi, bukan JSON mentah.
+      const preview = changeFromTool(ap.tool, ap.args);
+      if (preview && preview.hunks.length) {
+        w.appendChild(buildDiff(preview, "appr:" + ap.apId, true));
+      } else if (argsText) {
+        w.appendChild(el("pre", "as-tool-args", argsText));
+      }
+    }
+    const row = el("div", "as-appr-row");
+    const ok = el("button", "mini-btn as-appr-ok", t("as.allow")) as HTMLButtonElement;
+    ok.type = "button";
+    const no = el("button", "mini-btn as-appr-no", t("as.deny")) as HTMLButtonElement;
+    no.type = "button";
+    let always: HTMLInputElement | null = null;
+    if (!isPlan) {
+      const what = ap.tool === "run_command" ? t("as.approve.thisCommand") : ap.tool;
+      always = document.createElement("input") as HTMLInputElement;
+      always.type = "checkbox";
+      const alwaysRow = el("label", "as-appr-always") as HTMLLabelElement;
+      alwaysRow.append(always, document.createTextNode(t("as.approve.always", { what })));
+      w.appendChild(alwaysRow);
+    }
+    ok.addEventListener("click", () => {
+      ok.disabled = true;
+      no.disabled = true;
+      deps.onApprove(ap.apId, true, isPlan ? false : !!always?.checked);
+    });
+    no.addEventListener("click", () => {
+      ok.disabled = true;
+      no.disabled = true;
+      if (always) always.checked = false;
+      deps.onApprove(ap.apId, false);
+    });
+    row.appendChild(ok);
+    row.appendChild(no);
+    w.appendChild(row);
+    return w;
+  }
+
+  /**
+   * Zona kontrol eksekusi: kartu approval pinned (sumber kebenaran =
+   * pendingApprovals dari /status). Kosong → tersembunyi total.
+   */
+  function renderControls(list: ApprovalView[]): void {
+    const sig = list.map((a) => a.apId + ":" + a.tool + ":" + (a.plan ? "p" : "t")).join(",");
+    if (!list.length) {
+      controls.classList.add("empty");
+      controls.textContent = "";
+      ctlRendered.clear();
+      return;
+    }
+    controls.classList.remove("empty");
+    const seen = new Set<string>();
+    for (const ap of list) {
+      seen.add(ap.apId);
+      const key = ap.apId + ":" + ap.tool + ":" + (ap.plan ? "p" : "t");
+      let node = ctlRendered.get(key);
+      if (!node) {
+        node = buildApprovalCard(ap);
+        ctlRendered.set(key, node);
+      }
+      controls.appendChild(node);
+    }
+    for (const [key, node] of [...ctlRendered]) {
+      if (!seen.has(key.split(":")[0])) {
+        node.remove();
+        ctlRendered.delete(key);
+      }
+    }
+  }
+
   /** Kartu ringkasan giliran: "N file berubah +a −r" + baris per file. */
-  function buildChanges(b: Extract<Block, { kind: "changes" }>): HTMLElement {
-    const w = el("div", "as-blk as-chg");
+  function buildChanges(b: Extract<Block, { kind: "changes" }>): HTMLElement {    const w = el("div", "as-blk as-chg");
     const hd = el("div", "as-chg-hd");
     hd.appendChild(el("span", "as-chg-ttl", t("as.chg.files", { n: b.files.length })));
     const stat = el("span", "as-diff-stat");
@@ -329,6 +494,11 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
         const lvBadge = levelBadge(t, deps.toolLevel, b.name);
         if (lvBadge) hd.appendChild(lvBadge);
         if (b.summary) hd.appendChild(el("span", "as-tool-sum", b.summary));
+        // Durasi eksekusi (mono, di tepi kanan sebelum chevron) — dari client
+        // clock; kartu hasil hydrate history tidak memilikinya.
+        if (typeof b.durMs === "number" && b.status !== "running") {
+          hd.appendChild(el("span", "as-tool-dur", formatDuration(b.durMs)));
+        }
         hd.appendChild(el("span", "as-chev", "▾"));
         const bd = el("div", "as-tool-bd");
         if (b.change) {
@@ -357,79 +527,10 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
         return w;
       }
       case "approval": {
-        const w = el("div", "as-blk as-appr");
-        const hd = el("div", "as-appr-hd");
-        // Dua gate yang berbeda (Fase 2): kartu PLAN (setujui rencana kerja
-        // sebelum eksekusi) vs kartu IZIN TOOL (mutating tunggal). Jangan
-        // digabung — rencana dirender sebagai rencana, bukan argumen tool.
-        const isPlan = b.plan === true;
-        hd.appendChild(el("span", "as-appr-ttl", isPlan ? t("as.approve.planTitle") : t("as.approve.title")));
-        if (!isPlan) {
-          hd.appendChild(el("span", "as-tool-name", b.tool));
-          const apBadge = levelBadge(t, deps.toolLevel, b.tool);
-          if (apBadge) hd.appendChild(apBadge);
-        }
-        w.appendChild(hd);
-        if (isPlan) {
-          const list = el("div", "as-plan as-appr-plan");
-          const todos = Array.isArray(b.args?.todos) ? b.args.todos : [];
-          for (const p of todos) {
-            const row = el("div", "as-plan-item");
-            row.appendChild(el("span", "st " + (p.status ?? "pending"), p.status ?? "pending"));
-            row.appendChild(el("span", "", String(p.task ?? "") + (p.note ? " — " : "")));
-            if (p.note) row.appendChild(el("span", "note", p.note));
-            list.appendChild(row);
-          }
-          w.appendChild(list);
-        } else {
-          const argsText = (() => {
-            try {
-              return b.args == null ? "" : JSON.stringify(b.args, null, 2);
-            } catch {
-              return String(b.args);
-            }
-          })();
-          // Mutasi file → pratinjau diff (terbuka) agar keputusan Allow/Deny
-          // berbasis isi, bukan JSON mentah.
-          const preview = changeFromTool(b.tool, b.args);
-          if (preview && preview.hunks.length) {
-            w.appendChild(buildDiff(preview, "appr:" + b.apId, true));
-          } else if (argsText) {
-            w.appendChild(el("pre", "as-tool-args", argsText));
-          }
-        }
-        const row = el("div", "as-appr-row");
-        const ok = el("button", "mini-btn as-appr-ok", t("as.allow")) as HTMLButtonElement;
-        ok.type = "button";
-        const no = el("button", "mini-btn as-appr-no", t("as.deny")) as HTMLButtonElement;
-        no.type = "button";
-        // "Selalu izinkan" → allowlist sesi di core; untuk run_command yang
-        // diizinkan adalah perintahnya (bukan tool-nya), teks label menyesuaikan.
-        // Kartu plan tidak punya checkbox ini — rencana bukan izin tool.
-        let always: HTMLInputElement | null = null;
-        if (!isPlan) {
-          const what = b.tool === "run_command" ? t("as.approve.thisCommand") : b.tool;
-          always = document.createElement("input") as HTMLInputElement;
-          always.type = "checkbox";
-          const alwaysRow = el("label", "as-appr-always") as HTMLLabelElement;
-          alwaysRow.append(always, document.createTextNode(t("as.approve.always", { what })));
-          w.appendChild(alwaysRow);
-        }
-        ok.addEventListener("click", () => {
-          ok.disabled = true;
-          no.disabled = true;
-          deps.onApprove(b.apId, true, isPlan ? false : !!always?.checked);
-        });
-        no.addEventListener("click", () => {
-          ok.disabled = true;
-          no.disabled = true;
-          if (always) always.checked = false;
-          deps.onApprove(b.apId, false);
-        });
-        row.appendChild(ok);
-        row.appendChild(no);
-        w.appendChild(row);
-        return w;
+        // Kartu approval TIDAK dirender di aliran transkrip — semua kartu
+        // tampil di zona kontrol eksekusi (renderControls), pinned di atas
+        // composer sebagai bagian dari kontrol kerja agent (Fase 3).
+        return buildApprovalCard({ apId: b.apId, tool: b.tool, args: b.args, plan: b.plan });
       }
       case "subagent": {
         const w = el("div", "as-blk as-sub");
@@ -446,32 +547,28 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
 
   function render(blocks: Block[]): void {
     const stick = nearBottom();
+    const segs = computeSegments(blocks);
     const seen = new Set<number>();
-    let prev: HTMLElement | null = null;
-    let i = 0;
-    while (i < blocks.length) {
-      const b = blocks[i];
-      if (b.kind !== "tool") {
-        seen.add(b.id);
-        prev = renderOne(b, prev);
-        i++;
+    const segKeys = new Set<string>();
+    let prev: HTMLElement | null = null; // elemen top-level terakhir di tl
+    for (const seg of segs) {
+      if (!seg.trigger) {
+        // Blok leading (sebelum user pertama): tanpa header segmen.
+        for (const b of [seg.trigger, ...seg.work, seg.final].filter(Boolean) as Block[]) {
+          seen.add(b.id);
+          prev = renderOne(b, tl, prev);
+        }
         continue;
       }
-      // Kumpulkan run tool berurutan; grup bila ≥2 (timeline ala coding-agent).
-      let j = i;
-      const run: Extract<Block, { kind: "tool" }>[] = [];
-      while (j < blocks.length && blocks[j].kind === "tool") {
-        run.push(blocks[j] as Extract<Block, { kind: "tool" }>);
-        j++;
+      seen.add(seg.trigger.id);
+      prev = renderOne(seg.trigger, tl, prev);
+      if (seg.work.length) {
+        prev = renderSegment(seg, prev, seen, segKeys);
       }
-      if (run.length >= 2) {
-        for (const tb of run) seen.add(tb.id);
-        prev = renderStepGroup(run, prev, seen);
-      } else {
-        seen.add(b.id);
-        prev = renderOne(b, prev);
+      if (seg.final) {
+        seen.add(seg.final.id);
+        prev = renderOne(seg.final, tl, prev);
       }
-      i = j;
     }
     for (const [id, cur] of rendered) {
       if (!seen.has(id)) {
@@ -483,11 +580,112 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       }
     }
     pruneStepGroups(seen);
+    for (const [key, g] of segGroups) {
+      if (!segKeys.has(key)) {
+        g.wrap.remove();
+        segGroups.delete(key);
+      }
+    }
     if (stick) scrollToBottom();
   }
 
-  /** Render satu blok ke posisi prev; kembalikan elemen terakhir. */
-  function renderOne(b: Block, prev: HTMLElement | null): HTMLElement {
+  // State segmen giliran. Segmen terbuka (belum ada final) tampil terbuka;
+  // begitu selesai/terputus ia auto-collapse — kecuali user memilih sendiri.
+  const segGroups = new Map<string, {
+    wrap: HTMLElement;
+    body: HTMLElement;
+    sig: string;
+    userToggled: boolean | null;
+  }>();
+
+  /**
+   * Bungkus pekerjaan satu giliran jadi segmen collapsible: header berisi
+   * status + hitungan alat + durasi; body berisi kartu tool (dengan grup run
+   * ≥2 ala coding-agent). Kartu child dirender keyed — segmen hanya shell.
+   */
+  function renderSegment(
+    seg: WorkSegment,
+    prev: HTMLElement | null,
+    seen: Set<number>,
+    segKeys: Set<string>,
+  ): HTMLElement {
+    segKeys.add(seg.key);
+    const state = seg.open ? "open" : seg.interrupted ? "interrupted" : "completed";
+    const workSig = seg.work.map((b) => b.id + ":" + (b.kind === "tool" ? b.status : b.kind) + ":" + b.rev).join(",");
+    const sig = state + "|" + workSig;
+    let g = segGroups.get(seg.key);
+    if (!g) {
+      const wrap = el("div", "as-seg");
+      const hd = el("button", "as-seg-hd") as HTMLButtonElement;
+      hd.type = "button";
+      hd.appendChild(el("span", "as-seg-state"));
+      hd.appendChild(el("span", "as-seg-cnt"));
+      hd.appendChild(el("span", "as-seg-dur"));
+      hd.appendChild(el("span", "as-chev", "▾"));
+      const body = el("div", "as-seg-work");
+      hd.addEventListener("click", () => {
+        const isOpen = wrap.classList.contains("open");
+        wrap.classList.toggle("open", !isOpen);
+        wrap.classList.toggle("collapsed", isOpen);
+        if (g) g.userToggled = !isOpen;
+      });
+      wrap.append(hd, body);
+      g = { wrap, body, sig: "", userToggled: null };
+      segGroups.set(seg.key, g);
+      if (prev) prev.after(wrap);
+      else tl.insertBefore(wrap, tl.firstChild);
+    }
+    if (g.sig !== sig) {
+      (g.wrap.querySelector(".as-seg-state") as HTMLElement).textContent = seg.open
+        ? t("as.seg.running")
+        : seg.interrupted
+          ? t("as.seg.interrupted")
+          : t("as.seg.completed");
+      (g.wrap.querySelector(".as-seg-cnt") as HTMLElement).textContent = (() => {
+        // Hitungan ALAT hanya tool nyata — narasi agent bukan alat.
+        const toolCount = seg.toolsOk + seg.toolsFail;
+        if (toolCount === 0) return "";
+        return seg.toolsFail > 0
+          ? t("as.seg.countFail", { ok: seg.toolsOk, fail: seg.toolsFail })
+          : t("as.seg.count", { n: toolCount });
+      })();
+      (g.wrap.querySelector(".as-seg-dur") as HTMLElement).textContent = seg.open
+        ? (seg.startedAt ? formatDuration(Date.now() - seg.startedAt) : "")
+        : (seg.startedAt && seg.endedAt ? formatDuration(seg.endedAt - seg.startedAt) : "");
+      const openNow = g.userToggled != null ? g.userToggled : seg.open;
+      g.wrap.classList.toggle("open", openNow);
+      g.wrap.classList.toggle("collapsed", !openNow);
+      g.sig = sig;
+    }
+    let p: HTMLElement | null = null;
+    let i = 0;
+    while (i < seg.work.length) {
+      const b = seg.work[i];
+      if (b.kind !== "tool") {
+        p = renderInto(g.body, b, seen);
+        i++;
+        continue;
+      }
+      // Run tool berurutan ≥2 → grup collapsible (pola ToolLayout ZCode).
+      let j = i;
+      const run: Extract<Block, { kind: "tool" }>[] = [];
+      while (j < seg.work.length && seg.work[j].kind === "tool") {
+        run.push(seg.work[j] as Extract<Block, { kind: "tool" }>);
+        j++;
+      }
+      if (run.length >= 2) {
+        for (const tb of run) seen.add(tb.id);
+        p = renderStepGroup(run, g.body, p, seen);
+      } else {
+        p = renderInto(g.body, b, seen);
+      }
+      i = j;
+    }
+    return g.wrap;
+  }
+
+  /** Render satu blok ke posisi prev (top-level); kembalikan elemen terakhir. */
+  function renderOne(b: Block, container: HTMLElement, prev: HTMLElement | null): HTMLElement {
     const cur = rendered.get(b.id);
     if (cur && cur.rev === b.rev) return cur.el;
     const node = buildBlock(b);
@@ -497,7 +695,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       cur.rev = b.rev;
     } else {
       if (prev) prev.after(node);
-      else tl.insertBefore(node, tl.firstChild);
+      else container.insertBefore(node, container.firstChild);
       rendered.set(b.id, { el: node, rev: b.rev });
     }
     return node;
@@ -520,6 +718,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
    */
   function renderStepGroup(
     run: Extract<Block, { kind: "tool" }>[],
+    container: HTMLElement,
     prev: HTMLElement | null,
     seen: Set<number>,
   ): HTMLElement {
@@ -557,7 +756,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       wrap.appendChild(body);
       stepGroups.set(groupKey, g);
       if (prev) prev.after(wrap);
-      else tl.insertBefore(wrap, tl.firstChild);
+      else container.insertBefore(wrap, container.firstChild);
       for (const tb of run) renderInto(body, tb, seen);
       g.sig = sig;
       updateStepHeader(wrap, run);
@@ -566,13 +765,13 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     return g.wrap;
   }
 
-  /** renderOne yang menautkan ke parent tertentu (dipakai grup step). */
-  function renderInto(parent: HTMLElement, b: Block, seen: Set<number>): void {
+  /** renderOne yang menautkan ke parent tertentu (dipakai grup & segmen). */
+  function renderInto(parent: HTMLElement, b: Block, seen: Set<number>): HTMLElement {
     seen.add(b.id);
     const cur = rendered.get(b.id);
     if (cur && cur.rev === b.rev) {
       if (cur.el.parentElement !== parent) parent.appendChild(cur.el);
-      return;
+      return cur.el;
     }
     const node = buildBlock(b);
     if (cur) {
@@ -583,6 +782,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       rendered.set(b.id, { el: node, rev: b.rev });
     }
     parent.appendChild(node);
+    return node;
   }
 
   /** Header grup: status gabungan + jumlah langkah nyata. */
@@ -704,6 +904,12 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       taskBox.appendChild(head);
     }
     if (hasPlan) {
+      // Langkah aktif disorot di atas checklist — jawaban langsung atas
+      // "sekarang sedang di langkah mana" tanpa memindai daftar.
+      const active = plan.find((p) => p.status === "in_progress");
+      if (active) {
+        taskBox.appendChild(el("div", "as-task-step", "▸ " + String(active.task ?? "")));
+      }
       const list = el("div", "as-task-list");
       for (const p of plan) {
         const row = el("div", "as-plan-item");
@@ -776,55 +982,20 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     memBox.textContent = "";
   }
 
-  // ── Status pill ─────────────────────────────────────────────────
-  type PillState = "off" | "idle" | "busy" | "busyOther" | "thinking" | "approval";
-  function setPill(state: PillState): void {
-    pill.dataset.state = state;
-    const wasBusy = pillPrevState === "busy";
-    pillPrevState = state;
-    if (pillTimer) {
-      clearInterval(pillTimer);
-      pillTimer = null;
-    }
-    if (state !== "busy") {
-      pillLabel.textContent = t(
-        state === "off" ? "as.status.off"
-          : state === "busyOther" ? "as.status.busyOther"
-          : state === "thinking" ? "as.status.thinking"
-          : state === "approval" ? "as.status.approval"
-          : "as.status.idle",
-      );
-      return;
-    }
-    // Bekerja + hitungan waktu — bedakan "hidup dan maju" dari "macet
-    // diam": <3 dtk cukup "bekerja…", setelah itu detik tampil. Acuan
-    // waktu HANYA di-reset saat transisi masuk busy — refreshStatus
-    // memanggil setPill("busy") tiap poll, jangan nol-kan ulang.
-    if (!wasBusy) pillBusySince = Date.now();
-    const paint = () => {
-      const s = Math.floor((Date.now() - pillBusySince) / 1000);
-      pillLabel.textContent =
-        s < 3 ? t("as.status.busy") : t("as.status.busyTimer", { s });
-    };
-    paint();
-    pillTimer = lifecycle.interval(paint, 1000);
-  }
-
   function clearTranscript(): void {
     rendered.clear();
     openTools.clear();
     openDiffs.clear();
     stepGroups.clear();
+    segGroups.clear();
     tl.textContent = "";
   }
 
   function destroy(): void {
     lifecycle.destroy();
-    if (pillTimer) clearInterval(pillTimer);
-    pillTimer = null;
   }
 
-  return { render, renderTask, renderQueue, renderMemory, hideMemory, setPill, clearTranscript, setTab, activeTab, renderReview, renderTerm, destroy };
+  return { render, renderTask, renderQueue, renderMemory, hideMemory, renderStateLine, renderControls, clearTranscript, setTab, activeTab, renderReview, renderTerm, destroy };
 }
 
 export type PanelView = ReturnType<typeof createPanelView>;

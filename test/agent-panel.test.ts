@@ -13,7 +13,10 @@ import {
   stripToolLine,
   parseToolLabel,
   historyNeedsSync,
+  computeSegments,
+  formatDuration,
 } from "../src/client/agent/panel/transcript";
+import { deriveAgentState } from "../src/client/agent/panel/state";
 import { diffLines, changeFromTool } from "../src/client/agent/panel/diff";
 import { parseMarkdown, parseInlines } from "../src/client/agent/panel/md";
 import { ChangeRegistry, TermLog } from "../src/client/agent/panel/registry";
@@ -796,5 +799,166 @@ describe("historyNeedsSync", () => {
 
   it("historyCount tidak tersedia → tidak sync", () => {
     expect(historyNeedsSync(null, 4, false)).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Work segment per giliran (Fase 3 — pola work-segment harness)
+// ═══════════════════════════════════════════════════════════════
+
+function mkBlocks(): any[] {
+  return [
+    { kind: "user", id: 1, rev: 1, text: "perbaiki bug port", at: 1000 },
+    { kind: "agent", id: 2, rev: 1, text: "kucek dulu.", streaming: false, at: 1100 },
+    { kind: "tool", id: 3, rev: 1, name: "read_file", args: null, summary: "", argsText: null, result: "isi", status: "done", at: 1200 },
+    { kind: "tool", id: 4, rev: 1, name: "edit_file", args: null, summary: "", argsText: null, result: "ERROR: x", status: "error", at: 1300 },
+    { kind: "changes", id: 5, rev: 1, files: [{ path: "a.ts", kind: "edit", added: 1, removed: 0, hunks: [] }], added: 1, removed: 0, at: 1400 },
+    { kind: "final", id: 6, rev: 1, text: "selesai.", at: 1500 },
+  ];
+}
+
+describe("computeSegments", () => {
+  it("giliran lengkap: user → work → final = completed dengan hitungan & waktu", () => {
+    const segs = computeSegments(mkBlocks());
+    expect(segs.length).toBe(1);
+    const s = segs[0];
+    expect(s.key).toBe("1");
+    expect(s.trigger.text).toBe("perbaiki bug port");
+    expect(s.final?.kind).toBe("final");
+    expect(s.open).toBe(false);
+    expect(s.interrupted).toBe(false);
+    expect(s.toolsOk).toBe(1);
+    expect(s.toolsFail).toBe(1);
+    expect(s.changes).toBe(1);
+    expect(s.startedAt).toBe(1000);
+    expect(s.endedAt).toBe(1500);
+  });
+
+  it("segmen tanpa final: terakhir = open, di tengah = interrupted", () => {
+    const segs = computeSegments([
+      { kind: "user", id: 1, rev: 1, text: "a", at: 1 },
+      { kind: "tool", id: 2, rev: 1, name: "grep", args: null, summary: "", argsText: null, result: "x", status: "done", at: 2 },
+      { kind: "user", id: 3, rev: 1, text: "b", at: 3 },
+      { kind: "tool", id: 4, rev: 1, name: "grep", args: null, summary: "", argsText: null, result: null, status: "running", at: 4 },
+    ] as any);
+    expect(segs.length).toBe(2);
+    expect(segs[0].interrupted).toBe(true);
+    expect(segs[0].open).toBe(false);
+    expect(segs[1].open).toBe(true);
+    expect(segs[1].interrupted).toBe(false);
+  });
+
+  it("approval dibuang dari segmen (hidup di zona kontrol)", () => {
+    const blocks = mkBlocks();
+    blocks.splice(2, 0, { kind: "approval", id: 99, rev: 1, apId: "ap_9", tool: "edit_file", args: {} });
+    const segs = computeSegments(blocks);
+    expect(segs[0].work.some((b: any) => b.kind === "approval")).toBe(false);
+    expect(segs[0].toolsOk).toBe(1);
+  });
+
+  it("blok leading sebelum user pertama = segmen pre tanpa trigger", () => {
+    const segs = computeSegments([
+      { kind: "status", id: 9, rev: 1, text: "boot", at: 1 },
+      { kind: "user", id: 10, rev: 1, text: "halo", at: 2 },
+    ] as any);
+    expect(segs.length).toBe(2);
+    expect(segs[0].key).toBe("pre");
+    expect(segs[0].trigger).toBeNull();
+    expect(segs[1].key).toBe("10");
+  });
+
+  it("blok hasil hydrate tanpa at: startedAt/endedAt undefined (durasi tak diarakan)", () => {
+    const blocks = mkBlocks().map((b) => { const { at, ...rest } = b; return rest; });
+    const segs = computeSegments(blocks);
+    expect(segs[0].startedAt).toBeUndefined();
+    expect(segs[0].endedAt).toBeUndefined();
+  });
+});
+
+describe("formatDuration", () => {
+  it("mm:ss dan h:mm:ss, negatif → 00:00", () => {
+    expect(formatDuration(0)).toBe("00:00");
+    expect(formatDuration(134_000)).toBe("02:14");
+    expect(formatDuration(3_723_000)).toBe("1:02:03");
+    expect(formatDuration(-5)).toBe("00:00");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// State line — state machine agent (Fase 3)
+// ═══════════════════════════════════════════════════════════════
+
+describe("deriveAgentState", () => {
+  const NOW = 1_000_000;
+  const base = { plan: [], notes: { filesTouched: [] }, pendingApprovals: [] };
+
+  it("runtime mati → off apa pun kondisinya", () => {
+    const sv = deriveAgentState({ ...base, running: false, busy: true }, NOW - 9000, NOW);
+    expect(sv.state).toBe("off");
+    expect(sv.elapsedMs).toBe(0);
+  });
+
+  it("waitingPlan: approval rencana menang di atas kartu tool lain", () => {
+    const sv = deriveAgentState({
+      ...base,
+      running: true,
+      busy: false,
+      pendingApprovals: [
+        { id: "a", tool: "write_file", args: {}, ts: NOW - 1000 },
+        { id: "b", tool: "update_plan", args: { todos: [] }, kind: "plan", ts: NOW - 5000 },
+      ],
+    }, 0, NOW);
+    expect(sv.state).toBe("waitingPlan");
+    expect(sv.what).toBe("rencana kerja");
+    expect(sv.elapsedMs).toBe(5000);
+  });
+
+  it("waitingApproval: run_command membawa perintahnya sebagai what", () => {
+    const sv = deriveAgentState({
+      ...base,
+      running: true,
+      busy: false,
+      pendingApprovals: [{ id: "a", tool: "run_command", args: { command: "cargo test --workspace" }, ts: NOW - 61_000 }],
+    }, 0, NOW);
+    expect(sv.state).toBe("waitingApproval");
+    expect(sv.what).toContain("cargo test --workspace");
+    expect(sv.elapsedMs).toBe(61_000);
+  });
+
+  it("executing: busy + event tool_call_start terakhir", () => {
+    const sv = deriveAgentState({
+      ...base,
+      running: true,
+      busy: true,
+      lastEvent: { seq: 9, type: "tool_call_start", label: "run_command", ts: NOW - 30_000 },
+    }, NOW - 40_000, NOW);
+    expect(sv.state).toBe("executing");
+    expect(sv.what).toBe("run_command");
+    expect(sv.elapsedMs).toBe(30_000);
+  });
+
+  it("thinking: busy tanpa tool aktif — elapsed dari busySince (client)", () => {
+    const sv = deriveAgentState({
+      ...base,
+      running: true,
+      busy: true,
+      lastEvent: { seq: 9, type: "final_answer", label: "", ts: NOW - 999_999 },
+    }, NOW - 7000, NOW);
+    expect(sv.state).toBe("thinking");
+    expect(sv.elapsedMs).toBe(7000);
+  });
+
+  it("idle: runtime hidup tanpa busy; hitungan plan & berkas ikut", () => {
+    const sv = deriveAgentState({
+      running: true,
+      busy: false,
+      pendingApprovals: [],
+      plan: [{ status: "done" }, { status: "in_progress" }, { status: "pending" }],
+      notes: { filesTouched: ["a.ts", "b.ts"] },
+    }, 0, NOW);
+    expect(sv.state).toBe("idle");
+    expect(sv.stepsDone).toBe(1);
+    expect(sv.stepsTotal).toBe(3);
+    expect(sv.filesTouched).toBe(2);
   });
 });

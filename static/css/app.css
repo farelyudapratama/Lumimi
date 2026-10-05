@@ -3900,6 +3900,69 @@ input[type="range"]::-moz-range-thumb {
    dipakai ulang, cukup dirapatkan agar tak bergaya kotak-dalam-kotak. */
 .as-appr-plan { margin-bottom: 4px; max-height: 150px; }
 
+/* ── Fase 3: harness-first ─────────────────────────────────────────────
+   Garis keadaan = anchor; zona kontrol eksekusi pinned; worklog tersegmen;
+   Live2D turun jadi presence dock yang bisa dilipat. Matte, satu aksen. */
+.as-statebar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--ink-1);
+  min-height: 28px;
+}
+.as-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.as-statebar[data-state="idle"] .as-state-dot { background: var(--mint); }
+.as-statebar[data-state="thinking"] .as-state-dot,
+.as-statebar[data-state="executing"] .as-state-dot { background: var(--lamp); animation: as-pulse 1.6s ease-in-out infinite; }
+.as-statebar[data-state="waitingPlan"] .as-state-dot,
+.as-statebar[data-state="waitingApproval"] .as-state-dot { background: var(--lamp); }
+.as-statebar[data-state="waitingPlan"],
+.as-statebar[data-state="waitingApproval"] { border-color: var(--lamp); }
+.as-state-word { color: var(--text); font-weight: 600; white-space: nowrap; }
+.as-state-what { color: var(--text-dim); font: 11px/1.3 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.as-state-elapsed { color: var(--muted); font: 10.5px/1.3 var(--font-mono); flex: none; }
+.as-state-counts { margin-left: auto; color: var(--muted); font: 10px/1.3 var(--font-mono); letter-spacing: .03em; white-space: nowrap; }
+.as-state-btn { flex: none; border: none; background: none; color: var(--muted); font: 10.5px/1.3 var(--font-ui); cursor: pointer; padding: 2px 4px; border-radius: var(--r-xs); }
+.as-state-btn:hover { color: var(--text); background: var(--ink-2); }
+@keyframes as-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .as-state-dot { animation: none !important; } }
+
+/* Zona kontrol eksekusi: pinned di atas composer, kosong → hilang total */
+.as-controls { display: grid; gap: 6px; margin-top: 8px; padding: 8px; border: 1px solid var(--lamp); border-radius: var(--r-sm); background: var(--ink-1); }
+.as-controls.empty { display: none; }
+
+/* Segmen kerja per giliran: status + hitungan + durasi, lipat otomatis */
+.as-seg { border-left: 2px solid var(--line); margin: 5px 0 5px 3px; padding-left: 9px; }
+.as-seg.open { border-left-color: var(--lamp); }
+.as-seg-hd { display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 2px 0; border: none; background: none; cursor: pointer; color: var(--muted); font: 10.5px/1.4 var(--font-mono); text-align: left; }
+.as-seg-hd:hover { color: var(--text-dim); }
+.as-seg-state { text-transform: uppercase; letter-spacing: .04em; }
+.as-seg .as-chev { margin-left: auto; }
+.as-seg.collapsed .as-chev { transform: rotate(-90deg); }
+.as-seg-work { display: grid; gap: 4px; padding: 3px 0 5px; }
+.as-seg.collapsed .as-seg-work { display: none; }
+
+/* Transkrip ringkas: conversation diperkecil, harness tetap terbaca */
+.as-tl.compact { flex: 0 0 auto; max-height: 148px; -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent); mask-image: linear-gradient(to bottom, #000 72%, transparent); }
+
+.as-task-step { margin: 5px 0 0; color: var(--text-dim); font: 11.5px/1.4 var(--font-mono); }
+.as-tool-dur { margin-left: auto; color: var(--muted); font: 10px/1.3 var(--font-mono); }
+
+/* Dock presence Live2D di agent mode: pindah ke ujung kanan, ramping,
+   bisa dilipat total — area kerja melebar, tanpa lubang. */
+body.agent-mode #stage { order: 3; flex: 0 0 250px; min-width: 190px; }
+body.agent-mode #agent-workspace { order: 1; }
+body.agent-mode #sb-gutter { order: 2; }
+body.agent-stage-hidden #stage, body.agent-stage-hidden #sb-gutter { display: none !important; }
+body.agent-stage-hidden #agent-workspace { flex-grow: 1; }
+/* Aturan lama menyembunyikan panggung saat panel teknis terbuka — di agent
+   mode panggung adalah DOCK (250px) dan tetap hadir di sampingnya. */
+body.agent-mode .app.agent-tech-open #stage,
+body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
+
 /* Chip subagent */
 .as-blk.as-sub {
   display: flex;

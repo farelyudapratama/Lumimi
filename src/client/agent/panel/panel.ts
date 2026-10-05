@@ -16,6 +16,7 @@
 
 import { createLifecycle } from "../../lifecycle";
 import { httpBase } from "../../transport";
+import { deriveAgentState } from "./state";
 import { createAssistantApi, bootThenPoll } from "./api";
 import { Transcript, CONTINUATION_PROMPT, historyNeedsSync } from "./transcript";
 import type { Block } from "./transcript";
@@ -97,6 +98,16 @@ export function startAssistantPanel(): () => void {
     onTabChange: drawPages,
     toolLevel: (name) => toolLevels.get(name) ?? null,
     onCancelTask: (taskId) => cancelTaskById(taskId),
+    onToggleStageDock: () => {
+      stageDockHidden = !stageDockHidden;
+      applyStageDock();
+      if (lastSv) view.renderStateLine(lastSv, { compact: compactMode, stageHidden: stageDockHidden });
+    },
+    onToggleCompact: () => {
+      compactMode = !compactMode;
+      applyCompact();
+      if (lastSv) view.renderStateLine(lastSv, { compact: compactMode, stageHidden: stageDockHidden });
+    },
   });
   const actor = makeActor({
     L: window.__live2dAgent,
@@ -122,6 +133,31 @@ export function startAssistantPanel(): () => void {
   let destroy = false;
   let lastSeq = 0;
   let prevBusy = false;
+  // Sejak kapan busy berjalan (client clock) — acuan elapsed fase thinking.
+  let busySinceMs = 0;
+  // Cache derivasi keadaan terakhir — toggle UI memakai ulang tanpa poll.
+  let lastSv: ReturnType<typeof deriveAgentState> | null = null;
+  // Presence dock Live2D: body.agent-mode + lipat (persist). Harness harus
+  // 100% usable saat dock terlipat — area kerja melebar, bukan meninggalkan
+  // lubang (CSS app.css).
+  let stageDockHidden = (() => {
+    try { return localStorage.getItem("live2d.stageDock.hidden") === "1"; } catch { return false; }
+  })();
+  let compactMode = (() => {
+    try { return localStorage.getItem("live2d.agentCompact") === "1"; } catch { return false; }
+  })();
+  function applyStageDock(): void {
+    document.body.classList.toggle("agent-stage-hidden", stageDockHidden);
+    try { localStorage.setItem("live2d.stageDock.hidden", stageDockHidden ? "1" : "0"); } catch {}
+  }
+  function applyCompact(): void {
+    try { localStorage.setItem("live2d.agentCompact", compactMode ? "1" : "0"); } catch {}
+  }
+  // Mode agent = harness-first: panggung Live2D turun menjadi dock presence
+  // (CSS body.agent-mode — order + lebar dock). Kelas dibersihkan saat mode
+  // ditutup agar mode lain (Stage/VTuber) tetap stage-sentral.
+  document.body.classList.add("agent-mode");
+  applyStageDock();
   // Panjang history terakhir yang sudah di-hydrate (deteksi task eksternal).
   let lastHistoryCount = -1;
   let liveAsk: { abort: AbortController; receivedAnyEvent: boolean } | null = null;
@@ -410,16 +446,24 @@ export function startAssistantPanel(): () => void {
     } catch {
       return;
     }
-    // Pill: live kita > sibuk klien lain > nunggu izin > idle/mati.
+    // Garis keadaan (anchor harness): state machine + objek kerja + elapsed.
     // Saat loop pause untuk approval rt.busy=false — pendingApprovals yang
-    // jadi sumber state "approval" (jangan sampai pill keliru "siap").
-    const waitApproval = !liveAsk && (st.pendingApprovals?.length || 0) > 0;
-    view.setPill(
-      !st.running ? "off"
-        : waitApproval ? "approval"
-        : liveAsk ? "busy"
-        : st.busy ? "busyOther"
-        : "idle",
+    // jadi sumber keadaan menunggu (jangan sampai keliru "siap").
+    if (st.busy && !prevBusy) busySinceMs = Date.now();
+    if (!st.busy) busySinceMs = 0;
+    lastSv = deriveAgentState(st, busySinceMs, Date.now());
+    view.renderStateLine(lastSv, {
+      compact: compactMode,
+      stageHidden: stageDockHidden,
+    });
+    // Zona kontrol eksekusi: kartu approval pinned di atas composer.
+    view.renderControls(
+      (st.pendingApprovals || []).map((a) => ({
+        apId: a.id,
+        tool: a.tool,
+        args: a.args,
+        plan: a.kind === "plan",
+      })),
     );
     // Tombol cancel: aktif saat ada tugas berjalan di runtime (kita/CLI),
     // mati saat idle — tanpa runtime tak ada yang bisa dibatalkan.
@@ -603,6 +647,7 @@ export function startAssistantPanel(): () => void {
     memBtn?.removeEventListener("click", onMem);
     document.getElementById("as-quick")?.removeEventListener("click", onQuick);
     window.removeEventListener("agent:session-changed", onSessionChanged);
+    document.body.classList.remove("agent-mode", "agent-stage-hidden");
     destroyBrowserPanel?.();
     rootEl.textContent = "";
     if (techRootEl) techRootEl.textContent = "";

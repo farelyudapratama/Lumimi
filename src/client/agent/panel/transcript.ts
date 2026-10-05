@@ -23,7 +23,7 @@ import { t } from "../../i18n/index";
 
 export type ToolStatus = "running" | "done" | "error";
 
-export type Block =
+type BlockBase =
   | { kind: "user"; id: number; rev: number; text: string }
   | { kind: "agent"; id: number; rev: number; text: string; streaming: boolean }
   | { kind: "final"; id: number; rev: number; text: string }
@@ -41,6 +41,9 @@ export type Block =
       status: ToolStatus;
       /** Perubahan file bila tool mutasi file (diff dihitung dari args). */
       change?: FileChange | null;
+      /** Durasi eksekusi (client clock) bila kartu ini pernah running lalu
+       *  selesai; undefined untuk kartu hasil hydrate history. */
+      durMs?: number;
     }
   | { kind: "status"; id: number; rev: number; text: string; variant?: "ok" | "err" | "warn" }
   | { kind: "speak"; id: number; rev: number; text: string }
@@ -48,6 +51,10 @@ export type Block =
   | { kind: "subagent"; id: number; rev: number; name: string; state: "spawned" | "done"; text: string }
   /** Ringkasan perubahan file per giliran (ala "N files changed +a −r"). */
   | { kind: "changes"; id: number; rev: number; files: FileChange[]; added: number; removed: number };
+
+/** Semua blok membawa cap waktu client (Date.now saat push) — bahan durasi
+ *  segmen/durasi tool; blok hasil hydrate history tidak memilikinya. */
+export type Block = BlockBase & { at?: number };
 
 /** Event bus agent (bentuk AgentEvent di server/agent/bus.ts). */
 export type BusEvent = { seq: number; type: string; label: string; ts: number };
@@ -80,7 +87,7 @@ export class Transcript {
   private task = "";
 
   private push(b: any): any {
-    const blk: any = { id: nextId++, rev: 1, ...b };
+    const blk: any = { id: nextId++, rev: 1, at: Date.now(), ...b };
     this.blocks.push(blk);
     return blk;
   }
@@ -216,6 +223,8 @@ export class Transcript {
       if (card) {
         card.result = ev.text;
         card.status = /^ERROR/.test(ev.text) ? "error" : "done";
+        // Durasi eksekusi (client clock) — kartu tanpa `at` (hydrate) dilewati.
+        if (typeof card.at === "number") card.durMs = Math.max(0, Date.now() - card.at);
         if (card.status === "error" && card.change) {
           // Gagal = tidak jadi — buang dari kartu & hitungan giliran.
           if (card.change.path) this.turnChanges.delete(card.change.path);
@@ -565,4 +574,107 @@ export function historyNeedsSync(
   if (liveAsk) return false;
   if (histCount === null) return false;
   return histCount !== lastCount;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Work segment per giliran (Fase 3 — pola conversationTurnWorkSegments)
+// ═══════════════════════════════════════════════════════════════════
+
+/** Satu giliran kerja: input user → pekerjaan (tool/status/changes/narasi)
+ *  → jawaban final. Murni dari blocks — diuji tanpa DOM. */
+export type WorkSegment = {
+  /** Kunci stabil untuk state lipat UI: id blok pemicu, atau "pre". */
+  key: string;
+  /** Blok user pembuka; null untuk blok leading sebelum user pertama. */
+  trigger: Extract<Block, { kind: "user" }> | null;
+  /** Blok pekerjaan (tool/status/changes/subagent/speak/narasi agent). */
+  work: Block[];
+  /** Jawaban final penutup giliran; null = belum selesai. */
+  final: Block | null;
+  /** Segmen terakhir yang belum ada final-nya (agent sedang/diam di dalamnya). */
+  open: boolean;
+  /** Segmen tanpa final yang BUKAN terakhir (stream putus/error/ganti arah). */
+  interrupted: boolean;
+  startedAt?: number;
+  endedAt?: number;
+  toolsOk: number;
+  toolsFail: number;
+  changes: number;
+};
+
+/**
+ * Pecah transkrip jadi segmen giliran: blok `user` memulai segmen; blok
+ * `final` menutupnya; blok approval tidak ikut (dirender di zona kontrol).
+ * Segmen tanpa final = open bila terakhir, interrupted bila bukan.
+ */
+export function computeSegments(blocks: Block[]): WorkSegment[] {
+  const segs: WorkSegment[] = [];
+  let cur: WorkSegment | null = null;
+  const flush = () => {
+    if (cur && (cur.trigger || cur.work.length || cur.final)) segs.push(cur);
+    cur = null;
+  };
+  const start = (trigger: WorkSegment["trigger"]) => {
+    flush();
+    cur = {
+      key: trigger ? String(trigger.id) : "pre",
+      trigger,
+      work: [],
+      final: null,
+      open: false,
+      interrupted: false,
+      toolsOk: 0,
+      toolsFail: 0,
+      changes: 0,
+    };
+  };
+  for (const b of blocks) {
+    if (b.kind === "approval") continue; // zona kontrol eksekusi, bukan aliran
+    if (b.kind === "user") {
+      start(b);
+      continue;
+    }
+    if (!cur) start(null); // blok leading sebelum user pertama
+    if (b.kind === "final") {
+      cur!.final = b;
+      flush();
+      continue;
+    }
+    cur!.work.push(b);
+    if (b.kind === "tool") {
+      if (b.status === "done") cur!.toolsOk++;
+      else if (b.status === "error") cur!.toolsFail++;
+    } else if (b.kind === "changes") {
+      cur!.changes++;
+    }
+  }
+  flush();
+  // Post-proses: tanpa final → open (terakhir) / interrupted (bukan terakhir),
+  // plus cap waktu dari blok (hydrate history tidak punya — biarkan undefined).
+  const last = segs.length ? segs[segs.length - 1] : null;
+  for (const s of segs) {
+    const all = [s.trigger, ...s.work, s.final].filter(Boolean) as Block[];
+    const dated = all.filter((b) => typeof b.at === "number") as Array<Block & { at: number }>;
+    if (dated.length) {
+      s.startedAt = dated[0].at;
+      s.endedAt = s.final?.at;
+    }
+    if (!s.final) {
+      if (s === last) s.open = true;
+      else s.interrupted = true;
+    }
+  }
+  return segs;
+}
+
+/** Durasi ringkas untuk state line / segmen: 02:14, 1:02:14. Murni. */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0;
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
