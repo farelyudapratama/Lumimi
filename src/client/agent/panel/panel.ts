@@ -324,7 +324,7 @@ export function startAssistantPanel(): () => void {
     runStream("/api/assistant/ask-stream", { text: txt, ...ctx }, { path: "/api/assistant/ask", body: { text: txt, ...ctx } });
   }
 
-  function approve(apId: string, ok: boolean): void {
+  function approve(apId: string, ok: boolean, always = false): void {
     if (liveAsk) return;
     localApprovals.add(apId);
     // Metamorfosis: kartu izin hilang; kartu tool (dari tool_call SSE /
@@ -332,7 +332,11 @@ export function startAssistantPanel(): () => void {
     // tool_result dari approve-stream mengisinya. Tanpa bubble user baru.
     transcript.resolveApprovalVisual(apId, false);
     render();
-    runStream("/api/assistant/approve-stream", { id: apId, approve: ok }, { path: "/api/assistant/approve", body: { id: apId, approve: ok } });
+    // always → allowlist sesi di core: tool/perintah yang sama tidak
+    // meminta izin lagi sampai assistant berhenti.
+    const body: Record<string, unknown> = { id: apId, approve: ok };
+    if (always) body.always = true;
+    runStream("/api/assistant/approve-stream", body, { path: "/api/assistant/approve", body });
   }
 
   async function toggleMemory(): Promise<void> {

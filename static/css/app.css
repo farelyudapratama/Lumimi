@@ -3885,6 +3885,17 @@ input[type="range"]::-moz-range-thumb {
   border-color: var(--lamp);
 }
 .as-appr-ok:hover { background: var(--lamp-soft); }
+.as-appr-always {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.as-appr-always input { accent-color: var(--lamp); cursor: pointer; }
 
 /* Chip subagent */
 .as-blk.as-sub {

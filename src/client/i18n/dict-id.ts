@@ -562,6 +562,8 @@ export const DICT_ID: Record<string, string> = {
   "as.quick.summary": "Ringkas kerjamu sesi ini",
   "as.stream.dropped": "koneksi ke stream terputus — memantau dari server…",
   "as.approve.title": "Butuh izin:",
+  "as.approve.always": "Selalu izinkan {what} untuk sesi ini",
+  "as.approve.thisCommand": "perintah ini",
   "as.deny": "Tolak",
   "as.tool.args": "argumen",
   "as.tool.result": "hasil",

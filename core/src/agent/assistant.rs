@@ -44,6 +44,10 @@ pub struct Runtime {
     pub role_map: Value,
     pub history: Vec<Value>, // {role, content}
     pub approvals: Vec<Value>, // {id, tool, args, ts}
+    /// Allowlist izin sesi (kunci allow_key): tool mutating yang sudah
+    /// pernah disetujui dengan "selalu izinkan" — gate melewatinya tanpa
+    /// pause. Kosong lagi saat stop().
+    pub allowed: std::collections::HashSet<String>,
     plan: Vec<Value>,          // update_plan items
     notes_files: Vec<String>,  // file tersentuh sesi ini (relatif)
     undo: Vec<UndoRec>,        // snapshot mutasi (cap MAX_UNDO)
@@ -68,6 +72,19 @@ fn push_msg(r: &mut Runtime, role: &str, content: &str) {
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// Kunci allowlist sesi: per-tool, KECUALI run_command yang dikelompokkan
+/// per perintah — menyetujui "cargo test" bukan berarti mengizinkan
+/// perintah arbitrer lain dengan nama tool yang sama.
+fn allow_key(name: &str, args: &Value) -> String {
+    if name == "run_command" {
+        let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if !cmd.is_empty() {
+            return format!("run_command:{cmd}");
+        }
+    }
+    name.to_string()
 }
 
 /// Buang baris directive TOOL: + blok/tag reasoning yang bocor dari teks final
@@ -116,12 +133,15 @@ pub async fn status() -> Value {
             "ts": ap.get("ts").cloned().unwrap_or(Value::Null),
         })
     }).collect();
+    let mut allowlist: Vec<String> = r.allowed.iter().cloned().collect();
+    allowlist.sort();
     json!({
         "running": r.running,
         "busy": r.busy,
         "workDir": r.work_dir,
         "historyCount": r.history.len(),
         "pendingApprovals": pending,
+        "allowlist": allowlist,
         "plan": r.plan,
         "notes": { "filesTouched": r.notes_files },
         "lastEvent": if r.running { bus::last_event() } else { Value::Null },
@@ -138,6 +158,7 @@ pub async fn stop() -> Value {
     r.cancel = false;
     r.history.clear();
     r.approvals.clear();
+    r.allowed.clear();
     r.plan.clear();
     r.notes_files.clear();
     r.undo.clear();
@@ -369,8 +390,10 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
         }
         seen.insert(call_key);
 
-        if level == Some("mutating") {
-            // PERMISSION GATE — jeda, minta izin.
+        if level == Some("mutating") && !rt().lock().await.allowed.contains(&allow_key(&name, &args)) {
+            // PERMISSION GATE — jeda, minta izin. Tool yang sudah di-allowlist
+            // sesi (approve dengan "selalu izinkan") melewati blok ini dan
+            // dieksekusi inline di bawah, dengan snapshot undo yang sama.
             bus::emit("permission_request", &name);
             let id = format!("ap_{}", crate::config::base36_pub(now_ms() as u128));
             let pub_args = loop_::public_tool_args(&name, &args);
@@ -427,6 +450,10 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
 
         // tool safe → eksekusi langsung (browser_* lewat jalur async manager,
         // motion_* lewat modul motion_tools dengan config_path + state model).
+        // Tool mutating yang lolos allowlist sesi juga tiba di sini — snapshot
+        // undo wajib sama seperti jalur approve().
+        let is_mutating = level == Some("mutating");
+        let snap = if is_mutating { snapshot_before(&wd, &name, &args) } else { None };
         bus::emit("tool_call_start", &name);
         let result = if loop_::is_browser_tool(&name) {
             crate::browser::agent_exec(root, &name, &args).await
@@ -453,6 +480,11 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
             }
         }
         let mut r = rt().lock().await;
+        if is_mutating && !result.starts_with("ERROR") {
+            if let Some((rel, abs, prev)) = snap {
+                record_undo(&mut r, rel, abs, prev);
+            }
+        }
         push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
         push_msg(&mut r, "tool", &format!("[{name}] {}", clip_tool(&result)));
     }
@@ -602,7 +634,9 @@ pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str)
 }
 
 /// POST /api/assistant/approve — resume loop setelah izin tool mutating.
-pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool) -> AskResult {
+/// `always` = sekalian masukkan tool/perintah ke allowlist sesi (gate
+/// berikutnya untuk kunci yang sama tidak pause lagi).
+pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool, always: bool) -> AskResult {
     let pending = {
         let mut r = rt().lock().await;
         let idx = r.approvals.iter().position(|a| a.get("id").and_then(|x| x.as_str()) == Some(id));
@@ -623,6 +657,11 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
     bus::emit("permission_resolved", &format!("{}: {name}", if approve_it { "disetujui" } else { "ditolak" }));
 
     if approve_it {
+        if always {
+            let key = allow_key(&name, &args);
+            rt().lock().await.allowed.insert(key);
+            bus::emit("permission_resolved", &format!("diizinkan untuk sesi ini: {name}"));
+        }
         // Snapshot undo SEBELUM tool mutasi file (write/edit/delete) dieksekusi.
         let snap = snapshot_before(&wd, &name, &args);
         bus::emit("tool_call_start", &name);
@@ -717,8 +756,39 @@ mod tests {
             r.approvals.push(json!({ "id": id, "tool": name, "args": args, "ts": now_ms() }));
         }
         let cfg = mock_config(wd);
-        let res = approve(&cfg, wd, &id, true).await;
+        let res = approve(&cfg, wd, &id, true, false).await;
         assert!(res.ok);
+    }
+
+    #[tokio::test]
+    async fn izin_sesi_allowlist_dan_stop_mengosongkan() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        // Kunci allowlist: tool lain per nama, run_command per perintah —
+        // menyetujui satu perintah tidak mengizinkan perintah arbitrer lain.
+        assert_eq!(allow_key("edit_file", &json!({})), "edit_file");
+        assert_eq!(allow_key("run_command", &json!({ "command": "  cargo test  " })), "run_command:cargo test");
+        assert_eq!(allow_key("run_command", &json!({})), "run_command");
+
+        let wd = tmp_dir("allowlist");
+        start(&wd.to_string_lossy(), "", Value::Null).await;
+        let id = format!("ap_test_{}", crate::config::base36_pub(now_ms() as u128));
+        {
+            let mut r = rt().lock().await;
+            r.running = true;
+            r.busy = true;
+            r.work_dir = wd.to_string_lossy().to_string();
+            r.approvals.push(json!({ "id": id, "tool": "edit_file", "args": json!({ "path": "a.txt", "old": "x", "new": "y" }), "ts": now_ms() }));
+        }
+        let cfg = mock_config(&wd);
+        let res = approve(&cfg, &wd, &id, true, true).await;
+        assert!(res.ok);
+        assert!(rt().lock().await.allowed.contains("edit_file"), "approve + always harus memasukkan allowlist");
+        let st = status().await;
+        assert!(st["allowlist"].as_array().unwrap().iter().any(|v| v == "edit_file"), "status mengekspos allowlist");
+
+        stop().await;
+        assert!(rt().lock().await.allowed.is_empty(), "stop() = batas sesi, allowlist kosong lagi");
+        assert!(status().await["allowlist"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

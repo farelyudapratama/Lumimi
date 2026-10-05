@@ -554,6 +554,8 @@ export const DICT_EN: Record<string, string> = {
   "as.quick.summary": "Summarize your work this session",
   "as.stream.dropped": "stream connection dropped — watching from the server…",
   "as.approve.title": "Needs approval:",
+  "as.approve.always": "Always allow {what} this session",
+  "as.approve.thisCommand": "this command",
   "as.deny": "Deny",
   "as.tool.args": "arguments",
   "as.tool.result": "result",

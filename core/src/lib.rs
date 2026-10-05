@@ -506,8 +506,9 @@ async fn post_assistant_approve(State(paths): State<AppPaths>, body: axum::body:
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
     let approve_it = v.get("approve").and_then(|x| x.as_bool()).unwrap_or(false);
+    let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
-    let r = agent::assistant::approve(&cfg, &paths.root, id, approve_it).await;
+    let r = agent::assistant::approve(&cfg, &paths.root, id, approve_it, always).await;
     if r.ok {
         json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused }))
     } else {
@@ -526,11 +527,12 @@ async fn post_assistant_approve_stream(State(paths): State<AppPaths>, body: axum
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let approve_it = v.get("approve").and_then(|x| x.as_bool()).unwrap_or(false);
+    let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
     let root = paths.root.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let r = agent::assistant::approve(&cfg, &root, &id, approve_it).await;
+        let r = agent::assistant::approve(&cfg, &root, &id, approve_it, always).await;
         if r.ok {
             if !r.reply.is_empty() {
                 let _ = tx.send(json!({ "delta": r.reply }).to_string());

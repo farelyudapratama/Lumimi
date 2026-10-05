@@ -22,7 +22,7 @@ export function toolRunIsTerminal(run: Array<{ status: string }>): boolean {
 
 export type PanelViewDeps = {
   t: (key: string, vars?: Record<string, string | number>) => string;
-  onApprove: (apId: string, approve: boolean) => void;
+  onApprove: (apId: string, approve: boolean, always?: boolean) => void;
   /** Dipanggil saat user pindah tab teknis; transcript selalu tetap terlihat. */
   onTabChange?: (tab: TechnicalTab) => void;
   /** Level tool ("safe"|"mutating") untuk badge; null = tak diketahui. */
@@ -384,19 +384,28 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
         ok.type = "button";
         const no = el("button", "mini-btn as-appr-no", t("as.deny")) as HTMLButtonElement;
         no.type = "button";
+        // "Selalu izinkan" → allowlist sesi di core; untuk run_command yang
+        // diizinkan adalah perintahnya (bukan tool-nya), teks label menyesuaikan.
+        const what = b.tool === "run_command" ? t("as.approve.thisCommand") : b.tool;
+        const always = document.createElement("input") as HTMLInputElement;
+        always.type = "checkbox";
+        const alwaysRow = el("label", "as-appr-always") as HTMLLabelElement;
+        alwaysRow.append(always, document.createTextNode(t("as.approve.always", { what })));
         ok.addEventListener("click", () => {
           ok.disabled = true;
           no.disabled = true;
-          deps.onApprove(b.apId, true);
+          deps.onApprove(b.apId, true, always.checked);
         });
         no.addEventListener("click", () => {
           ok.disabled = true;
           no.disabled = true;
+          always.checked = false;
           deps.onApprove(b.apId, false);
         });
         row.appendChild(ok);
         row.appendChild(no);
         w.appendChild(row);
+        w.appendChild(alwaysRow);
         return w;
       }
       case "subagent": {
