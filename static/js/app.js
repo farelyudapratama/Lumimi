@@ -2585,21 +2585,8 @@
     });
   }
 
-  let bubbleTimeout = null;
-  function showBubble(text, duration = 4000) {
-    const bubble = $("#bubble");
-    const textEl = $("#bubble-text");
-    if (bubbleTimeout) clearTimeout(bubbleTimeout);
-    bubble.classList.remove("waiting");
-    textEl.textContent = text;
-    bubble.classList.remove("hidden");
-    bubbleTimeout = setTimeout(() => bubble.classList.add("hidden"), duration);
-  }
-  function hideBubble() {
-    const bubble = $("#bubble");
-    if (bubbleTimeout) clearTimeout(bubbleTimeout);
-    bubble.classList.add("hidden");
-  }
+  // Bubble teks di atas karakter DIHAPUS (permintaan user 2026-10-06):
+  // teks respons cukup di chat log / panel — di atas karakter tidak perlu.
 
   // Mesin suara global (dari /api/config). provider "browser" = speechSynthesis;
   // selain itu bicara lewat /api/tts yang meneruskan ke provider remote.
@@ -2872,7 +2859,15 @@
     // budget ditambah. parentSignal = abort claim speech: preempt memutus
     // juga request in-flight (hemat billing provider) dan TIDAK di-retry.
     const hasLang = !!ttsLang;
-    const budgetMs = hasLang ? 150000 : 120000;
+    // Budget DASAR tetap (jaring penggantung socket, bukan ukur kegagalan)…
+    const baseBudgetMs = hasLang ? 150000 : 120000;
+    // …lalu ikut panjang teks: satu request hemat-request berisi respons
+    // penuh (ribuan karakter) = sintesis menit-menit — budget flat memotong
+    // di tengah dan sisa respons tak pernah dibaca. Cap 10 menit.
+    const budgetMs = Math.min(
+      600000,
+      Math.max(baseBudgetMs, String(text || "").length * 250 + 60000),
+    );
     for (let attempt = 0; ; attempt++) {
       const ctrl = new AbortController();
       const to = setTimeout(() => ctrl.abort(), budgetMs);
@@ -3029,12 +3024,13 @@
     }
     // `let` — regroup adaptif mengganti isi segments setelah latensi diukur
     let segments = splitSpeechSegments(text);
-    // Mode hemat request (API yang menagih per request): gabung semua kalimat
-    // jadi paketan besar SEJAK AWAL (±800 karakter ≈ 1 menit audio) — reply
-    // normal cukup 1 request TTS. Konsekuensi: karakter mulai bicara beberapa
-    // detik lebih telat karena menunggu sintesis paket pertama selesai.
-    if (TTS_CFG.hematRequest && segments.length > 1) {
-      segments = regroupByTarget(splitSpeechSegments(text), 800);
+    // Mode hemat request (API yang menagih per request): SATU respons = SATU
+    // request TTS berisi teks penuh — chat log boleh memecah kalimat, audio
+    // tetap satu kesatuan (tagihan provider per request, bukan per kalimat).
+    // Konsekuensi: bicara mulai lebih telat (sintesis penuh dulu) — makanya
+    // ini pilihan user, bukan default.
+    if (TTS_CFG.hematRequest) {
+      segments = [text.trim()];
     }
     // Abort claim: preempt memutus semua fetch TTS in-flight pipeline ini.
     if (!sess.abort) sess.abort = new AbortController();
@@ -3052,7 +3048,7 @@
         // hematRequest ±800 char ≈ >1 menit audio, flat 45 dtk memotongnya.
         sess.fallbackTimer = setTimeout(
           markDone,
-          Math.max(45000, text.length * 150 + 20000),
+          Math.max(45000, text.length * 400 + 60000),
         );
         playTTSAudio(
           blob,
@@ -3154,8 +3150,6 @@
       // Jendela mulut di-re-arm per segmen (estimasi + margin latensi antar
       // segmen) — tanpa ini budget timer pertama habis di tengah segmen akhir.
       state.extendMouth(segText.length * 75 + 6000);
-      // Bubble menampilkan kalimat yang sedang dibacakan.
-      showBubble(segText, 1e9);
       await new Promise((resolve) => {
         sess.segResolve = resolve;
         playTTSAudio(
@@ -3169,8 +3163,10 @@
           // memicu speech-motion brain; sisanya no-op (guard sekali).
           onAudioStart,
         );
-        // playbackRate bisa 0.5 → durasi 2× — budget 150 ms/char + margin.
-        guard(segText.length * 150 + 25000);
+        // playbackRate bisa 0.5 → durasi 2×. Watchdog HANYA jaring audio
+        // beku: budget ±4× durasi bicara + 2 menit — jangan pernah memotong
+        // audio sehat di tengah (laporan user: TTS berhenti tak disambung).
+        guard(segText.length * 400 + 120000);
       });
       if (aborted || dead()) return;
       // Fase berikutnya: menunggu sintesis segmen i+1 — watchdog fetch.
@@ -3261,7 +3257,6 @@
     };
 
     if (!state.model) {
-      showBubble(text);
       fireAudioStart();
       setTimeout(() => {
         const alive = isActive();
@@ -3280,7 +3275,6 @@
     // Settle visual speech (BUKAN onDone): dipakai markDone (selesai alami)
     // dan cleanup preempt — mulut/bubble/talking kembali netral.
     const settleVisuals = () => {
-      hideBubble();
       state.talking = false;
       if (state.activeLip) state.activeLip.reset();
       const mId = roleId("mouthOpenY");
@@ -3336,7 +3330,6 @@
     const reveal = () => {
       if (revealed) return;
       revealed = true;
-      showBubble(text, 1e9);
       state.talking = true;
       state.extendMouth(Math.max(1400, text.length * 75));
     };
@@ -3393,11 +3386,8 @@
       });
     }
 
-    // Fase menunggu audio TTS (latensi remote 10-16 dtk): bubble "…" MATI
-    // terasa seperti karakter hang. Class "waiting" menghidupkannya — tiga
-    // titik berkedip, dibersihkan showBubble() berikutnya / markDone().
-    $("#bubble").classList.add("waiting");
-    showBubble("…", 1e9);
+    // Fase menunggu audio TTS (latensi remote 10-16 dtk): tanpa bubble —
+    // hanya state.talking/mulut yang menandakan karakter bersiap bicara.
     sess.fallbackTimer = setTimeout(
       markDone,
       ttsRemoteActive() ? 45000 : Math.max(1400, text.length * 75) + 800,
@@ -3689,7 +3679,6 @@
     // ke karakter" tidak berperilaku berbeda.
     function submitUtterance(text) {
       addChat("user", text);
-      showBubble(text);
       resetAgentIdle();
       const brainOn = $("#toggle-brain") && $("#toggle-brain").checked;
 

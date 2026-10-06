@@ -44,14 +44,17 @@ function evalNum(expr, hasLang) {
 }
 
 section('budget timeout fetchTTSAudio (jaring penggantung, bukan ukur kegagalan)');
-const mBudget = fetchBody.match(/const budgetMs = ([^;]+);/);
-ok('budgetMs satu konstanta yang bisa dihitung', !!mBudget);
+const mBudget = fetchBody.match(/const baseBudgetMs = ([^;]+);/);
+ok('budget dasar satu konstanta yang bisa dihitung', !!mBudget);
 const noLang = mBudget ? evalNum(mBudget[1], false) : NaN;
 const withLang = mBudget ? evalNum(mBudget[1], true) : NaN;
 ok('budget tanpa bahasa tetap >= 120 dtk (melebihi upstream server 60 dtk + retry internal)',
   noLang >= 120000, isFinite(noLang) ? noLang + ' ms' : 'budgetMs tidak ditemukan/tak terhitung');
 ok('budget bahasa tetap >= 150 dtk (server bisa terjemah LLM dulu, +60 dtk)',
   withLang >= 150000, isFinite(withLang) ? withLang + ' ms' : 'budgetMs tidak ditemukan/tak terhitung');
+ok('budget ikut panjang teks (satu request hemat = respons penuh, menit-menit)',
+  /Math\.max\(baseBudgetMs, String\(text \|\| ""\)\.length \* 250 \+ 60000\)/.test(appSrc) &&
+  /Math\.min\(\s*600000,/.test(appSrc));
 ok('tanpa timeout absolut pendek (20/45 dtk) tersisa di fetchTTSAudio',
   !/\b(20000|45000)\b/.test(fetchBody));
 
@@ -66,12 +69,14 @@ ok('watchdog fase menunggu sintesis >= 150 dtk',
   !!mWatch && Number(mWatch[1]) >= 150000, mWatch ? mWatch[1] + ' ms' : 'tidak ditemukan');
 ok('watchdog fetch re-arm setelah pemutaran selesai (segmen berikutnya)',
   /if \(i \+ 1 < segments\.length\) guard\(WATCHDOG_FETCH_MS\);/.test(appSrc));
-ok('watchdog pemutar ikut durasi segmen (playbackRate 0.5 → durasi 2×)',
-  /guard\(segText\.length \* 150 \+ 25000\)/.test(appSrc));
+ok('watchdog pemutar longgar (hanya jaring audio beku — tidak memotong audio sehat)',
+  /guard\(segText\.length \* 400 \+ 120000\)/.test(appSrc));
 
 section('jalur satu segmen: watchdog pemutar ikut panjang teks');
-ok('paket hematRequest (±800 char ≈ >1 menit audio) tidak terpotong flat 45 dtk',
-  /Math\.max\(45000, text\.length \* 150 \+ 20000\)/.test(appSrc));
+ok('jalur satu segmen (hemat = respons penuh) tidak terpotong net kaku',
+  /Math\.max\(45000, text\.length \* 400 \+ 60000\)/.test(appSrc));
+ok('mode hemat request = SATU respons satu request TTS (satu kesatuan)',
+  /segments = \[text\.trim\(\)\];/.test(appSrc));
 
 section('fallback suara browser tetap ada HANYA untuk kegagalan nyata');
 ok('error request tunggal → browserTTS (HTTP/network, bukan lambat)',

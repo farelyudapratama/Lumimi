@@ -382,56 +382,6 @@ a:hover { text-decoration: underline; }
   background: rgba(0, 0, 0, 0);
 }
 
-/* ── Bubble karakter ────────────────────────────────────────────── */
-
-#bubble {
-  position: absolute;
-  left: 50%;
-  bottom: 22%;
-  transform: translateX(-50%);
-  z-index: 10;
-  max-width: min(520px, 84%);
-  padding: 11px 16px;
-  border-radius: var(--r-lg);
-  background: var(--ink-1);
-  border: 1px solid var(--line-strong);
-  box-shadow: var(--shadow-md);
-  font-size: 14px;
-  line-height: 1.6;
-  color: var(--text);
-  animation: pop-in 0.16s ease-out;
-  pointer-events: auto;
-}
-#bubble-tail {
-  position: absolute;
-  left: calc(50% - 6px);
-  bottom: -6px;
-  width: 12px;
-  height: 12px;
-  transform: rotate(45deg);
-  background: var(--ink-1);
-  border-right: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line-strong);
-}
-/* Fase menunggu audio TTS: teks "…" disembunyikan, diganti tiga titik
-   berkedip — karakter terasa "menyiapkan suara", bukan hang. */
-#bubble.waiting { min-width: 64px; min-height: 38px; }
-#bubble.waiting #bubble-text { display: none; }
-#bubble.waiting::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 5px;
-  height: 5px;
-  margin: -2px 0 0 -2px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  box-shadow: 9px 0 0 var(--text-dim), 18px 0 0 var(--text-dim);
-  transform: translateX(-9px);
-  animation: ellipsis-dot 1.2s infinite;
-}
-
 /* ── Kontrol & HUD panggung ─────────────────────────────────────── */
 
 .stage-ctl {

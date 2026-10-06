@@ -518,8 +518,11 @@ bila memang pas.
         // jadi tak ada dua pengambil keputusan yang tumpang tindih.
         const segments = await this.animateTextViaDirector(clean, this.capProfile);
         if (this.gen !== myGen) return; // digulingkan saat director pass
+        // Chat: respons PENUH masuk log sekali di depan — bukan per-segmen
+        // saat TTS-nya mulai (dulu: TTS berhenti di tengah → chat kepotong).
+        addChat("agent", clean);
         console.log("[agent] speaking reply with", segments.length, "animation segments");
-        this.playSegments(segments);
+        this.playSegments(segments, "companion", { chatFull: true });
         this.afterReplyHousekeeping();
       } else {
         const msg = "Hmm, aku bingung jawabnya...";
@@ -839,7 +842,13 @@ bila memang pas.
   // cls = kelas speech policy (Fase 2): "companion" untuk balasan input user
   // (tier 2), "companion_proactive" untuk event ambient (tier 1 — tidak boleh
   // memotong bicara user/narasi/VTuber).
-  private playSegments(segments: ParsedSegment[], cls: string = "companion"): void {
+  private playSegments(
+    segments: ParsedSegment[],
+    cls: string = "companion",
+    opts?: { /** true: chat sudah ditulis penuh di depan (jangan per-segmen). */
+      chatFull?: boolean;
+    },
+  ): void {
     const L = l2d();
     if (!L || !segments.length) return;
 
@@ -905,8 +914,10 @@ bila memang pas.
           this.applyActions(seg.actions, segIdx, seg.text, { speechOnly: true });
         }
       };
-      // Chat log per-segment: teks baru muncul SESUDAH (seiring) TTS segmen ini
-      if (seg.text) addChat("agent", seg.text);
+      // Chat log per-segment HANYA untuk panggilan tanpa chatFull (quip/
+      // proactive pendek). Respons panjang ditulis penuh di depan — kalau
+      // TTS berhenti di tengah, chat tetap utuh.
+      if (seg.text && !opts?.chatFull) addChat("agent", seg.text);
       console.log(
         "[agent] segment", segIdx + 1, "/", segments.length,
         "text:", seg.text.slice(0, 40) + (seg.text.length > 40 ? "..." : ""),
