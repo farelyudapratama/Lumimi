@@ -274,6 +274,17 @@
          langsung .app supaya grid mode-agent bisa menempatkannya di kolom
          presence (bawah stage Live2D). Isi dibangun workbench.ts. -->
     <section id="agent-tech" aria-label="Dock teknis workbench agent"></section>
+    <!-- Pembagi dock presence: drag = ubah lebar dock, dobel-klik = reset,
+         tombol chevron = lipat seluruh dock kanan. Grid item kolom 3
+         (workbench.css); wiring drag di workbench.ts. -->
+    <div id="wb-dock-divider" class="hidden" role="separator" aria-orientation="vertical"
+      aria-label="Lebar dock presence">
+      <button id="btn-dock-collapse" class="wb-dock-chev" data-i18n-title="wb.dock.hide"
+        aria-label="Lipat dock presence" title="Lipat dock presence">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"
+          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+      </button>
+    </div>
       <div id="controls-panel" class="hidden">
         <div class="drawer-head">
           <div class="tabs">

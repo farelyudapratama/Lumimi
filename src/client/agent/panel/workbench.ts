@@ -193,6 +193,88 @@ export function startWorkbench(): () => void {
     renderHeader();
   }
 
+  // ── Lebar dock presence: drag pembatas, persist, clamp ──────────
+  // Runtime Live2D tidak disentuh: mengubah --wb-dock-w hanya mengubah grid,
+  // ResizeObserver app.js yang mem-frame ulang canvas. Runtime collapse pun
+  // hanya display:none — model tetap milik elemen canvas yang sama.
+  const DOCK_W_MIN = 220;
+  const DOCK_W_DEFAULT = 300;
+  const DOCK_W_KEY = "wb.dock.width";
+  const dockMax = () => Math.max(DOCK_W_MIN + 40, Math.min(480, window.innerWidth - 620));
+  let dockWidth = (() => {
+    const raw = Number(localStorage.getItem(DOCK_W_KEY));
+    return Number.isFinite(raw) && raw > 0 ? raw : DOCK_W_DEFAULT;
+  })();
+  const appEl = document.querySelector(".app") as HTMLElement | null;
+
+  function clampDockWidth(w: number): number {
+    return Math.round(Math.min(Math.max(w, DOCK_W_MIN), dockMax()));
+  }
+  function applyDockWidth(persist = false): void {
+    dockWidth = clampDockWidth(dockWidth);
+    appEl?.style.setProperty("--wb-dock-w", dockWidth + "px");
+    if (persist) {
+      try { localStorage.setItem(DOCK_W_KEY, String(dockWidth)); } catch {}
+    }
+  }
+  function wireDockDivider(): void {
+    const divider = document.getElementById("wb-dock-divider");
+    if (!divider || !appEl) return;
+    divider.classList.remove("hidden");
+    applyDockWidth();
+    let startX = 0;
+    let startW = 0;
+    let dragging = false;
+    const onMove = (e: PointerEvent) => {
+      if (!dragging) return;
+      dockWidth = startW + (startX - e.clientX);
+      applyDockWidth();
+    };
+    const onUp = (e: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      try { divider.releasePointerCapture?.(e.pointerId); } catch {}
+      document.body.classList.remove("wb-dock-resizing");
+      applyDockWidth(true);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    divider.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      startX = e.clientX;
+      startW = dockWidth;
+      try { divider.setPointerCapture?.(e.pointerId); } catch {}
+      document.body.classList.add("wb-dock-resizing");
+      // Listener di window (bukan elemen): drag tetap berjalan walau kursor
+      // keluar pembatas / masuk iframe panel browser.
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+      e.preventDefault();
+    });
+    divider.addEventListener("dblclick", () => {
+      dockWidth = DOCK_W_DEFAULT;
+      applyDockWidth(true);
+    });
+    divider.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        dockWidth += e.key === "ArrowLeft" ? 16 : -16;
+        applyDockWidth(true);
+      }
+    });
+    document.getElementById("btn-dock-collapse")?.addEventListener("click", toggleDock);
+    const onWinResize = () => applyDockWidth();
+    window.addEventListener("resize", onWinResize);
+    dividerCleanup = () => {
+      window.removeEventListener("resize", onWinResize);
+      document.body.classList.remove("wb-dock-resizing");
+    };
+  }
+  let dividerCleanup: (() => void) | null = null;
+
   function setTab(tab: DockTab): void {
     view.setTab(tab);
   }
@@ -665,6 +747,7 @@ export function startWorkbench(): () => void {
   ]);
 
   applyDock();
+  wireDockDivider();
   view.composer.setBusy(false, false);
   view.composer.focus();
   render();
@@ -680,7 +763,10 @@ export function startWorkbench(): () => void {
     liveAsk?.abort.abort();
     window.removeEventListener("agent:session-changed", onSessionChanged);
     // mode-agent dipasang/cabut mode-runtime.js — di sini hanya dock lipat.
-    document.body.classList.remove("agent-dock-collapsed");
+    document.body.classList.remove("agent-dock-collapsed", "wb-dock-resizing");
+    dividerCleanup?.();
+    dividerCleanup = null;
+    document.getElementById("wb-dock-divider")?.classList.add("hidden");
     destroyBrowserPanel?.();
     if (activeDestroy === destroyPanel) activeDestroy = null;
   };

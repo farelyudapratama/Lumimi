@@ -68,7 +68,9 @@ body.mode-agent ::-webkit-scrollbar-corner { background: transparent; }
 body.mode-agent .app {
   background: var(--wb-bg);
   display: grid;
-  grid-template-columns: auto minmax(360px, 1fr) var(--wb-dock-w);
+  /* [rail | workbench | pembatas 6px | dock] — pembatas bisa di-drag
+     (workbench.ts); lebar dock via --wb-dock-w (tersimpan di localStorage). */
+  grid-template-columns: auto minmax(360px, 1fr) 6px var(--wb-dock-w, 300px);
   grid-template-rows: minmax(280px, 46%) minmax(0, 1fr);
 }
 body.mode-agent #left-workspace { grid-column: 1; grid-row: 1 / span 2; }
@@ -80,7 +82,7 @@ body.mode-agent #agent-workspace {
 }
 body.mode-agent #sb-gutter { display: none; }
 body.mode-agent #stage {
-  grid-column: 3;
+  grid-column: 4;
   grid-row: 1;
   min-width: 0;
   border: none;
@@ -90,7 +92,7 @@ body.mode-agent #stage {
   background: var(--wb-dock);
 }
 body.mode-agent #agent-tech {
-  grid-column: 3;
+  grid-column: 4;
   grid-row: 2;
   display: flex;
   flex-direction: column;
@@ -114,12 +116,64 @@ body.mode-agent #sidebar {
   padding: 0;
   box-shadow: none;
 }
-/* Dock terlipat: presence menyusut jadi kapsul status; area kerja melebar */
+/* Pembagi dock: drag = ubah lebar (wiring workbench.ts), dobel-klik = reset,
+   chevron « = lipat seluruh dock kanan. Pill tengah terlihat saat hover/resize. */
+body.mode-agent #wb-dock-divider {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  cursor: col-resize;
+  z-index: 6;
+  min-width: 0;
+}
+body.mode-agent #wb-dock-divider::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 9999px;
+  background: var(--wb-fg-subtlest);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+body.mode-agent #wb-dock-divider:hover::before,
+body.wb-dock-resizing #wb-dock-divider::before { opacity: 0.55; }
+.wb-dock-chev {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  margin-top: 10px;
+  border-radius: var(--wb-r-sm);
+  border: 1px solid var(--wb-border);
+  background: var(--wb-card);
+  color: var(--wb-fg-subtle);
+  cursor: pointer;
+  z-index: 1;
+}
+.wb-dock-chev:hover { color: var(--wb-fg); border-color: var(--wb-border-hover); }
+.wb-dock-chev svg { width: 14px; height: 14px; }
+/* Saat drag: kursor konsisten + iframe (panel browser) tak menelan pointer. */
+body.wb-dock-resizing,
+body.wb-dock-resizing * { cursor: col-resize !important; user-select: none; }
+body.wb-dock-resizing #stage,
+body.wb-dock-resizing #agent-tech { pointer-events: none; }
+
+/* Dock terlipat: presence menyusut jadi kapsul status; area kerja melebar.
+   Runtime Live2D TIDAK dimatikan — elemennya cuma disembunyikan (display:none),
+   canvas tetap milik model yang sama; saat dibuka lagi ResizeObserver app.js
+   mem-frame ulang. */
 body.mode-agent.agent-dock-collapsed #stage,
 body.mode-agent.agent-dock-collapsed #agent-tech,
+body.mode-agent.agent-dock-collapsed #wb-dock-divider,
 body.mode-agent.agent-dock-collapsed #sb-gutter { display: none !important; }
 body.mode-agent.agent-dock-collapsed .app {
-  grid-template-columns: auto minmax(360px, 1fr) 0px;
+  grid-template-columns: auto minmax(360px, 1fr) 0px 0px;
 }
 
 /* Kapsul presence saat dock terlipat — melayang kanan-bawah, sunyi */
@@ -911,7 +965,7 @@ body.mode-agent.agent-dock-collapsed .wb-dock-capsule { display: inline-flex; }
 
 /* ── Responsive: layar sempit → dock otomatis menyusut ──────────── */
 @media (max-width: 980px) {
-  body.mode-agent .app { --wb-dock-w: 240px; }
+  body.mode-agent .app:not([style*="--wb-dock-w"]) { --wb-dock-w: 240px; }
 }
 @media (max-width: 780px) {
   body.mode-agent #agent-tech { display: none; }
