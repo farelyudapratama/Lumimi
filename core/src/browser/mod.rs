@@ -785,8 +785,10 @@ const MAX_INSPECT_CHARS: usize = 3500;
 /// Eksekusi tool browser_* dari loop agent. Return JSON string (atau ERROR: …).
 pub async fn agent_exec(root: &Path, name: &str, args: &Value) -> String {
     // Browser ditutup user di tengah task → buka ulang otomatis sebelum
-    // tool mana pun jalan (kecuali status/close yang memang tidak butuh).
-    if name != "browser_status" && name != "browser_close" {
+    // tool jalan. KHUSUS `browser_open`: justru tugasknya MEMBUKA browser
+    // bila belum ada — guard di sini malah menutup pintunya (bug 2026-10-06:
+    // "browser CDP terputus" setiap task). status/close juga tak butuh.
+    if !matches!(name, "browser_status" | "browser_close" | "browser_open") {
         if let Err(e) = ensure_alive(root).await {
             return format!("ERROR: {e}");
         }
@@ -1021,6 +1023,23 @@ mod tests {
             err.contains("gagal meluncurkan"),
             "harusnya sampai tahap spawn — malah: {err}"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Jalur agent nyata: browser_open lewat agent_exec HARUS bisa membuka
+    /// browser dari nol (guard ensure_alive TIDAK boleh menutup pintunya —
+    /// bug 2026-10-06). Launch browser sungguhan → tandai #[ignore], jalankan
+    /// manual: `cargo test -p live2d-core browser_open_via_agent -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn browser_open_via_agent_exec_dari_nol() {
+        let root = std::env::temp_dir().join("wb-agent-open-test");
+        std::fs::create_dir_all(&root).unwrap();
+        let out = agent_exec(&root, "browser_open", &serde_json::json!({ "url": "http://example.com" })).await;
+        assert!(!out.starts_with("ERROR"), "browser_open gagal: {out}");
+        assert!(out.contains("\"running\":true"), "browser tidak jalan: {out}");
+        let out2 = agent_exec(&root, "browser_close", &serde_json::json!({})).await;
+        assert!(out2.contains("\"ok\":true"));
         let _ = std::fs::remove_dir_all(root);
     }
 
