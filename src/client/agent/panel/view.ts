@@ -1,5 +1,16 @@
 /**
- * client/agent/panel/view.ts — Renderer DOM transcript agent.
+ * client/agent/panel/view.ts — Renderer DOM panel agent (Fase 3.5 Workbench).
+ *
+ * HIERARKI INFORMASI (mental model: agent workbench + companion presence):
+ *   1. statebar      — keadaan ambient (Siap/Menyusun/Menunggu…) + toggle.
+ *   2. TASK header   — objek kerja aktif: teks tugas + status live + plan.
+ *   3. WORK region   — worklog eksekusi per giliran (segmen collapsible:
+ *                      baris tool, narasi kerja, perubahan file).
+ *   4. CONVERSATION  — percakapan user↔agent sebagai strip ringkas di bawah;
+ *                      BUKAN lagi kanvas utama.
+ *   5. Decision bar  — kartu approval sebagai titik kontrol eksekusi,
+ *                      pinned tepat di atas composer.
+ *
  * Rekonsiliasi keyed: setiap blok punya id+rev; elemen dibangun ulang hanya
  * bila rev berubah — teks yang sedang streaming tidak memicu rebuild panel.
  * Anggaran render dijaga: warna solid + hairline, tanpa blur/gradient.
@@ -37,7 +48,7 @@ export type PanelViewDeps = {
   onCancelTask?: (taskId: string) => void;
   /** Lipat/buka presence dock Live2D (body class + persist di panel). */
   onToggleStageDock?: () => void;
-  /** Ringkas/kembalikan transkrip (class pada as-tl + persist di panel). */
+  /** Ringkas/kembalikan transkrip (class pada as-conv + persist di panel). */
   onToggleCompact?: () => void;
 };
 
@@ -105,7 +116,6 @@ function buildMd(tokens: MdToken[]): HTMLElement {
           list.appendChild(li);
         }
         root.appendChild(list);
-        break;
       }
     }
   }
@@ -116,21 +126,23 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   const lifecycle = createLifecycle();
   const t = deps.t;
   // ── Skeleton panel ──────────────────────────────────────────────
-  // Garis keadaan = anchor utama harness: state machine + objek kerja +
-  // elapsed + hitungan, dengan kontrol lipat di ujung kanan (Fase 3).
+  // Garis keadaan = anchor harness: state machine + objek kerja + elapsed +
+  // hitungan, dengan kontrol lipat di ujung kanan + chip allowlist sesi.
   const statusbar = el("div", "as-statebar");
   const stDot = el("span", "as-state-dot");
   const stWord = el("span", "as-state-word");
   const stWhat = el("span", "as-state-what");
   const stElapsed = el("span", "as-state-elapsed");
   const stCounts = el("span", "as-state-counts");
+  const stAllow = el("span", "as-state-allow") as HTMLElement;
+  stAllow.hidden = true;
   const btnCompact = el("button", "as-state-btn") as HTMLButtonElement;
   const btnDock = el("button", "as-state-btn") as HTMLButtonElement;
   btnCompact.type = "button";
   btnDock.type = "button";
-  statusbar.append(stDot, stWord, stWhat, stElapsed, stCounts, btnCompact, btnDock);
+  statusbar.append(stDot, stWord, stWhat, stElapsed, stCounts, stAllow, btnCompact, btnDock);
   let lastSv: AgentStateView | null = null;
-  let lastUi: { compact: boolean; stageHidden: boolean } = { compact: false, stageHidden: false };
+  let lastUi: { compact: boolean; stageHidden: boolean; allowlist?: string[] } = { compact: false, stageHidden: false };
   lifecycle.interval(() => paintStateElapsed(), 1000); // detik berjalan tanpa poll
 
   function paintStateElapsed(): void {
@@ -149,7 +161,21 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     waitingApproval: "as.state.waitingApproval",
   };
 
-  function renderStateLine(sv: AgentStateView, ui: { compact: boolean; stageHidden: boolean }): void {
+  /** Chip allowlist sesi: hanya tool mutating yang relevan (safe tak pernah
+   *  menggerbangi). Jawaban atas "kok tadi sekali izin sekarang bebas?". */
+  function paintAllowChip(list: string[] | undefined): void {
+    const mutating = [...new Set((list || [])
+      .map((a) => a.split(":")[0])
+      .filter((n) => deps.toolLevel?.(n) === "mutating"))];
+    stAllow.hidden = mutating.length === 0;
+    if (!mutating.length) { stAllow.textContent = ""; stAllow.title = ""; return; }
+    stAllow.textContent = mutating.length === 1
+      ? t("as.allowChip1", { name: mutating[0] })
+      : t("as.allowChipN", { n: mutating.length });
+    stAllow.title = t("as.allowChipTitle") + "\n" + mutating.join("\n");
+  }
+
+  function renderStateLine(sv: AgentStateView, ui: { compact: boolean; stageHidden: boolean; allowlist?: string[] }): void {
     lastSv = sv;
     lastUi = ui;
     statusbar.dataset.state = sv.state;
@@ -161,20 +187,28 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       sv.stepsTotal > 0 ? t("as.state.steps", { done: sv.stepsDone, total: sv.stepsTotal }) : "",
       sv.filesTouched > 0 ? t("as.state.files", { n: sv.filesTouched }) : "",
     ].filter(Boolean).join(" · ");
+    paintAllowChip(ui.allowlist);
     btnCompact.textContent = ui.compact ? t("as.compact.expand") : t("as.compact.collapse");
     btnDock.textContent = ui.stageHidden ? t("as.dock.show") : t("as.dock.hide");
     btnDock.title = btnDock.textContent;
-    tl.classList.toggle("compact", ui.compact);
+    conv.classList.toggle("compact", ui.compact);
   }
   lifecycle.listen(btnCompact, "click", () => deps.onToggleCompact?.());
   lifecycle.listen(btnDock, "click", () => deps.onToggleStageDock?.());
 
-  const tl = el("div", "as-tl");
-  tl.setAttribute("aria-live", "polite");
+  // ── Dua wilayah utama workbench ─────────────────────────────────
+  // WORK: worklog eksekusi (kartu tool/status/changes/narasi per giliran).
+  // CONVERSATION: strip percakapan user↔agent — turun hierarki, tetap ada.
+  const work = el("div", "as-work");
+  work.setAttribute("aria-live", "polite");
+  const workEmpty = el("div", "as-wempty", t("as.work.empty"));
+  const conv = el("div", "as-conv");
+  conv.setAttribute("aria-live", "polite");
 
   // Zona kontrol eksekusi: kartu approval pinned di atas composer — bagian
   // dari kontrol kerja agent, bukan pesan yang tenggelam di transkrip.
   const controls = el("div", "as-controls empty");
+  const ctlHead = el("div", "as-controls-hd", "⏸ " + t("as.decision.waiting"));
   const ctlRendered = new Map<string, HTMLElement>();
 
   // ── Tab teknis: Review / Terminal / Browser ──────────────────────
@@ -241,7 +275,8 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   root.appendChild(taskBox);
   root.appendChild(queueBox);
   root.appendChild(memBox);
-  root.appendChild(tl);
+  root.appendChild(work);
+  root.appendChild(conv);
   root.appendChild(controls);
   if (techRoot) {
     techRoot.appendChild(tabsBar);
@@ -305,10 +340,10 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   }
 
   /**
-   * Kartu approval untuk zona kontrol eksekusi. Dua gate TETAP berbeda
-   * (Fase 2): kartu PLAN (setujui rencana kerja sebelum eksekusi, dirender
-   * sebagai rencana) vs kartu IZIN TOOL (mutating tunggal, bisa membawa
-   * checkbox "selalu izinkan" — allowlist sesi di core).
+   * Kartu approval untuk decision bar. Dua gate TETAP berbeda (Fase 2):
+   * kartu PLAN (setujui rencana kerja sebelum eksekusi) vs kartu IZIN TOOL
+   * (mutating tunggal, bisa membawa checkbox "selalu izinkan" — allowlist
+   * sesi di core).
    */
   function buildApprovalCard(ap: ApprovalView): HTMLElement {
     const w = el("div", "as-blk as-appr");
@@ -381,18 +416,20 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   }
 
   /**
-   * Zona kontrol eksekusi: kartu approval pinned (sumber kebenaran =
-   * pendingApprovals dari /status). Kosong → tersembunyi total.
+   * Decision bar: kartu approval pinned (sumber kebenaran = pendingApprovals
+   * dari /status) + header "menunggu keputusan". Kosong → tersembunyi total.
    */
   function renderControls(list: ApprovalView[]): void {
     const sig = list.map((a) => a.apId + ":" + a.tool + ":" + (a.plan ? "p" : "t")).join(",");
     if (!list.length) {
       controls.classList.add("empty");
-      controls.textContent = "";
+      if (ctlHead.parentElement === controls) ctlHead.remove();
+      for (const [, node] of [...ctlRendered]) node.remove();
       ctlRendered.clear();
       return;
     }
     controls.classList.remove("empty");
+    if (ctlHead.parentElement !== controls) controls.insertBefore(ctlHead, controls.firstChild);
     const seen = new Set<string>();
     for (const ap of list) {
       seen.add(ap.apId);
@@ -413,7 +450,8 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
   }
 
   /** Kartu ringkasan giliran: "N file berubah +a −r" + baris per file. */
-  function buildChanges(b: Extract<Block, { kind: "changes" }>): HTMLElement {    const w = el("div", "as-blk as-chg");
+  function buildChanges(b: Extract<Block, { kind: "changes" }>): HTMLElement {
+    const w = el("div", "as-blk as-chg");
     const hd = el("div", "as-chg-hd");
     hd.appendChild(el("span", "as-chg-ttl", t("as.chg.files", { n: b.files.length })));
     const stat = el("span", "as-diff-stat");
@@ -445,11 +483,11 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     return w;
   }
 
-  function nearBottom(): boolean {
-    return tl.scrollHeight - tl.scrollTop - tl.clientHeight < 60;
+  function nearBottom(elm: HTMLElement): boolean {
+    return elm.scrollHeight - elm.scrollTop - elm.clientHeight < 60;
   }
-  function scrollToBottom(): void {
-    tl.scrollTop = tl.scrollHeight;
+  function stickTo(elm: HTMLElement): void {
+    elm.scrollTop = elm.scrollHeight;
   }
 
   function buildBlock(b: Block): HTMLElement {
@@ -527,9 +565,8 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
         return w;
       }
       case "approval": {
-        // Kartu approval TIDAK dirender di aliran transkrip — semua kartu
-        // tampil di zona kontrol eksekusi (renderControls), pinned di atas
-        // composer sebagai bagian dari kontrol kerja agent (Fase 3).
+        // Kartu approval TIDAK dirender di aliran — semua kartu tampil di
+        // decision bar (renderControls), pinned di atas composer.
         return buildApprovalCard({ apId: b.apId, tool: b.tool, args: b.args, plan: b.plan });
       }
       case "subagent": {
@@ -545,227 +582,17 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     }
   }
 
-  function render(blocks: Block[]): void {
-    const stick = nearBottom();
-    const segs = computeSegments(blocks);
-    const seen = new Set<number>();
-    const segKeys = new Set<string>();
-    let prev: HTMLElement | null = null; // elemen top-level terakhir di tl
-    for (const seg of segs) {
-      if (!seg.trigger) {
-        // Blok leading (sebelum user pertama): tanpa header segmen.
-        for (const b of [seg.trigger, ...seg.work, seg.final].filter(Boolean) as Block[]) {
-          seen.add(b.id);
-          prev = renderOne(b, tl, prev);
-        }
-        continue;
-      }
-      seen.add(seg.trigger.id);
-      prev = renderOne(seg.trigger, tl, prev);
-      if (seg.work.length) {
-        prev = renderSegment(seg, prev, seen, segKeys);
-      }
-      if (seg.final) {
-        seen.add(seg.final.id);
-        prev = renderOne(seg.final, tl, prev);
-      }
-    }
-    for (const [id, cur] of rendered) {
-      if (!seen.has(id)) {
-        cur.el.remove();
-        rendered.delete(id);
-        openTools.delete(id);
-        const pref = id + ":";
-        for (const k of [...openDiffs]) if (k.startsWith(pref)) openDiffs.delete(k);
-      }
-    }
-    pruneStepGroups(seen);
-    for (const [key, g] of segGroups) {
-      if (!segKeys.has(key)) {
-        g.wrap.remove();
-        segGroups.delete(key);
-      }
-    }
-    if (stick) scrollToBottom();
+  /** Baris narasi kerja (agent bicara DI TENGAH eksekusi) — kutipan redup,
+   *  bukan bubble chat. */
+  function buildWorkNote(b: Extract<Block, { kind: "agent" }>): HTMLElement {
+    const w = el("div", "as-note");
+    const txt = el("span", "as-note-txt", b.text);
+    w.appendChild(txt);
+    if (b.streaming) w.classList.add("streaming");
+    return w;
   }
 
-  // State segmen giliran. Segmen terbuka (belum ada final) tampil terbuka;
-  // begitu selesai/terputus ia auto-collapse — kecuali user memilih sendiri.
-  const segGroups = new Map<string, {
-    wrap: HTMLElement;
-    body: HTMLElement;
-    sig: string;
-    userToggled: boolean | null;
-  }>();
-
-  /**
-   * Bungkus pekerjaan satu giliran jadi segmen collapsible: header berisi
-   * status + hitungan alat + durasi; body berisi kartu tool (dengan grup run
-   * ≥2 ala coding-agent). Kartu child dirender keyed — segmen hanya shell.
-   */
-  function renderSegment(
-    seg: WorkSegment,
-    prev: HTMLElement | null,
-    seen: Set<number>,
-    segKeys: Set<string>,
-  ): HTMLElement {
-    segKeys.add(seg.key);
-    const state = seg.open ? "open" : seg.interrupted ? "interrupted" : "completed";
-    const workSig = seg.work.map((b) => b.id + ":" + (b.kind === "tool" ? b.status : b.kind) + ":" + b.rev).join(",");
-    const sig = state + "|" + workSig;
-    let g = segGroups.get(seg.key);
-    if (!g) {
-      const wrap = el("div", "as-seg");
-      const hd = el("button", "as-seg-hd") as HTMLButtonElement;
-      hd.type = "button";
-      hd.appendChild(el("span", "as-seg-state"));
-      hd.appendChild(el("span", "as-seg-cnt"));
-      hd.appendChild(el("span", "as-seg-dur"));
-      hd.appendChild(el("span", "as-chev", "▾"));
-      const body = el("div", "as-seg-work");
-      hd.addEventListener("click", () => {
-        const isOpen = wrap.classList.contains("open");
-        wrap.classList.toggle("open", !isOpen);
-        wrap.classList.toggle("collapsed", isOpen);
-        if (g) g.userToggled = !isOpen;
-      });
-      wrap.append(hd, body);
-      g = { wrap, body, sig: "", userToggled: null };
-      segGroups.set(seg.key, g);
-      if (prev) prev.after(wrap);
-      else tl.insertBefore(wrap, tl.firstChild);
-    }
-    if (g.sig !== sig) {
-      (g.wrap.querySelector(".as-seg-state") as HTMLElement).textContent = seg.open
-        ? t("as.seg.running")
-        : seg.interrupted
-          ? t("as.seg.interrupted")
-          : t("as.seg.completed");
-      (g.wrap.querySelector(".as-seg-cnt") as HTMLElement).textContent = (() => {
-        // Hitungan ALAT hanya tool nyata — narasi agent bukan alat.
-        const toolCount = seg.toolsOk + seg.toolsFail;
-        if (toolCount === 0) return "";
-        return seg.toolsFail > 0
-          ? t("as.seg.countFail", { ok: seg.toolsOk, fail: seg.toolsFail })
-          : t("as.seg.count", { n: toolCount });
-      })();
-      (g.wrap.querySelector(".as-seg-dur") as HTMLElement).textContent = seg.open
-        ? (seg.startedAt ? formatDuration(Date.now() - seg.startedAt) : "")
-        : (seg.startedAt && seg.endedAt ? formatDuration(seg.endedAt - seg.startedAt) : "");
-      const openNow = g.userToggled != null ? g.userToggled : seg.open;
-      g.wrap.classList.toggle("open", openNow);
-      g.wrap.classList.toggle("collapsed", !openNow);
-      g.sig = sig;
-    }
-    let p: HTMLElement | null = null;
-    let i = 0;
-    while (i < seg.work.length) {
-      const b = seg.work[i];
-      if (b.kind !== "tool") {
-        p = renderInto(g.body, b, seen);
-        i++;
-        continue;
-      }
-      // Run tool berurutan ≥2 → grup collapsible (pola ToolLayout ZCode).
-      let j = i;
-      const run: Extract<Block, { kind: "tool" }>[] = [];
-      while (j < seg.work.length && seg.work[j].kind === "tool") {
-        run.push(seg.work[j] as Extract<Block, { kind: "tool" }>);
-        j++;
-      }
-      if (run.length >= 2) {
-        for (const tb of run) seen.add(tb.id);
-        p = renderStepGroup(run, g.body, p, seen);
-      } else {
-        p = renderInto(g.body, b, seen);
-      }
-      i = j;
-    }
-    return g.wrap;
-  }
-
-  /** Render satu blok ke posisi prev (top-level); kembalikan elemen terakhir. */
-  function renderOne(b: Block, container: HTMLElement, prev: HTMLElement | null): HTMLElement {
-    const cur = rendered.get(b.id);
-    if (cur && cur.rev === b.rev) return cur.el;
-    const node = buildBlock(b);
-    if (cur) {
-      cur.el.replaceWith(node);
-      cur.el = node;
-      cur.rev = b.rev;
-    } else {
-      if (prev) prev.after(node);
-      else container.insertBefore(node, container.firstChild);
-      rendered.set(b.id, { el: node, rev: b.rev });
-    }
-    return node;
-  }
-
-  // State grup step. Grup yang masih bekerja terbuka; begitu semua tool
-  // terminal (done/error) ia auto-collapse agar log tak menggeser TASK/chat.
-  // Setelah user men-toggle manual, pilihan user menang atas auto-collapse.
-  const stepGroups = new Map<string, {
-    wrap: HTMLElement;
-    body: HTMLElement;
-    sig: string;
-    userToggled: boolean;
-  }>();
-
-  /**
-   * Bungkus run tool jadi grup collapsible. Kartu tool dirender normal di
-   * dalam body — recon keyed tetap jalan; grup di-rebuild hanya bila
-   * signature (urutan id + status + rev) berubah.
-   */
-  function renderStepGroup(
-    run: Extract<Block, { kind: "tool" }>[],
-    container: HTMLElement,
-    prev: HTMLElement | null,
-    seen: Set<number>,
-  ): HTMLElement {
-    // Key stabil = id tool pertama. Jumlah child boleh bertambah selama live
-    // tanpa membuat wrapper duplikat; signature tetap memuat seluruh child.
-    const groupKey = String(run[0].id);
-    const sig = run.map((b) => b.id + ":" + b.status + ":" + b.rev).join(",");
-    let g = stepGroups.get(groupKey);
-    const terminal = toolRunIsTerminal(run);
-    if (g && g.sig !== sig) {
-      // Rebuild dalam: body dikosongkan, kartu child dirender ulang.
-      g.body.textContent = "";
-      for (const tb of run) renderInto(g.body, tb, seen);
-      g.sig = sig;
-      updateStepHeader(g.wrap, run);
-      // Grup yang selesai menutup otomatis, kecuali user sudah memilih state.
-      if (!g.userToggled) g.wrap.classList.toggle("closed", terminal);
-      return g.wrap;
-    }
-    if (!g) {
-      const wrap = el("div", "as-step");
-      const hd = el("button", "as-step-hd") as HTMLButtonElement;
-      hd.type = "button";
-      hd.appendChild(el("span", "as-step-icon", "⚡"));
-      hd.appendChild(el("span", "as-step-ttl"));
-      hd.appendChild(el("span", "as-step-cnt"));
-      hd.appendChild(el("span", "as-chev", "▾"));
-      const body = el("div", "as-step-bd");
-      g = { wrap, body, sig: "", userToggled: false };
-      hd.addEventListener("click", () => {
-        wrap.classList.toggle("closed");
-        if (g) g.userToggled = true;
-      });
-      wrap.appendChild(hd);
-      wrap.appendChild(body);
-      stepGroups.set(groupKey, g);
-      if (prev) prev.after(wrap);
-      else container.insertBefore(wrap, container.firstChild);
-      for (const tb of run) renderInto(body, tb, seen);
-      g.sig = sig;
-      updateStepHeader(wrap, run);
-      wrap.classList.toggle("closed", terminal);
-    }
-    return g.wrap;
-  }
-
-  /** renderOne yang menautkan ke parent tertentu (dipakai grup & segmen). */
+  /** Render satu blok ke wilayah tertentu (keyed by id+rev). */
   function renderInto(parent: HTMLElement, b: Block, seen: Set<number>): HTMLElement {
     seen.add(b.id);
     const cur = rendered.get(b.id);
@@ -773,7 +600,7 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       if (cur.el.parentElement !== parent) parent.appendChild(cur.el);
       return cur.el;
     }
-    const node = buildBlock(b);
+    const node = b.kind === "agent" ? buildWorkNote(b) : buildBlock(b);
     if (cur) {
       cur.el.replaceWith(node);
       cur.el = node;
@@ -785,25 +612,133 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     return node;
   }
 
-  /** Header grup: status gabungan + jumlah langkah nyata. */
-  function updateStepHeader(wrap: HTMLElement, run: Extract<Block, { kind: "tool" }>[]): void {
-    const last = run[run.length - 1];
-    const terminal = toolRunIsTerminal(run);
-    const hasError = run.some((tool) => tool.status === "error");
-    wrap.dataset.status = hasError ? "error" : last.status;
-    (wrap.querySelector(".as-step-ttl") as HTMLElement).textContent =
-      t(terminal ? (hasError ? "as.step.failed" : "as.step.completed") : "as.step.title");
-    (wrap.querySelector(".as-step-cnt") as HTMLElement).textContent =
-      t("as.step.count", { n: run.length });
+  // ── Worklog eksekusi (segmen giliran) ────────────────────────────
+  // Satu segmen = satu giliran kerja. Segmen AKTIF tampil penuh (header
+  // "kerja aktif" + baris-baris kegiatan); segmen selesai menyusut jadi satu
+  // baris ringkas (progressive disclosure). Pilihan lipat user menang.
+  const wsegs = new Map<string, {
+    wrap: HTMLElement;
+    body: HTMLElement;
+    sig: string;
+    userToggled: boolean | null;
+  }>();
+
+  function renderWorkSegment(seg: WorkSegment, seen: Set<number>, order: number): void {
+    const state = seg.open ? "open" : seg.interrupted ? "interrupted" : "completed";
+    const workSig = seg.work.map((b) => b.id + ":" + (b.kind === "tool" ? b.status : b.kind) + ":" + b.rev).join(",");
+    const sig = state + "|" + workSig;
+    let g = wsegs.get(seg.key);
+    if (!g) {
+      const wrap = el("div", "as-wseg");
+      const hd = el("button", "as-wseg-hd") as HTMLButtonElement;
+      hd.type = "button";
+      hd.appendChild(el("span", "as-wseg-state"));
+      hd.appendChild(el("span", "as-wseg-task"));
+      hd.appendChild(el("span", "as-wseg-cnt"));
+      hd.appendChild(el("span", "as-wseg-dur"));
+      hd.appendChild(el("span", "as-chev", "▾"));
+      const body = el("div", "as-wseg-work");
+      hd.addEventListener("click", () => {
+        const isOpen = wrap.classList.contains("open");
+        wrap.classList.toggle("open", !isOpen);
+        wrap.classList.toggle("closed", isOpen);
+        if (g) g.userToggled = !isOpen;
+      });
+      wrap.append(hd, body);
+      g = { wrap, body, sig: "", userToggled: null };
+      wsegs.set(seg.key, g);
+      work.appendChild(wrap);
+    }
+    // Jaga urutan segmen = urutan blok (appendChild hanya saat perlu agar
+    // fokus/scroll tidak terganggu tiap render).
+    if (work.children[order] !== g.wrap) work.insertBefore(g.wrap, work.children[order] ?? null);
+    if (g.sig !== sig) {
+      const st = g.wrap.querySelector(".as-wseg-state") as HTMLElement;
+      st.textContent = seg.open ? t("as.work.current") : seg.interrupted ? t("as.seg.interrupted") : t("as.seg.completed");
+      g.wrap.dataset.state = seg.open ? "open" : seg.interrupted ? "interrupted" : "completed";
+      // Snippet tugas: konteks segmen selesai (task text di conv tidak
+      // bersebelahan lagi — ringkasan harus bisa berdiri sendiri).
+      const snippet = (seg.trigger?.text ?? "").trim().slice(0, 64);
+      (g.wrap.querySelector(".as-wseg-task") as HTMLElement).textContent = snippet;
+      const toolCount = seg.toolsOk + seg.toolsFail;
+      (g.wrap.querySelector(".as-wseg-cnt") as HTMLElement).textContent = toolCount === 0 ? "" :
+        seg.toolsFail > 0
+          ? t("as.seg.countFail", { ok: seg.toolsOk, fail: seg.toolsFail })
+          : t("as.seg.count", { n: toolCount });
+      (g.wrap.querySelector(".as-wseg-dur") as HTMLElement).textContent = seg.open
+        ? (seg.startedAt ? formatDuration(Date.now() - seg.startedAt) : "")
+        : (seg.startedAt && seg.endedAt ? formatDuration(seg.endedAt - seg.startedAt) : "");
+      const openNow = g.userToggled != null ? g.userToggled : seg.open;
+      g.wrap.classList.toggle("open", openNow);
+      g.wrap.classList.toggle("closed", !openNow);
+      g.sig = sig;
+    }
+    for (const b of seg.work) renderInto(g.body, b, seen);
   }
 
-  function pruneStepGroups(seenIds: Set<number>): void {
-    for (const [ids, g] of stepGroups) {
-      const first = Number(ids.split(",")[0]);
-      if (!seenIds.has(first)) {
-        g.wrap.remove();
-        stepGroups.delete(ids);
+  function render(blocks: Block[]): void {
+    const stickWork = nearBottom(work);
+    const stickConv = nearBottom(conv);
+    const segs = computeSegments(blocks);
+    const seen = new Set<number>();
+    let order = 0;
+    for (const seg of segs) {
+      if (!seg.trigger) {
+        // Blok leading (sebelum user pertama): status/awal sesi → work;
+        // narasi/final → conv.
+        for (const b of seg.work) {
+          seen.add(b.id);
+          if (b.kind === "final" || b.kind === "speak") renderInto(conv, b, seen);
+          else renderInto(work, b, seen);
+        }
+        if (seg.final) renderInto(conv, seg.final, seen);
+        continue;
       }
+      seen.add(seg.trigger.id);
+      renderInto(conv, seg.trigger, seen);
+      if (seg.work.length) {
+        renderWorkSegment(seg, seen, order);
+        order++;
+      }
+      if (seg.final) {
+        seen.add(seg.final.id);
+        renderInto(conv, seg.final, seen);
+      }
+    }
+    // Buang blok yang sudah tidak ada (approval reconcile, dsb.).
+    for (const [id, cur] of [...rendered]) {
+      if (!seen.has(id)) {
+        cur.el.remove();
+        rendered.delete(id);
+        openTools.delete(id);
+        const pref = id + ":";
+        for (const k of [...openDiffs]) if (k.startsWith(pref)) openDiffs.delete(k);
+      }
+    }
+    // Buang segmen yang hilang + padatkan urutan.
+    let expected = 0;
+    for (const seg of segs) {
+      if (!seg.work.length) continue;
+      const g = wsegs.get(seg.key);
+      if (g && work.children[expected] !== g.wrap) work.insertBefore(g.wrap, work.children[expected] ?? null);
+      expected++;
+    }
+    for (const [key, g] of [...wsegs]) {
+      if (!segs.some((s) => s.key === key)) {
+        g.wrap.remove();
+        wsegs.delete(key);
+      }
+    }
+    // Empty state work region: jujur tapi tenang — bukan kartu kosong.
+    workEmpty.remove();
+    if (!work.children.length) work.appendChild(workEmpty);
+    if (stickWork) stickTo(work);
+    if (stickConv) stickTo(conv);
+    // Kunci scroll: konten menyusut (blok dibuang) tidak boleh meninggalkan
+    // scrollTop nyangkut di ruang kosong.
+    for (const elm of [work, conv]) {
+      const max = Math.max(0, elm.scrollHeight - elm.clientHeight);
+      if (elm.scrollTop > max) elm.scrollTop = max;
     }
   }
 
@@ -833,10 +768,15 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       const row = el("div", "as-rev-row");
       row.appendChild(el("span", "as-chg-kind", e.measured ? e.kind : t("as.review.touched")));
       row.appendChild(el("span", "as-rev-path", e.path));
-      const st = el("span", "as-diff-stat");
-      st.appendChild(el("span", "add", "+" + e.added));
-      st.appendChild(el("span", "del", "−" + e.removed));
-      row.appendChild(st);
+      // Stat +a −r hanya untuk entri TERUKUR (dari kartu changes). Entri
+      // "tersentuh" dari server tidak punya angka — menampilkan +0 −0 itu
+      // bohong bagi user.
+      if (e.measured) {
+        const st = el("span", "as-diff-stat");
+        st.appendChild(el("span", "add", "+" + e.added));
+        st.appendChild(el("span", "del", "−" + e.removed));
+        row.appendChild(st);
+      }
       if (opts.canRevert) {
         const rv = el("button", "mini-btn as-rev-revert", t("as.review.revert")) as HTMLButtonElement;
         rv.type = "button";
@@ -866,42 +806,45 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     }
   }
 
-  // ── Kartu TASK (pusat perhatian) ────────────────────────────────
+  // ── Kartu TASK (objek kerja utama) ───────────────────────────────
   /**
-   * Hero card: apa yang agent kerjakan + checklist plan live. Hilang bila
-   * tak ada task & tak ada plan (mode ngobrol biasa) — panel kembali polos.
+   * Header kerja: teks tugas besar + status live (state, objek, elapsed) +
+   * checklist plan dengan langkah aktif. Tanpa task & plan → tersembunyi;
+   * orientasi kosong ditangani empty-state work region.
    */
-  function renderTask(task: string, plan: PlanItem[]): void {
+  function renderTask(task: string, plan: PlanItem[], sv: AgentStateView | null): void {
     taskBox.textContent = "";
     const tsk = String(task || "").trim();
     const hasPlan = !!(plan && plan.length);
     if (!tsk && !hasPlan) {
-      // TASK tetap hadir sebagai orientasi utama, tetapi empty state harus
-      // jujur dan memberi tindakan berikutnya — bukan kartu kosong/fake task.
-      taskBox.classList.remove("hidden");
-      const head = el("div", "as-task-head");
-      head.appendChild(el("span", "as-task-label", t("as.task")));
-      taskBox.appendChild(head);
-      taskBox.appendChild(el("div", "as-task-empty", t("as.task.empty")));
+      taskBox.classList.add("hidden");
+      taskBox.classList.remove("has-state");
       return;
     }
     taskBox.classList.remove("hidden");
-    if (tsk) {
-      const head = el("div", "as-task-head");
-      head.appendChild(el("span", "as-task-label", t("as.task")));
-      if (hasPlan) {
-        const done = plan.filter((p) => p.status === "done").length;
-        head.appendChild(el("span", "as-task-prog", t("as.plan.progress", { done, total: plan.length })));
-      }
-      taskBox.appendChild(head);
-      taskBox.appendChild(el("div", "as-task-text", tsk));
-    } else if (hasPlan) {
-      // tanpa task (mis. hydrate lama) — label plan saja
-      const head = el("div", "as-task-head");
-      head.appendChild(el("span", "as-task-label", t("as.planTitle")));
+    const head = el("div", "as-task-head");
+    head.appendChild(el("span", "as-task-label", t("as.task")));
+    if (hasPlan) {
       const done = plan.filter((p) => p.status === "done").length;
       head.appendChild(el("span", "as-task-prog", t("as.plan.progress", { done, total: plan.length })));
-      taskBox.appendChild(head);
+    }
+    taskBox.appendChild(head);
+    if (tsk) {
+      taskBox.appendChild(el("div", "as-task-text", tsk));
+    }
+    // Status live menempel di task — jawaban instan "sekarang di mana?"
+    // tanpa membaca percakapan.
+    if (sv) {
+      taskBox.classList.add("has-state");
+      taskBox.dataset.state = sv.state;
+      const st = el("div", "as-task-status");
+      st.appendChild(el("span", "as-task-dot"));
+      st.appendChild(el("span", "as-task-stword", t(stateWordKey[sv.state])));
+      if (sv.what) st.appendChild(el("span", "as-task-stwhat", sv.what));
+      if (sv.elapsedMs > 0) st.appendChild(el("span", "as-task-stelapsed", formatDuration(sv.elapsedMs)));
+      taskBox.appendChild(st);
+    } else {
+      taskBox.classList.remove("has-state");
     }
     if (hasPlan) {
       // Langkah aktif disorot di atas checklist — jawaban langsung atas
@@ -986,9 +929,9 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
     rendered.clear();
     openTools.clear();
     openDiffs.clear();
-    stepGroups.clear();
-    segGroups.clear();
-    tl.textContent = "";
+    wsegs.clear();
+    work.textContent = "";
+    conv.textContent = "";
   }
 
   function destroy(): void {

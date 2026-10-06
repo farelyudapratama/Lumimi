@@ -162,11 +162,17 @@ export function startAssistantPanel(): () => void {
   let lastHistoryCount = -1;
   let liveAsk: { abort: AbortController; receivedAnyEvent: boolean } | null = null;
   let localApprovals = new Set<string>(); // apId yang panel ini yang menyelesaikan
+  // Antrean klik approval saat panel sedang men-streaming giliran lain.
+  // Dulu klik saat streaming diabaikan senyap SETELAH tombol di-disable —
+  // kartu jadi mati permanen dan user terjebak sampai reload.
+  let queuedApprovals: Array<{ id: string; ok: boolean; always: boolean }> = [];
+  let sessionAllowlist: string[] = []; // cermin /status.allowlist (chip statebar)
+  let sentWorkDir: string | null = null; // workdir terakhir yang dikirim ke /start
 
   // ── Util kecil ──────────────────────────────────────────────────
   let currentPlan: any[] = [];
   const render = () => {
-    view.renderTask(transcript.currentTask(), currentPlan);
+    view.renderTask(transcript.currentTask(), currentPlan, lastSv);
     view.render(transcript.blocks);
   };
 
@@ -273,6 +279,17 @@ export function startAssistantPanel(): () => void {
     setInputEnabled(true);
     refreshStatus();
     syncHistory();
+    // Siram antrean approval yang diklik saat giliran lain masih streaming —
+    // keputusan user tidak pernah hilang.
+    if (queuedApprovals.length && !liveAsk) {
+      const next = queuedApprovals.shift()!;
+      localApprovals.add(next.id);
+      transcript.resolveApprovalVisual(next.id, false);
+      render();
+      const body: Record<string, unknown> = { id: next.id, approve: next.ok };
+      if (next.always) body.always = true;
+      void runStream("/api/assistant/approve-stream", body, { path: "/api/assistant/approve", body });
+    }
   }
 
   async function runStream(
@@ -361,7 +378,13 @@ export function startAssistantPanel(): () => void {
   }
 
   function approve(apId: string, ok: boolean, always = false): void {
-    if (liveAsk) return;
+    if (liveAsk) {
+      // Panel sedang men-streaming (giliran lain) — antrekan keputusan user,
+      // disiram finishLive() begitu stream selesai. Tombol tetap disabled
+      // (visual konsisten) tapi keputusan TIDAK hilang.
+      queuedApprovals.push({ id: apId, ok, always });
+      return;
+    }
     localApprovals.add(apId);
     // Metamorfosis: kartu izin hilang; kartu tool (dari tool_call SSE /
     // hydrate "MENUNGGU PERSETUJUAN") tetap "menjalankan…" sampai
@@ -455,6 +478,7 @@ export function startAssistantPanel(): () => void {
     view.renderStateLine(lastSv, {
       compact: compactMode,
       stageHidden: stageDockHidden,
+      allowlist: sessionAllowlist,
     });
     // Zona kontrol eksekusi: kartu approval pinned di atas composer.
     view.renderControls(
@@ -470,7 +494,7 @@ export function startAssistantPanel(): () => void {
     setCancelEnabled(!!st.running && (st.busy || !!liveAsk));
     // Kartu TASK (pusat perhatian): tugas berjalan + checklist plan live.
     currentPlan = st.plan || [];
-    view.renderTask(transcript.currentTask(), currentPlan);
+    view.renderTask(transcript.currentTask(), currentPlan, lastSv);
     // Antrean task (§9): daftar parked + tombol batal per-task (§11).
     view.renderQueue(st.parkedTasks || []);
     // Metadata level tool (badge auto/izin) — refresh map bila dikirim.
@@ -478,6 +502,9 @@ export function startAssistantPanel(): () => void {
       toolLevels.clear();
       for (const tl of st.tools) toolLevels.set(tl.name, tl.level);
     }
+    // Allowlist sesi (dipakai chip statebar — hanya tool mutating yang
+    // relevan untuk ditampilkan; safe tidak pernah menggerbangi).
+    if (Array.isArray(st.allowlist)) sessionAllowlist = st.allowlist;
     // Tab Review: gabung filesTouched server (sesi CLI) + terukur client
     registry.mergeTouched(st.notes?.filesTouched || []);
     drawPages(view.activeTab());
@@ -520,6 +547,7 @@ export function startAssistantPanel(): () => void {
     if (st.workDir && workdir && document.activeElement !== workdir) {
       workdir.value = st.workDir;
       workdir.title = st.workDir;
+      if (sentWorkDir === null) sentWorkDir = st.workDir;
     }
   }
 
@@ -545,6 +573,23 @@ export function startAssistantPanel(): () => void {
 
   // ── Wiring elemen statis (index.html) ───────────────────────────
   const onSend = () => send(input?.value || "");
+  // Workdir dikomit (blur/Enter) → kirim /start supaya perubahan folder
+  // berlaku TANPA perlu reload/masuk-ulang mode (dulu input ini hanya
+  // dibaca sekali di boot — suntingan setelahnya diam-diam diabaikan).
+  const onWorkdirCommit = () => {
+    if (!workdir) return;
+    const v = workdir.value.trim();
+    if (v === (sentWorkDir ?? "")) return;
+    sentWorkDir = v;
+    void postJson(API + "/api/assistant/start", { workDir: v })
+      .then((d) => {
+        if (d?.warning) transcript.status("⚠ " + d.warning, "warn");
+        else if (v) transcript.status(t("as.workdirSet", { dir: v }), "ok");
+        render();
+      })
+      .catch(() => {});
+  };
+  workdir?.addEventListener("change", onWorkdirCommit);
   const onKey = (e: KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -602,14 +647,18 @@ export function startAssistantPanel(): () => void {
       persona = String(prof?.userNote || "").slice(0, 800);
     } catch {}
     try {
-      await postJson(API + "/api/assistant/start", {
+      const d = await postJson(API + "/api/assistant/start", {
         workDir: workdir?.value || undefined,
         persona,
         // Konteks tool motion (motion_analyze/validate/save).
         model: window.__live2dAgent?.modelKey?.(),
         roleMap: collectRoleMap(),
       }, signal);
+      sentWorkDir = (workdir?.value || "").trim() || "";
       if (!lifecycle.alive) return;
+      // Workdir fiktif ditandai server (start.warning) — tampilkan SEKARANG,
+      // jangan tunggu tool pertama gagal dengan os error.
+      if (d?.warning) transcript.status("⚠ " + d.warning, "warn");
       actor.setPersona(persona);
       await syncHistory();
       if (!lifecycle.alive) return;
@@ -639,6 +688,7 @@ export function startAssistantPanel(): () => void {
     actor.stop();
     liveAsk?.abort.abort();
     sendBtn?.removeEventListener("click", onSend);
+    workdir?.removeEventListener("change", onWorkdirCommit);
     input?.removeEventListener("keydown", onKey);
     input?.removeEventListener("input", onInputGrow);
     stopBtn?.removeEventListener("click", onStop);

@@ -488,13 +488,16 @@ async fn post_assistant_ask_stream(State(paths): State<AppPaths>, body: axum::bo
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         let r = agent::assistant::ask(&cfg, &root, &text).await;
+        // Frame SSE WAJIB ber-field "type" — kontrak stream.ts (AsSseEvent):
+        // parser panel membuang frame tanpa type, jadi dulu seluruh streaming
+        // mati diam-diam dan panel hidup dari hydrate history saja.
         if r.ok {
             if !r.reply.is_empty() {
-                let _ = tx.send(json!({ "delta": r.reply }).to_string());
+                let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
-            let _ = tx.send(json!({ "done": true, "reply": r.reply, "paused": r.paused }).to_string());
+            let _ = tx.send(json!({ "type": "done", "ok": true, "reply": r.reply, "paused": r.paused }).to_string());
         } else {
-            let _ = tx.send(json!({ "done": true, "error": r.error.unwrap_or_default() }).to_string());
+            let _ = tx.send(json!({ "type": "done", "ok": false, "error": r.error.unwrap_or_default() }).to_string());
         }
     });
     let stream = UnboundedReceiverStream::new(rx).map(|d| Ok::<_, std::convert::Infallible>(Event::default().data(d)));
@@ -533,13 +536,14 @@ async fn post_assistant_approve_stream(State(paths): State<AppPaths>, body: axum
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
         let r = agent::assistant::approve(&cfg, &root, &id, approve_it, always).await;
+        // Kontrak sama dengan ask-stream: frame ber-type (lihat stream.ts).
         if r.ok {
             if !r.reply.is_empty() {
-                let _ = tx.send(json!({ "delta": r.reply }).to_string());
+                let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
-            let _ = tx.send(json!({ "done": true, "reply": r.reply, "paused": r.paused }).to_string());
+            let _ = tx.send(json!({ "type": "done", "ok": true, "reply": r.reply, "paused": r.paused }).to_string());
         } else {
-            let _ = tx.send(json!({ "done": true, "error": r.error.unwrap_or_default() }).to_string());
+            let _ = tx.send(json!({ "type": "done", "ok": false, "error": r.error.unwrap_or_default() }).to_string());
         }
     });
     let stream = UnboundedReceiverStream::new(rx).map(|d| Ok::<_, std::convert::Infallible>(Event::default().data(d)));

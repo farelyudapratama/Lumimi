@@ -81,6 +81,28 @@ describe("drainSse", () => {
     expect(events).toEqual([{ type: "delta", text: "x" }]);
     expect(rest).toBe("");
   });
+
+  it("GOLDEN frame ask-stream lib.rs (ber-type) terparse utuh", () => {
+    // Kontrak lib.rs post_assistant_ask_stream — persis byte yang di-emit
+    // server. Dulu server mengirim {delta}/{done} TANPA type dan parser
+    // membuang semuanya → streaming panel mati diam-diam (bug Fase 3).
+    const buf =
+      'data: {"type":"delta","text":"Lumi"}\n\n' +
+      'data: {"type":"done","ok":true,"reply":"Lumi","paused":false}\n\n';
+    const { events } = drainSse(buf);
+    expect(events.length).toBe(2);
+    expect(events[0]).toEqual({ type: "delta", text: "Lumi" });
+    expect(events[1]).toEqual({ type: "done", ok: true, reply: "Lumi", paused: false });
+  });
+
+  it("GOLDEN frame done error (guard ask / LLM gagal) membawa ok:false", () => {
+    const { events } = drainSse(
+      'data: {"type":"done","ok":false,"error":"agent sedang menunggu keputusanmu di panel — setujui atau tolak dulu"}\n\n',
+    );
+    expect(events[0].type).toBe("done");
+    expect((events[0] as any).ok).toBe(false);
+    expect((events[0] as any).error).toContain("keputusan");
+  });
 });
 
 describe("decideFallback (protokol dua-kasus)", () => {
@@ -230,12 +252,27 @@ describe("Transcript — mode live (SSE)", () => {
 });
 
 describe("Transcript — supresi live/follow (bus)", () => {
-  it("live: tool_call_start/end bus DISUPRESI (padanannya dari SSE)", () => {
+  it("live: tool_call_start/end bus DIRENDER (SSE ask-stream tak membawa tool event)", () => {
     const tr = new Transcript();
     tr.beginLive();
-    const sig = tr.applyBus({ seq: 1, type: "tool_call_start", label: "list_dir {}", ts: 0 });
-    expect(tr.blocks.filter((b) => b.kind === "tool").length).toBe(0);
-    expect(sig).toEqual([]);
+    const sig = tr.applyBus({ seq: 1, type: "tool_call_start", label: 'list_dir {"path":"."}', ts: 0 });
+    const tool = tr.blocks.find((b) => b.kind === "tool") as any;
+    expect(tool).toBeTruthy();
+    expect(tool.name).toBe("list_dir");
+    tr.applyBus({ seq: 2, type: "tool_call_end", label: "list_dir → 12 entri", ts: 1 });
+    const tool2 = tr.blocks.find((b) => b.kind === "tool") as any;
+    expect(tool2.status).toBe("done");
+    expect(tool2.result).toBe("12 entri");
+    void sig;
+  });
+
+  it("live: thinking/final/error tetap disupresi (padanannya dari SSE delta/done)", () => {
+    const tr = new Transcript();
+    tr.beginLive();
+    tr.applyBus({ seq: 1, type: "thinking_start", label: "", ts: 0 });
+    tr.applyBus({ seq: 2, type: "final_answer", label: "", ts: 1 });
+    tr.applyBus({ seq: 3, type: "error", label: "boom", ts: 2 });
+    expect(tr.blocks.length).toBe(0);
   });
 
   it("follow: tool_call_start/end bus dirender sebagai kartu (aktivitas CLI)", () => {
@@ -303,12 +340,60 @@ describe("Transcript — hydrate dari /history", () => {
     expect(n).toBe(0);
     expect(tr.blocks.filter((b) => b.kind === "user").length).toBe(1);
   });
+
+  it("kartu live bus yang masih running diisi hasil hydrate, bukan ditumpuk", () => {
+    const tr = new Transcript();
+    tr.applyBus({ seq: 1, type: "tool_call_start", label: 'read_file {"path":"a.txt"}', ts: 0 });
+    expect(tr.blocks.filter((b) => b.kind === "tool").length).toBe(1);
+    tr.syncFromHistory([{ role: "tool", content: "[read_file] isinya" }]);
+    const tools = tr.blocks.filter((b) => b.kind === "tool") as any[];
+    expect(tools.length).toBe(1); // satu panggilan = satu kartu
+    expect(tools[0].status).toBe("done");
+    expect(tools[0].result).toBe("isinya");
+  });
+
+  it("kartu live yang sudah berhasil (fresh) tidak diduplikasi hydrate", () => {
+    const tr = new Transcript();
+    tr.applyBus({ seq: 1, type: "tool_call_start", label: "list_dir {}", ts: 0 });
+    tr.applyBus({ seq: 2, type: "tool_call_end", label: "list_dir → 3 entri", ts: 1 });
+    tr.syncFromHistory([{ role: "tool", content: "[list_dir] 3 entri" }]);
+    expect(tr.blocks.filter((b) => b.kind === "tool").length).toBe(1);
+  });
+
+  it("tool di giliran/sesi lampau (kartu basi) tetap dirender hydrate", () => {
+    const tr = new Transcript();
+    tr.syncFromHistory([{ role: "tool", content: "[list_dir] lama" }]);
+    tr.syncFromHistory([{ role: "tool", content: "[list_dir] baru" }]);
+    const tools = tr.blocks.filter((b) => b.kind === "tool") as any[];
+    expect(tools.length).toBe(2); // kartu hydrate tanpa `at` selalu dirender
+  });
+
+  it("narasi live tidak diduplikasi hydrate setelah stream selesai", () => {
+    const tr = new Transcript();
+    tr.beginLive();
+    tr.applySse({ type: "delta", text: "Aku cek dulu foldernya." } as any);
+    tr.applySse({ type: "tool_call", name: "list_dir", args: { path: "." } } as any);
+    tr.applySse({ type: "done", ok: true, reply: "Selesai." } as any);
+    tr.endLive();
+    tr.syncFromHistory([
+      { role: "assistant", content: "Aku cek dulu foldernya." },
+      { role: "tool", content: "[list_dir] 3 entri" },
+      { role: "assistant", content: "Selesai." },
+    ]);
+    const talks = tr.blocks.filter((b) => b.kind === "agent" || b.kind === "final");
+    expect(talks.length).toBe(2); // narasi + final — tanpa kembaran hydrate
+  });
 });
 
 describe("stripToolLine & parseToolLabel", () => {
   it("buang baris TOOL: multi-baris json", () => {
     expect(stripToolLine("Kalimat.\nTOOL: write_file {\"a\":1}")).toBe("Kalimat.");
     expect(stripToolLine("TOOL: list_dir {}")).toBe("");
+  });
+  it("buang panggilan TOOL: inline di tengah baris (kebocoran reasoning)", () => {
+    expect(stripToolLine('Kami perlu menulis file.TOOL: write_file {"path":"x"} segera.'))
+      .toBe("Kami perlu menulis file. segera.");
+    expect(stripToolLine('prolog TOOL: read_file {"path":"a/b.txt"} epilog')).toBe("prolog epilog");
   });
   it("parse label bus tool", () => {
     expect(parseToolLabel('read_file {"path":"x"}').name).toBe("read_file");
@@ -935,6 +1020,18 @@ describe("deriveAgentState", () => {
     expect(sv.state).toBe("executing");
     expect(sv.what).toBe("run_command");
     expect(sv.elapsedMs).toBe(30_000);
+  });
+
+  it("executing: label bus kaya 'name {json}' ditampilkan sebagai nama tool saja", () => {
+    const sv = deriveAgentState({
+      ...base,
+      running: true,
+      busy: true,
+      lastEvent: { seq: 9, type: "tool_call_start", label: 'write_file {"path":"a.txt","content":"halo"}', ts: NOW - 2000 },
+    }, 0, NOW);
+    expect(sv.state).toBe("executing");
+    expect(sv.what).toBe("write_file");
+    expect(sv.what).not.toContain("{");
   });
 
   it("thinking: busy tanpa tool aktif — elapsed dari busySince (client)", () => {

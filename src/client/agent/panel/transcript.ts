@@ -44,6 +44,9 @@ type BlockBase =
       /** Durasi eksekusi (client clock) bila kartu ini pernah running lalu
        *  selesai; undefined untuk kartu hasil hydrate history. */
       durMs?: number;
+      /** Kartu lahir dari bus live (panel terbuka) — hydrate history boleh
+       *  mengisinya tapi tidak boleh menumpuk kartu kembar. */
+      live?: boolean;
     }
   | { kind: "status"; id: number; rev: number; text: string; variant?: "ok" | "err" | "warn" }
   | { kind: "speak"; id: number; rev: number; text: string }
@@ -62,12 +65,13 @@ export type BusEvent = { seq: number; type: string; label: string; ts: number };
 /** Prompt internal yang server kirim setelah approval — bukan ucapan user. */
 export const CONTINUATION_PROMPT = "Lanjutkan tugas berdasarkan hasil tool di atas.";
 
-/** Tipe bus yang disupresi dari transcript saat mode live (sudah diwakili SSE). */
+/** Tipe bus yang disupresi dari transcript saat mode live.
+ *  tool_call_start/end & permission_request TIDAK disupresi: SSE ask-stream
+ *  hanya membawa delta/done — aktivitas tool live justru datang dari bus
+ *  (label kaya "name {args}" / "name → hasil"). final_answer/error/thinking
+ *  tetap disupresi karena padanannya datang via SSE done/error. */
 const SUPPRESSED_IN_LIVE = new Set([
   "thinking_start",
-  "tool_call_start",
-  "tool_call_end",
-  "permission_request",
   "final_answer",
   "error",
 ]);
@@ -160,6 +164,13 @@ export class Transcript {
   endLive(): void {
     this.mode = "follow";
     this.finalizeText();
+    // Blok narasi live sudah terlihat (work note / final) — daftarkan key-nya
+    // agar syncFromHistory tidak menduplikasinya jadi bubble conversation.
+    for (const b of this.blocks) {
+      if (b.kind === "agent" && !b.streaming && b.text.trim()) {
+        this.registerMsgKey("assistant", b.text);
+      }
+    }
   }
 
   private currentText(): Block | undefined {
@@ -269,7 +280,7 @@ export class Transcript {
         this.status(ev.error || t("as.bus.failed"), "err");
         return;
       }
-      const reply = String(ev.reply || "").trim();
+      const reply = stripInlineTool(String(ev.reply || "").trim());
       if (/⏳/.test(reply)) {
         // jawaban pause approval — kartu izin sudah mewakili; jangan bubble.
         // Perubahan yang sudah terjadi TETAP dilacak untuk giliran lanjutan.
@@ -386,6 +397,7 @@ export class Transcript {
           argsText: null,
           result: null,
           status: "running",
+          live: true,
         });
         break;
       }
@@ -470,7 +482,8 @@ export class Transcript {
    */
   syncFromHistory(msgs: Array<{ role: string; content: string }>): number {
     let added = 0;
-    for (const m of msgs || []) {
+    for (let i = 0; i < (msgs || []).length; i++) {
+      const m = msgs[i];
       const role = m.role === "tool" ? "tool" : m.role;
       const content = String(m.content || "");
       if (!content.trim()) continue;
@@ -496,18 +509,39 @@ export class Transcript {
           });
         } else {
           const m2 = /^\[([a-z_]+)\]\s*([\s\S]*)$/.exec(content);
-          this.push({
-            kind: "tool",
-            name: m2 ? m2[1] : "tool",
-            args: null,
-            summary: "",
-            argsText: null,
-            result: m2 ? m2[2] : content,
-            status: /^ERROR/.test(content) ? "error" : "done",
-          });
+          const name = m2 ? m2[1] : "tool";
+          const result = m2 ? m2[2] : content;
+          // Dedupe dengan kartu LIVE dari bus: kartu live running DIISI
+          // hasilnya; kartu live yang sudah berhasil sudah mewakili tool ini
+          // — jangan tumpuk dua kartu untuk satu panggilan. Kartu hydrate
+          // biasa (giliran/sesi lampau) tetap dirender.
+          const twin = this.findToolCardAny(name);
+          if (twin?.live && !twin.result) {
+            twin.result = result;
+            twin.status = /^ERROR/.test(result) ? "error" : "done";
+            if (typeof twin.at === "number") twin.durMs = Math.max(0, Date.now() - twin.at);
+            this.touch(twin);
+          } else if (!twin?.live) {
+            this.push({
+              kind: "tool",
+              name,
+              args: null,
+              summary: "",
+              argsText: null,
+              result,
+              status: /^ERROR/.test(content) ? "error" : "done",
+            });
+          }
         }
       } else {
-        this.push({ kind: "final", text: content });
+        // Pesan assistant yang DIIKUTI pesan tool = narasi kerja di tengah
+        // eksekusi (bukan jawaban giliran) — dirender sebagai note work
+        // region supaya segmen giliran tetap terbentuk setelah hydrate;
+        // jawaban penutup (diikuti user / akhir) tetap blok final.
+        const next = msgs.slice(i + 1).find((n) => n.role === "tool" || n.role === "user");
+        const isNarration = !!next && next.role === "tool";
+        const text = stripInlineTool(content);
+        this.push(isNarration ? { kind: "agent", text } : { kind: "final", text });
       }
       added++;
     }
@@ -521,11 +555,34 @@ export class Transcript {
     }
     return undefined;
   }
+
+  /** Kartu tool terakhir dengan nama sama, apa pun statusnya (untuk dedupe
+   *  hydrate vs kartu live bus). */
+  private findToolCardAny(name: string): Extract<Block, { kind: "tool" }> | undefined {
+    for (let i = this.blocks.length - 1; i >= 0; i--) {
+      const b = this.blocks[i];
+      if (b.kind === "tool" && b.name === name) return b;
+    }
+    return undefined;
+  }
 }
 
-/** Buang baris `TOOL: name {…}` (format panggilan tool) dari teks yang mengalir. */
+/** Buang baris `TOOL: name {…}` (format panggilan tool) dari teks yang mengalir.
+ *  Juga buang panggilan TOOL: inline di tengah paragraf — model reasoning
+ *  kerap menulis "…langkahnya.TOOL: write_file {…}" dalam SATU baris, yang
+ *  lolos filter baris dan tampil mentah ke user. */
 export function stripToolLine(text: string): string {
-  return String(text || "").replace(/^\s*TOOL:\s*[a-z_]+\s*\{[\s\S]*?\}\s*$/gim, "").trimEnd();
+  const perLine = String(text || "")
+    .replace(/^\s*TOOL:\s*[a-z_]+\s*\{[\s\S]*?\}\s*$/gim, "")
+    .trimEnd();
+  // Inline: satu tingkat braces bersarang cukup untuk argumen tool umum.
+  return perLine.replace(/\s*TOOL:\s*[a-z_]+\s*\{(?:[^{}]*|\{[^{}]*\})*\}/g, "").trimEnd();
+}
+
+/** Bersihkan kebocoran directive TOOL dari teks final/history (padanan
+ *  server strip_tool_directive, untuk kasus yang lolos di sana). */
+export function stripInlineTool(text: string): string {
+  return stripToolLine(text);
 }
 
 /** Ringkasan satu baris utk header kartu tool. */

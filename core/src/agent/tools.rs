@@ -21,11 +21,33 @@ fn normalize_lexical(p: &Path) -> PathBuf {
     out
 }
 
+/// Lepas prefiks verbatim Windows (\\?\ dan \\?\UNC\) agar path hasil
+/// canonicalize bisa dibandingkan dengan path biasa. Tanpa ini base kanonik
+/// (\\?\F:\…) tak pernah cocok dengan join path absolut (F:\…).
+fn strip_verbatim(p: PathBuf) -> PathBuf {
+    let s = p.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(rest.to_string())
+    } else {
+        p
+    }
+}
+
 /// Path aman di dalam workDir (padanan safePath). Err bila keluar.
 pub fn safe_path(work_dir: &Path, p: &str) -> Result<PathBuf, String> {
-    let base = std::fs::canonicalize(work_dir).unwrap_or_else(|_| normalize_lexical(work_dir));
+    // Base dan full dibandingkan pada bentuk yang sama (tanpa prefiks
+    // verbatim). Dulu base di-canonicalize mentah: di Windows base = \\?\F:\…
+    // sedangkan join path absolut = F:\… → starts_with gagal → SEMUA path
+    // absolut ditolak "di luar folder kerja" walau masih di dalam workdir.
+    let base = std::fs::canonicalize(work_dir)
+        .map(strip_verbatim)
+        .unwrap_or_else(|_| normalize_lexical(work_dir));
     let rel = if p.is_empty() { "." } else { p };
-    let full = normalize_lexical(&base.join(rel));
+    // Path input sendiri bisa membawa prefiks verbatim (mis. hasil
+    // canonicalize yang dikirim ulang model) — samakan sebelum membandingkan.
+    let full = strip_verbatim(normalize_lexical(&base.join(rel)));
     if full == base || full.starts_with(&base) {
         Ok(full)
     } else {
@@ -282,6 +304,20 @@ mod tests {
         let d = tmp();
         assert!(safe_path(&d, "sub/x.txt").is_ok());
         assert!(safe_path(&d, "../../etc/passwd").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn safe_path_absolut_di_dalam_workdir_sah() {
+        // Regresi: base kanonik Windows berprefiks \\?\ sehingga path ABSOLUT
+        // (F:\…, di dalam workdir pun) selalu ditolak "di luar folder kerja".
+        let d = tmp();
+        let canon = std::fs::canonicalize(&d).unwrap();
+        let abs_in = canon.join("sub/x.txt");
+        assert!(safe_path(&d, abs_in.to_str().unwrap()).is_ok(), "path absolut di dalam workdir harus sah: {abs_in:?}");
+        // Di luar tetap ditolak.
+        let luar = std::env::temp_dir();
+        assert!(safe_path(&d, luar.join("l2d-di-luar.txt").to_str().unwrap()).is_err());
         let _ = std::fs::remove_dir_all(&d);
     }
 

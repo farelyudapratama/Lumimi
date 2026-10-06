@@ -84,7 +84,11 @@ export function deriveAgentState(st: StatusInput, busySinceMs: number, nowMs: nu
   const ev = st.lastEvent;
   if (ev && ev.type === "tool_call_start") {
     sv.state = "executing";
-    sv.what = ev.label;
+    // Label bus kini "name {json args}" — tampilkan nama tool + ringkasan
+    // ringkas, bukan JSON mentah.
+    const lbl = String(ev.label || "");
+    const brace = lbl.indexOf(" {");
+    sv.what = (brace > 0 ? lbl.slice(0, brace) : lbl).trim() || lbl;
     sv.elapsedMs = approvalElapsed(ev.ts, nowMs);
     return sv;
   }

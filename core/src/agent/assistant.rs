@@ -134,7 +134,17 @@ pub async fn start(work_dir: &str, model: &str, role_map: Value) -> Value {
     }
     r.model = model.trim().to_string();
     r.role_map = if role_map.is_object() { role_map } else { Value::Null };
-    json!({ "ok": true, "workDir": r.work_dir, "model": r.model })
+    // Workdir nggak valid diterima tapi DITANDAI — dulu diam saja dan panel
+    // menampilkan status generik, user awam tidak tahu foldernya salah
+    // sampai tool gagal dengan os error.
+    let warning = if r.work_dir.is_empty() {
+        None
+    } else if !Path::new(&r.work_dir).is_dir() {
+        Some(format!("folder kerja tidak ditemukan: {}", r.work_dir))
+    } else {
+        None
+    };
+    json!({ "ok": true, "workDir": r.work_dir, "model": r.model, "warning": warning })
 }
 
 /// Status untuk panel/probe. activeTask/parkedTasks masih stub (task-identity
@@ -405,9 +415,15 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
             continue;
         }
         if seen.contains(&call_key) {
+            // Model mengulang panggilan tool yang sama — hentikan dengan bahasa
+            // user, bukan label internal loop.
             final_text = {
                 let s = strip_tool_directive(&reply);
-                if s.is_empty() { "(berhenti setelah duplikasi tool)".into() } else { s }
+                if s.is_empty() {
+                    "Aku berhenti karena langkah yang sama terulang tanpa hasil baru. Kalau tugasnya belum selesai, coba perjelas atau ubah instruksinya.".into()
+                } else {
+                    s
+                }
             };
             break;
         }
@@ -501,7 +517,11 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
         // undo wajib sama seperti jalur approve().
         let is_mutating = level == Some("mutating");
         let snap = if is_mutating { snapshot_before(&wd, &name, &args) } else { None };
-        bus::emit("tool_call_start", &name);
+        // Label bus mengikuti kontrak panel (transcript.applyBus):
+        //   tool_call_start → "name {json args…}"
+        //   tool_call_end   → "name → hasil"
+        // Dulu hanya nama telanjang — kartu aktivitas live tanpa isi & hasil.
+        bus::emit("tool_call_start", &format!("{name} {}", serde_json::to_string(&args).unwrap_or_default()));
         let result = if loop_::is_browser_tool(&name) {
             crate::browser::agent_exec(root, &name, &args).await
         } else if loop_::is_motion_tool(&name) {
@@ -513,7 +533,7 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
         } else {
             loop_::exec_tool(root, &wd, &name, &args)
         };
-        bus::emit("tool_call_end", &name);
+        bus::emit("tool_call_end", &format!("{name} → {}", first_line(&result, 160)));
         // Tandai + tangkap draft bila validasi lolos (report validator, bukan
         // ERROR) — dipakai untuk mengajukan motion_save bila model berhenti di
         // narasi. Hanya draft dengan tracks yang layak disimpan.
@@ -565,6 +585,19 @@ fn clip_tool(s: &str) -> String {
         format!("{}\n…(terpotong)", s.chars().take(4000).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+/// Baris pertama hasil tool, dipotong — untuk label bus "name → hasil".
+fn first_line(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    let n = line.chars().count();
+    if n > max {
+        format!("{}…", line.chars().take(max).collect::<String>())
+    } else if line.is_empty() {
+        "(kosong)".into()
+    } else {
+        line.to_string()
     }
 }
 
@@ -626,6 +659,16 @@ pub async fn set_model_context(model: &str, role_map: Value) {
 pub async fn ask(config_path: &Path, root: &Path, text: &str) -> AskResult {
     {
         let mut r = rt().lock().await;
+        // GUARD SATU-SLOT: dulu ask kedua diterima saat tugas pertama masih
+        // jalan / menggantung di approval — dua run_loop bisa saling
+        // menyisipkan pesan di history dan approval lama jadi bermakna ganda.
+        // Sekarang ditolak dengan pesan jelas (panel menampilkannya apa adanya).
+        if r.busy {
+            return AskResult { ok: false, reply: String::new(), paused: false, error: Some("masih ada tugas yang sedang berjalan — tunggu selesai atau batalkan dulu".into()) };
+        }
+        if !r.approvals.is_empty() {
+            return AskResult { ok: false, reply: String::new(), paused: false, error: Some("agent sedang menunggu keputusanmu di panel — setujui atau tolak dulu".into()) };
+        }
         r.running = true;
         r.busy = true;
         r.cancel = false;
@@ -737,7 +780,7 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
         }
         // Snapshot undo SEBELUM tool mutasi file (write/edit/delete) dieksekusi.
         let snap = snapshot_before(&wd, &name, &args);
-        bus::emit("tool_call_start", &name);
+        bus::emit("tool_call_start", &format!("{name} {}", serde_json::to_string(&args).unwrap_or_default()));
         let result = if loop_::is_browser_tool(&name) {
             crate::browser::agent_exec(root, &name, &args).await
         } else if loop_::is_motion_tool(&name) {
@@ -749,7 +792,7 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
         } else {
             loop_::exec_tool(root, &wd, &name, &args)
         };
-        bus::emit("tool_call_end", &name);
+        bus::emit("tool_call_end", &format!("{name} → {}", first_line(&result, 160)));
         let ok = !result.starts_with("ERROR");
         let mut r = rt().lock().await;
         // Mutasi tereksekusi pada tugas ini → plan-approval dilucuti.
@@ -797,6 +840,49 @@ mod tests {
         assert!(res.ok);
         assert!(!res.paused);
         assert!(res.reply.to_lowercase().contains("halo"));
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ask_ditolak_saat_busy_atau_approval_menggantung() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("asguard");
+        let f = mock_config(&dir);
+        start(&dir.to_string_lossy(), "", Value::Null).await;
+        // busy=true → ask kedua ditolak dengan pesan jelas (bukan jalan paralel).
+        {
+            let mut r = rt().lock().await;
+            r.busy = true;
+        }
+        let res1 = ask(&f, &dir, "tugas kedua").await;
+        assert!(!res1.ok);
+        assert!(res1.error.unwrap_or_default().contains("berjalan"));
+        // approval pending → ditolak juga (approval harus diputuskan dulu).
+        {
+            let mut r = rt().lock().await;
+            r.busy = false;
+            r.approvals.push(json!({ "id": "ap_guard", "tool": "write_file", "args": {}, "ts": now_ms() }));
+        }
+        let res2 = ask(&f, &dir, "tugas ketiga").await;
+        assert!(!res2.ok);
+        assert!(res2.error.unwrap_or_default().contains("keputusan"));
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn start_memberi_warning_workdir_tidak_ada() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        stop().await;
+        let dir = tmp_dir("aswd");
+        let bogus = dir.join("nggak-ada-xyz");
+        let res = start(bogus.to_str().unwrap(), "", Value::Null).await;
+        assert!(res["warning"].is_string(), "workdir fiktif harus berwarning");
+        let res2 = start(dir.to_str().unwrap(), "", Value::Null).await;
+        assert!(res2["warning"].is_null(), "workdir sah tanpa warning");
+        let res3 = start("", "", Value::Null).await;
+        assert!(res3["warning"].is_null(), "workdir kosong (default) tanpa warning");
         stop().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
