@@ -153,6 +153,8 @@ pub struct BrowserManager {
     engine_pref: Option<String>, // None = belum dimuat dari config
     captcha: Option<String>,     // kind captcha di halaman aktif (advisory)
     profile_dir: Option<PathBuf>,
+    root: Option<PathBuf>,       // akar app — disimpan utk re-launch otomatis
+    launched: bool,              // pernah diluncurkan & BELUM ditutup sengaja
     client: Option<CdpClient>,
     process: Option<std::process::Child>,
     url: String,
@@ -183,6 +185,7 @@ impl BrowserManager {
     /// Pastikan engine_pref terisi (dari config, sekali per proses) dan
     /// executable cocok dengannya. Dipanggil dari jalur yang punya root.
     fn resolve_executable(&mut self, root: &Path) {
+        self.root = Some(root.to_path_buf());
         if self.engine_pref.is_none() {
             self.engine_pref = Some(engine_pref_from_config(root));
         }
@@ -242,6 +245,39 @@ impl BrowserManager {
         self.last_error = error;
     }
 
+    /// Proses browser sudah exit (jendela ditutup user dari luar)? Bila iya,
+    /// bangkainya direap (state direset) dan return true.
+    fn reap_if_dead(&mut self) -> bool {
+        let dead = matches!(self.process.as_mut().map(|p| p.try_wait()), Some(Ok(Some(_))));
+        if dead {
+            self.reset(Some("browser ditutup dari luar — dibuka ulang otomatis".into()));
+        }
+        dead
+    }
+
+    /// Pastikan client CDP siap dipakai tool: bila proses mati, LUNCURKAN
+    /// ULANG otomatis (pakai root tersimpan) — task agent tidak menggantung
+    /// sampai CDP timeout hanya karena user menutup jendela browser.
+    async fn ensure_alive(&mut self) -> Result<&CdpClient, String> {
+        // Dua bentuk "jendela ditutup dari luar": bangkai proses masih terpasang
+        // (reap di sini) atau sudah direap jalur lain (status()/polling) — yang
+        // membedakannya dari tutup-SENGAJA (close/set_engine, launched=false)
+        // adalah flag `launched`. Tutup sengaja tidak dibuka ulang.
+        let reaped = self.reap_if_dead();
+        let orphaned = !reaped && self.launched && self.client.is_none();
+        if (reaped || orphaned) && self.launched {
+            let root = self
+                .root
+                .clone()
+                .ok_or_else(|| "browser ditutup dari luar dan root belum diketahui".to_string())?;
+            self.launch(&root).await?;
+        }
+        match &self.client {
+            Some(c) if !c.is_closed() => Ok(c),
+            _ => Err("browser belum terbuka atau CDP terputus".into()),
+        }
+    }
+
     async fn launch(&mut self, root: &Path) -> Result<(), String> {
         self.resolve_executable(root);
         let exe = self.executable.clone().ok_or("Edge/Chrome tidak ditemukan")?;
@@ -257,6 +293,7 @@ impl BrowserManager {
             .spawn()
             .map_err(|e| format!("gagal meluncurkan browser: {e}"))?;
         self.process = Some(child);
+        self.launched = true;
 
         // Tunggu DevToolsActivePort (baris 1 = port).
         let port = self.wait_devtools_port(&profile).await?;
@@ -511,8 +548,18 @@ pub async fn open(root: &Path, raw_url: &str, allow_private: bool) -> Result<Val
     Ok(m.status_value())
 }
 
+/// Jalur tool browser: pastikan browser hidup sebelum perintah apa pun.
+/// Dipanggil dari `agent_exec` — user menutup jendela browser bukan alasan
+/// task menggantung; browser dibuka ulang dan tool jalan Normal.
+pub async fn ensure_alive(root: &Path) -> Result<(), String> {
+    let mut m = mgr().lock().await;
+    m.resolve_executable(root);
+    m.ensure_alive().await.map(|_| ())
+}
+
 pub async fn navigate(raw_url: &str) -> Result<Value, String> {
     let mut m = mgr().lock().await;
+    m.ensure_alive().await?;
     m.require_client()?;
     let decision = m.authorize(raw_url).await?;
     let url = decision.url.ok_or("URL tidak valid")?;
@@ -711,6 +758,7 @@ async fn shutdown(m: &mut BrowserManager) {
         c.close().await;
     }
     m.reset(None);
+    m.launched = false; // tutup sengaja — jangan di-auto-relaunch
     m.grants.revoke_all();
 }
 
@@ -736,6 +784,13 @@ const MAX_INSPECT_CHARS: usize = 3500;
 
 /// Eksekusi tool browser_* dari loop agent. Return JSON string (atau ERROR: …).
 pub async fn agent_exec(root: &Path, name: &str, args: &Value) -> String {
+    // Browser ditutup user di tengah task → buka ulang otomatis sebelum
+    // tool mana pun jalan (kecuali status/close yang memang tidak butuh).
+    if name != "browser_status" && name != "browser_close" {
+        if let Err(e) = ensure_alive(root).await {
+            return format!("ERROR: {e}");
+        }
+    }
     let sreq = |k: &str| -> Result<String, String> {
         let v = args.get(k).and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         if v.is_empty() { Err(format!("{k} wajib diisi")) } else { Ok(v) }
@@ -892,5 +947,94 @@ mod tests {
         assert!(red.get("text").is_none());
         // tool lain lolos utuh
         assert_eq!(public_args("browser_click", &json!({ "ref": "r1" })), json!({ "ref": "r1" }));
+    }
+
+    // Bantu: spawn proses pendek yang sudah exit (lintas platform minim).
+    fn spawn_exited_child() -> std::process::Child {
+        let mut c = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "exit 0"]).spawn().expect("spawn")
+        } else {
+            std::process::Command::new("true").spawn().expect("spawn")
+        };
+        let _ = c.wait();
+        c
+    }
+
+    #[tokio::test]
+    async fn proses_mati_direap_state_direset() {
+        let mut m = BrowserManager::default();
+        m.process = Some(spawn_exited_child());
+        assert!(m.reap_if_dead(), "proses exit → direap");
+        assert!(m.process.is_none(), "bangkai dibuang");
+        assert_eq!(
+            m.last_error.as_deref(),
+            Some("browser ditutup dari luar — dibuka ulang otomatis")
+        );
+        // reap kedua: tak ada bangkai → false.
+        assert!(!m.reap_if_dead());
+    }
+
+    #[tokio::test]
+    async fn proses_hidup_tidak_direap() {
+        let mut m = BrowserManager::default();
+        let child = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/c", "timeout /t 30"]).spawn().expect("spawn")
+        } else {
+            std::process::Command::new("sleep").arg("30").spawn().expect("spawn")
+        };
+        m.process = Some(child);
+        assert!(!m.reap_if_dead(), "proses hidup → tidak direap");
+        assert!(m.process.is_some());
+        if let Some(p) = m.process.as_mut() {
+            let _ = p.kill();
+            let _ = p.wait();
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_alive_tanpa_browser_tanpa_root_tetap_error_jelas() {
+        let mut m = BrowserManager::default();
+        let err = match m.ensure_alive().await {
+            Err(e) => e,
+            Ok(_) => panic!("tanpa browser harusnya error"),
+        };
+        assert!(err.contains("browser belum terbuka"), "malah: {err}");
+    }
+
+    #[tokio::test]
+    async fn orphan_sudah_direap_tetap_dicoba_relaunch() {
+        // Skenario: status() mereap bangkai lebih dulu (process=None) — flag
+        // `launched` membedakannya dari "belum pernah buka". Jangan spawn
+        // browser asli di unit test: executable palsu → gagal di spawn dengan
+        // pesan "gagal meluncurkan", BUKAN "belum terbuka" (bukti jalur
+        // re-launch benar-benar dicoba).
+        let root = std::env::temp_dir().join("wb-orphan-test");
+        let mut m = BrowserManager::default();
+        m.launched = true; // pernah jalan, kini process+client sudah direap
+        m.root = Some(root.clone());
+        m.executable = Some("Z:/tidak-ada/browser-palsu.exe".into());
+        let err = match m.ensure_alive().await {
+            Err(e) => e,
+            Ok(_) => panic!("exe palsu tidak mungkin berhasil launch"),
+        };
+        assert!(
+            err.contains("gagal meluncurkan"),
+            "harusnya sampai tahap spawn — malah: {err}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn tutup_sengaja_tidak_autorelaunch() {
+        // close()/set_engine (shutdown) menandai launched=false — navigate
+        // setelahnya harus error "belum terbuka", bukan membuka ulang.
+        let mut m = BrowserManager::default();
+        m.launched = false;
+        m.root = Some(std::env::temp_dir().join("wb-orphan-test"));
+        let err = match m.ensure_alive().await {
+            Err(e) => e,
+            Ok(_) => panic!("tutup sengaja tidak boleh di-auto-relaunch"),
+        };
+        assert!(err.contains("belum terbuka"), "malah: {err}");
     }
 }
