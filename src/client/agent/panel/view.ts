@@ -632,10 +632,13 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       const wrap = el("div", "as-wseg");
       const hd = el("button", "as-wseg-hd") as HTMLButtonElement;
       hd.type = "button";
+      // Ringkasan dua-tingkat (ala ledger): kolom label + kolom konten
+      // (baris 1 = snippet tugas, baris 2 = meta mono). Detail dibuka
+      // tetap opsional — ringkasan sudah cukup untuk memindai.
+      const main = el("div", "as-wseg-main");
+      main.append(el("span", "as-wseg-task"), el("div", "as-wseg-meta"));
       hd.appendChild(el("span", "as-wseg-state"));
-      hd.appendChild(el("span", "as-wseg-task"));
-      hd.appendChild(el("span", "as-wseg-cnt"));
-      hd.appendChild(el("span", "as-wseg-dur"));
+      hd.appendChild(main);
       hd.appendChild(el("span", "as-chev", "▾"));
       const body = el("div", "as-wseg-work");
       hd.addEventListener("click", () => {
@@ -660,14 +663,18 @@ export function createPanelView(root: HTMLElement, techRoot: HTMLElement | null,
       // bersebelahan lagi — ringkasan harus bisa berdiri sendiri).
       const snippet = (seg.trigger?.text ?? "").trim().slice(0, 64);
       (g.wrap.querySelector(".as-wseg-task") as HTMLElement).textContent = snippet;
+      const meta = g.wrap.querySelector(".as-wseg-meta") as HTMLElement;
       const toolCount = seg.toolsOk + seg.toolsFail;
-      (g.wrap.querySelector(".as-wseg-cnt") as HTMLElement).textContent = toolCount === 0 ? "" :
-        seg.toolsFail > 0
-          ? t("as.seg.countFail", { ok: seg.toolsOk, fail: seg.toolsFail })
-          : t("as.seg.count", { n: toolCount });
-      (g.wrap.querySelector(".as-wseg-dur") as HTMLElement).textContent = seg.open
+      meta.textContent = "";
+      if (toolCount > 0) {
+        meta.appendChild(el("span", "as-wseg-cnt",
+          seg.toolsFail > 0
+            ? t("as.seg.countFail", { ok: seg.toolsOk, fail: seg.toolsFail })
+            : t("as.seg.count", { n: toolCount })));
+      }
+      meta.appendChild(el("span", "as-wseg-dur", seg.open
         ? (seg.startedAt ? formatDuration(Date.now() - seg.startedAt) : "")
-        : (seg.startedAt && seg.endedAt ? formatDuration(seg.endedAt - seg.startedAt) : "");
+        : (seg.startedAt && seg.endedAt ? formatDuration(seg.endedAt - seg.startedAt) : "")));
       const openNow = g.userToggled != null ? g.userToggled : seg.open;
       g.wrap.classList.toggle("open", openNow);
       g.wrap.classList.toggle("closed", !openNow);

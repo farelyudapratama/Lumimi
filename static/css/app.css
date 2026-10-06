@@ -3418,13 +3418,12 @@ input[type="range"]::-moz-range-thumb {
 }
 .as-workdir input { width: 100%; }
 
-/* Kartu TASK hero: satu-satunya surface yang sengaja lebih dominan. */
+/* Kartu TASK hero → SECTION: pelajaran ZCode — struktur bukan dari kotak.
+   Task adalah header kerja di surface bersama; kekuatannya dari tipografi.
+   (P3: satu-satunya kotak yang sengaja kuat adalah decision bar.) */
 .as-task {
   flex: none;
-  padding: 10px 12px 11px;
-  border-top: 1px solid var(--line-strong);
-  border-bottom: 1px solid var(--line);
-  background: var(--ink-0);
+  padding: 2px 2px 0;
 }
 .as-task-head {
   display: flex;
@@ -3446,9 +3445,9 @@ input[type="range"]::-moz-range-thumb {
 }
 .as-task-text {
   max-width: 72ch;
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 1.42;
   color: var(--text);
 }
 .as-task-empty {
@@ -3459,10 +3458,11 @@ input[type="range"]::-moz-range-thumb {
 .as-task-list {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  margin-top: 9px;
-  padding-top: 7px;
-  border-top: 1px solid var(--line-soft);
+  gap: 3px;
+  margin-top: 10px;
+  /* Checklist rencana = bagian dari header kerja (tanpa border penutup) —
+     hierarki lewat indentasi + glyph status, bukan kotak dalam kotak. */
+  padding: 0 0 2px 1px;
 }
 .as-task .as-plan-item {
   display: flex;
@@ -3486,12 +3486,11 @@ input[type="range"]::-moz-range-thumb {
 .as-task .as-plan-item .st.failed::before { content: "×"; color: var(--coral); }
 .as-task .as-plan-item .note { color: var(--muted); font-size: 10px; }
 
-/* Antrean task Worker (§9): daftar parked + batal per-task (§11). */
+/* Antrean task Worker (§9): daftar parked + batal per-task (§11).
+   Strip mikro di surface bersama — bukan panel kedua. */
 .as-queue {
   flex: none;
-  padding: 8px 12px 9px;
-  border-bottom: 1px solid var(--line);
-  background: var(--ink-0);
+  padding: 0 2px;
 }
 .as-queue-list {
   display: flex;
@@ -3557,7 +3556,9 @@ input[type="range"]::-moz-range-thumb {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  /* Skala ritme workbench (pelajaran ZCode): region dipisah napas sedang,
+     item dalam region rapat. Hierarki dari jarak, bukan dari kotak. */
+  gap: 9px;
 }
 /* Workspace chrome: satu baris utilitas, bukan form konfigurasi. */
 .as-ws {
@@ -3670,19 +3671,18 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ── Workbench: WORK region (worklog eksekusi) ─────────────────────
-   Kanvas utama agent mode: segmen giliran + baris kegiatan. Satu kotak,
-   tanpa tumpukan kartu dekoratif. */
+   Worklog = timeline di SURFACE BERSAMA — ZCode tidak membingkai
+   transkripnya; batas scroll cukup dari scrollbar + fade, bukan kotak. */
 .as-work {
   flex: 1 1 auto;
   min-height: 140px;
   overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--ink-input);
-  padding: 6px;
+  overflow-x: hidden;
+  padding: 2px 6px 2px 2px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
+  scrollbar-gutter: stable;
 }
 /* Anak-anak work region tak boleh ikut menyusut (scroll internal). */
 .as-work > * { flex: none; }
@@ -3698,11 +3698,10 @@ input[type="range"]::-moz-range-thumb {
 /* Baris narasi kerja (agent bicara di tengah eksekusi) — kutipan redup,
    bukan bubble chat; conversation tetap khusus giliran user↔jawaban. */
 .as-note {
-  padding: 2px 10px;
-  border-left: 1px solid var(--line-soft);
+  padding: 1px 2px 1px 12px;
   color: var(--muted);
   font-size: 11.5px;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -3713,59 +3712,67 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ── CONVERSATION strip: turun hierarki, tetap ada ─────────────────
-   Strip ringkas di bawah worklog; compact memperkecil dengan mask fade. */
+   Komunikasi ≠ pekerjaan: worklog = timeline kegiatan, strip ini = chat.
+   Pemisah hairline + napas sedang; compact memperkecil dengan mask fade. */
 .as-conv {
   flex: 0 1 auto;
   min-height: 44px;
   max-height: 210px;
   overflow-y: auto;
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 5px 2px 3px;
+  gap: 6px;
+  padding: 9px 2px 2px;
   border-top: 1px solid var(--line-soft);
+  scrollbar-gutter: stable;
 }
 .as-conv > * { flex: none; }
 .as-conv.compact { max-height: 148px; -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent); mask-image: linear-gradient(to bottom, #000 72%, transparent); }
 .as-blk {
   font-size: 12px;
-  line-height: 1.45;
-  padding: 4px 8px;
-  border-radius: var(--r-xs);
-  border-left: 1px solid var(--line);
+  line-height: 1.5;
+  padding: 2px 6px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 .as-blk .as-who {
   display: block;
-  font-size: 10px;
-  letter-spacing: 0.04em;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
   margin-bottom: 2px;
 }
-.as-blk.as-user {
+/* Di conversation, agent = teks polos (ZCode: prosa tanpa bubble) —
+   "agent mengatakan sesuatu" ≠ kotak kerja. */
+.as-conv .as-blk { border: none; background: transparent; }
+.as-conv .as-blk.as-user {
   align-self: flex-end;
   max-width: 84%;
   background: var(--ink-2);
   border: 1px solid var(--line-soft);
+  border-radius: var(--r-sm);
+  padding: 5px 10px;
   color: var(--text-dim);
 }
-.as-blk.as-agent {
-  background: transparent;
-  border-left-color: var(--line-soft);
-}
-.as-blk.as-final {
-  background: transparent;
-  border-left-color: var(--mint);
-}
-.as-blk.as-speak {
+.as-conv .as-blk.as-speak {
+  align-self: flex-end;
+  max-width: 84%;
   background: var(--accent-subtle);
-  border-left-color: var(--lamp);
+  border-radius: var(--r-sm);
+  padding: 5px 10px;
   color: var(--lamp-soft);
   font-style: italic;
 }
-.as-blk.as-status { color: var(--muted); font-size: 11.5px; }
+.as-conv .as-blk.as-final { padding: 2px 2px; }
+.as-blk.as-agent { color: var(--text-dim); }
+/* Baris kejadian sistem di worklog — mikro, mono, redup; bukan blok. */
+.as-blk.as-status {
+  color: var(--muted);
+  font: 10.5px/1.5 var(--font-mono);
+  padding: 1px 2px 1px 12px;
+}
 .as-blk.as-status.ok { color: var(--ok, #7dc98f); }
 .as-blk.as-status.err { color: var(--coral); }
 .as-blk.as-status.warn { color: var(--lamp); }
@@ -3781,30 +3788,28 @@ input[type="range"]::-moz-range-thumb {
   animation: ellipsis-dot 0.9s infinite;
 }
 
-/* Kartu tool — collapsible, mono untuk args/hasil */
+/* Baris tool — timeline item, BUKAN kartu (ZCode: `● Bash — desc`).
+   Status lewat dot warna; detail terbuka = indent ber-left-hairline yang
+   jelas milik baris di atasnya. */
 .as-blk.as-tool {
   padding: 0;
-  border: 1px solid var(--line-soft);
-  border-left: 2px solid var(--line-strong);
-  background: var(--ink-0);
+  border: none;
+  background: transparent;
   font-family: var(--font-mono);
   font-size: 11px;
-  overflow: hidden;
 }
-.as-blk.as-tool[data-status="running"] { border-left-color: var(--lamp); }
-.as-blk.as-tool[data-status="done"] { border-left-color: var(--mint); }
-.as-blk.as-tool[data-status="error"] { border-left-color: var(--coral); }
 .as-tool-hd {
   display: flex;
   align-items: center;
   gap: 7px;
   width: 100%;
-  padding: 5px 9px;
+  padding: 3px 4px;
+  border-radius: var(--r-xs);
   text-align: left;
   color: var(--text-dim);
   font: inherit;
 }
-.as-tool-hd:hover { background: var(--ink-3); }
+.as-tool-hd:hover { background: var(--ink-2); }
 .as-tool .as-dot {
   width: 6px;
   height: 6px;
@@ -3844,10 +3849,13 @@ input[type="range"]::-moz-range-thumb {
   transition: transform 0.12s ease;
 }
 .as-tool.open .as-chev { transform: rotate(180deg); }
+/* Detail terbuka = zona milik baris di atasnya (indentasi mengkodekan
+   kepemilikan — pelajaran ZCode ⎿). Data tetap ber-background. */
 .as-tool-bd {
   display: none;
-  border-top: 1px solid var(--line-soft);
-  padding: 6px 9px 8px;
+  margin: 1px 0 4px 13px;
+  padding: 2px 0 2px 9px;
+  border-left: 1px solid var(--line-soft);
 }
 .as-tool.open .as-tool-bd { display: block; }
 .as-tool-args,
@@ -3879,11 +3887,13 @@ input[type="range"]::-moz-range-thumb {
   font-style: italic;
 }
 
-/* Kartu approval — menonjol */
+/* Kartu approval di dalam decision bar — frame amber sudah dipikul kartu
+   luar (as-controls), jadi isi dibuat flush: tanpa border/bg ganda, cukup
+   rail pulse tipis sebagai penanda berkedip. */
 .as-blk.as-appr {
-  border: 1px solid var(--accent-border);
-  border-left: 2px solid var(--lamp);
-  background: var(--accent-subtle);
+  border: none;
+  background: transparent;
+  padding: 1px 2px 1px 10px;
 }
 /* Pulse perhatian: rail amber berkedip opacity (opacity-only, patuh
    manifesto — precedent keyframe ellipsis-dot). */
@@ -3891,7 +3901,6 @@ input[type="range"]::-moz-range-thumb {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
-.as-blk.as-appr { border-left-color: var(--lamp); }
 .as-blk.as-appr::before {
   content: "";
   position: absolute;
@@ -3903,6 +3912,14 @@ input[type="range"]::-moz-range-thumb {
   animation: appr-pulse 1.4s ease-in-out infinite;
 }
 .as-blk.as-appr { position: relative; }
+/* Kartu approval hasil hydrate di luar decision bar (worklog) tetap perlu
+   terlihat sebagai pengecualian. */
+.as-work .as-blk.as-appr {
+  border: 1px solid var(--accent-border);
+  border-left: 2px solid var(--lamp);
+  background: var(--accent-subtle);
+  padding: 6px 9px;
+}
 .as-appr-hd {
   display: flex;
   align-items: baseline;
@@ -3954,15 +3971,15 @@ input[type="range"]::-moz-range-thumb {
 /* ── Fase 3: harness-first ─────────────────────────────────────────────
    Garis keadaan = anchor; zona kontrol eksekusi pinned; worklog tersegmen;
    Live2D turun jadi presence dock yang bisa dilipat. Matte, satu aksen. */
+/* Statebar = baris status ambient di surface bersama (tanpa frame) —
+   hairline bawah memisahkannya dari objek kerja di bawahnya. */
 .as-statebar {
   display: flex;
   gap: 8px;
   align-items: center;
-  padding: 6px 9px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--ink-1);
-  min-height: 28px;
+  padding: 1px 2px 8px;
+  border-bottom: 1px solid var(--line-soft);
+  min-height: 26px;
 }
 .as-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .as-statebar[data-state="idle"] .as-state-dot { background: var(--mint); }
@@ -3997,8 +4014,19 @@ input[type="range"]::-moz-range-thumb {
   max-width: 180px;
 }
 
-/* Decision bar: titik kontrol eksekusi — agent berhenti, user memutuskan */
-.as-controls { display: grid; gap: 7px; margin-top: 8px; padding: 9px 10px; border: 1px solid var(--lamp); border-left-width: 3px; border-radius: var(--r-sm); background: var(--ink-1); }
+/* Decision bar: SATU-SATUNYA kartu yang sengaja menonjol (pelajaran ZCode:
+   kotak mengekodekan pengecualian). Saat semua lainnya box-free, frame
+   amber inilah yang terbaca "agent berhenti, kamu memutuskan". */
+.as-controls {
+  display: grid;
+  gap: 8px;
+  margin-top: 0;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--lamp);
+  border-left-width: 3px;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--lamp) 5%, var(--ink-1));
+}
 .as-controls.empty { display: none; }
 .as-controls-hd {
   font: 600 11px/1.4 var(--font-ui);
@@ -4006,22 +4034,51 @@ input[type="range"]::-moz-range-thumb {
   letter-spacing: .02em;
 }
 
-/* Segmen kerja per giliran: status + hitungan + durasi, lipat otomatis.
-   Segmen AKTIF terbuka penuh (kerja berjalan = fokus); selesai menyusut
-   jadi satu baris ringkas ber-snippet tugas. */
-.as-wseg { border-left: 2px solid var(--line); margin: 4px 0 4px 3px; padding-left: 9px; }
-.as-wseg[data-state="open"] { border-left-color: var(--lamp); }
-.as-wseg[data-state="interrupted"] { border-left-color: var(--coral); }
-.as-wseg[data-state="completed"] { border-left-color: var(--mint); }
-.as-wseg-hd { display: flex; gap: 8px; align-items: baseline; width: 100%; padding: 2px 0; border: none; background: none; cursor: pointer; color: var(--muted); font: 10.5px/1.4 var(--font-mono); text-align: left; }
-.as-wseg-hd:hover { color: var(--text-dim); }
-.as-wseg-state { text-transform: uppercase; letter-spacing: .04em; }
+/* Segmen kerja per giliran — baris ringkas dua-tingkat (mock user):
+   kolom label tetap + konten (snippet, meta di baris kedua). Segmen AKTIF
+   diberi rail amber (satu-satunya emphasis); selesai meredup tanpa frame. */
+.as-wseg { margin: 1px 0; padding: 0; border-left: 2px solid transparent; }
+.as-wseg[data-state="open"] { border-left-color: var(--lamp); padding-left: 9px; margin-left: 1px; }
+.as-wseg[data-state="interrupted"] { border-left-color: var(--coral); padding-left: 9px; margin-left: 1px; }
+.as-wseg[data-state="completed"] { padding-left: 11px; }
+.as-wseg-hd {
+  display: grid;
+  grid-template-columns: 74px 1fr 14px;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 3px 2px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.as-wseg-hd:hover { background: var(--ink-2); }
+.as-wseg-state {
+  font: 600 10px/1.6 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--muted);
+  white-space: nowrap;
+}
 .as-wseg[data-state="open"] .as-wseg-state { color: var(--lamp); }
 .as-wseg[data-state="completed"] .as-wseg-state { color: var(--mint); }
-.as-wseg-task { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.as-wseg .as-chev { margin-left: auto; }
+.as-wseg[data-state="interrupted"] .as-wseg-state { color: var(--coral); }
+.as-wseg-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.as-wseg-task {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.as-wseg[data-state="open"] .as-wseg-task { color: var(--text); font-weight: 600; }
+.as-wseg-meta { display: flex; gap: 8px; font: 10px/1.4 var(--font-mono); color: var(--muted); }
+.as-wseg .as-chev { color: var(--muted); align-self: center; }
 .as-wseg.closed .as-chev { transform: rotate(-90deg); }
-.as-wseg-work { display: grid; gap: 4px; padding: 3px 0 5px; }
+.as-wseg-work { display: grid; gap: 3px; padding: 4px 0 6px 2px; }
 .as-wseg.closed .as-wseg-work { display: none; }
 
 /* Transkrip ringkas: conversation diperkecil, harness tetap terbaca */
@@ -4070,17 +4127,17 @@ body.agent-stage-hidden #agent-workspace { flex-grow: 1; }
 body.agent-mode .app.agent-tech-open #stage,
 body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
 
-/* Chip subagent */
+/* Baris subagent — event timeline, bukan chip berkotak. */
 .as-blk.as-sub {
   display: flex;
   gap: 7px;
   align-items: baseline;
-  border: 1px dashed var(--line);
+  border: none;
   background: transparent;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-dim);
-  padding: 4px 9px;
+  padding: 2px 2px 2px 12px;
 }
 .as-sub-name {
   color: var(--lamp-soft);
@@ -4170,24 +4227,24 @@ body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
 .as-diff-ln.del { background: var(--coral-soft); color: var(--coral); }
 .as-diff-ln.ctx { color: var(--muted); }
 
-/* Kartu ringkasan giliran: "N file berubah +a −r" */
+/* Ringkasan giliran "N file berubah +a −r" — baris hasil dengan indentasi
+   file di bawahnya; diff per file tetap data-block ber-background. */
 .as-blk.as-chg {
-  border: 1px solid var(--line-soft);
-  border-left: 2px solid var(--mint);
-  background: var(--ink-1);
-  padding: 6px 9px;
+  border: none;
+  background: transparent;
+  padding: 2px 2px 2px 12px;
 }
 .as-chg-hd {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 3px;
+  margin-bottom: 2px;
 }
 .as-chg-ttl {
-  font-size: 10px;
+  font: 600 10px/1.5 var(--font-ui);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  color: var(--mint);
 }
 .as-chg-item .as-diff { margin: 3px 0 0 14px; }
 .as-chg-row {
