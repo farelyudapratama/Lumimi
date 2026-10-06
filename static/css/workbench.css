@@ -99,6 +99,9 @@ body.mode-agent #agent-tech {
   min-height: 0;
   border-left: 1px solid var(--wb-border);
   background: var(--wb-dock);
+  /* Container query host: lebar tab strip mengikuti lebar dock hasil drag. */
+  container-type: inline-size;
+  container-name: wb-dock;
 }
 /* Chrome lama sidebar disembunyikan: workbench punya header sendiri.
    Elemen tetap ada di DOM (identitas karakter ditulis app.js ke .sb-name). */
@@ -837,6 +840,12 @@ body.mode-agent.agent-dock-collapsed .wb-dock-capsule { display: inline-flex; }
 .wb-docktab.is-active { background: var(--wb-selected); color: var(--wb-fg); }
 .wb-docktab svg { width: 14px; height: 14px; }
 .wb-docktab .wb-tab-badge[hidden] { display: none; }
+/* Dock sempit (di bawah ±380px): label tab collapse ke ikon saja — strip tak
+   pernah perlu scroll; lebarin dock (drag pembatas) untuk menampilkan label. */
+@container wb-dock (max-width: 379px) {
+  .wb-docktab .wb-tab-label { display: none; }
+  .wb-docktab { padding: 0 8px; }
+}
 .wb-docktab .wb-tab-badge {
   min-width: 16px;
   height: 16px;

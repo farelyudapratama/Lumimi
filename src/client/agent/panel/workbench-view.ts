@@ -1041,8 +1041,10 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     for (const def of TAB_DEFS) {
       const b = el("button", "wb-docktab");
       b.type = "button";
+      b.title = t(def.label);
+      b.setAttribute("aria-label", t(def.label));
       b.appendChild(icon(def.icon));
-      b.appendChild(el("span", "", t(def.label)));
+      b.appendChild(el("span", "wb-tab-label", t(def.label)));
       const badge = el("span", "wb-tab-badge");
       badge.hidden = true;
       b.appendChild(badge);
