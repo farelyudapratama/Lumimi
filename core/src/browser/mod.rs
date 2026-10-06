@@ -361,13 +361,7 @@ impl BrowserManager {
         if !d.ok {
             return Err(d.error.unwrap_or_else(|| "URL tidak diizinkan".into()));
         }
-        if d.private_network {
-            if let Some(o) = &d.origin {
-                if !self.grants.has(o) {
-                    return Err("origin privat memerlukan persetujuan user".into());
-                }
-            }
-        }
+        gate_privat(&d, &self.grants)?;
         Ok(d)
     }
 
@@ -379,18 +373,13 @@ impl BrowserManager {
         if checked.url.as_deref() != Some(normalized) {
             return Err("URL berubah saat pemeriksaan ulang".into());
         }
-        if checked.private_network {
-            if let Some(o) = &checked.origin {
-                if !self.grants.has(o) {
-                    return Err("origin privat memerlukan persetujuan user".into());
-                }
-            }
-        }
+        gate_privat(&checked, &self.grants)?;
         let url = checked.url.clone().unwrap();
         let result = self.require_client()?.send("Page.navigate", json!({ "url": url }), 10_000).await?;
         if let Some(err) = result.get("errorText").and_then(|v| v.as_str()) {
             if !err.is_empty() {
-                return Err(format!("navigasi gagal: {err}"));
+                let host = url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
+                return Err(jelaskan_error_navigasi(err, &host));
             }
         }
         self.url = url;
@@ -406,11 +395,36 @@ impl BrowserManager {
         if live.is_empty() || live == "about:blank" {
             return Ok(());
         }
-        let d = inspect_browser_url(&live).await;
-        let bad = !d.ok || d.url.is_none() || (d.private_network && d.origin.as_ref().map(|o| !self.grants.has(o)).unwrap_or(false));
-        if bad {
+        // Host sama = origin sudah diotorisasi saat navigasi. Lewati resolve
+        // DNS ulang di setiap inspect/click/type — dulu tiap verifikasi
+        // me-resolve ulang, dan DNS yang sempat gagal dilaporkan salah
+        // sebagai "origin tidak diizinkan" (false alarm "browser tidak aman").
+        if host_dari(&live) == host_dari(&self.url) {
+            if live != self.url {
+                self.url = live;
+                self.current_snapshot_id = None;
+                self.captcha = None;
+            }
+            return Ok(());
+        }
+        if !live.starts_with("http://") && !live.starts_with("https://") {
+            // chrome-error://chromewebdata dkk. — bukan halaman web biasa.
             self.current_snapshot_id = None;
-            return Err("halaman aktif berada di origin yang tidak diizinkan".into());
+            return Err(format!(
+                "halaman aktif bukan halaman web normal ({live}) — navigasi kemungkinan gagal, ulangi browser_navigate dengan URL yang benar"
+            ));
+        }
+        let d = inspect_browser_url(&live).await;
+        if !d.ok {
+            self.current_snapshot_id = None;
+            return Err(format!(
+                "halaman aktif pindah ke \"{live}\" tapi tidak bisa diverifikasi: {}",
+                d.error.unwrap_or_default()
+            ));
+        }
+        if let Err(e) = gate_privat(&d, &self.grants) {
+            self.current_snapshot_id = None;
+            return Err(e);
         }
         if live != self.url {
             self.url = d.url.unwrap_or(live);
@@ -468,6 +482,56 @@ impl BrowserManager {
         c.send("Input.dispatchMouseEvent", json!({ "type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1 }), 10_000).await?;
         Ok(())
     }
+}
+
+/// Gerbang origin privat: tanpa grant → error yang menyebut origin DAN
+/// langkah berikutnya. Pesan lama ("memerlukan persetujuan user") bikin
+/// LLM mengarang "browser tidak aman" tanpa tahu harus apa.
+fn gate_privat(d: &UrlDecision, grants: &OriginGrants) -> Result<(), String> {
+    if d.private_network {
+        if let Some(o) = &d.origin {
+            if !grants.has(o) {
+                return Err(format!(
+                    "origin privat {o} butuh persetujuan user — bila user setuju, panggil browser_grant_private dengan origin \"{o}\"; kalau tidak, pakai URL publik"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Host dari URL mentah tanpa validasi penuh — pembanding cepat utk
+/// verifikasi halaman aktif. URL tak ter-parse → string kosong.
+fn host_dari(raw: &str) -> String {
+    url::Url::parse(raw).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default()
+}
+
+/// Terjemahkan errorText CDP jadi penyebab yang jujur & singkat. Kode mentah
+/// dipertahankan dalam kurung supaya jejak aslinya tak hilang — parafrase
+/// kosong dari LLM ("ga ada internet"/"tidak aman") lahir dari pesan error
+/// yang tidak menjelaskan apa-apa.
+fn jelaskan_error_navigasi(error_text: &str, host: &str) -> String {
+    let e = error_text;
+    let alasan = if e.contains("ERR_NAME_NOT_RESOLVED") {
+        format!("DNS gagal men-resolve \"{host}\" — koneksi internet/DNS kemungkinan sedang gangguan")
+    } else if e.contains("ERR_INTERNET_DISCONNECTED") {
+        "komputer sedang tidak terhubung ke internet".to_string()
+    } else if e.contains("ERR_CONNECTION_TIMED_OUT") || e.contains("ERR_TIMED_OUT") {
+        format!("server \"{host}\" tidak merespons (timeout)")
+    } else if e.contains("ERR_CONNECTION_REFUSED") {
+        format!("server \"{host}\" menolak koneksi")
+    } else if e.contains("ERR_CONNECTION_RESET") || e.contains("ERR_CONNECTION_CLOSED") {
+        "koneksi direset di tengah jalan".to_string()
+    } else if e.contains("ERR_CERT") || e.contains("SSL") || e.contains("TLS") {
+        "sertifikat keamanan situs tidak valid — browser menolak membukanya".to_string()
+    } else if e.contains("ERR_BLOCKED_BY") {
+        "permintaan diblokir (oleh situs atau client)".to_string()
+    } else if e.contains("ERR_ABORTED") {
+        "navigasi dibatalkan (mungkin oleh redirect atau halaman itu sendiri)".to_string()
+    } else {
+        "gagal memuat halaman".to_string()
+    };
+    format!("navigasi gagal: {alasan} [{e}]")
 }
 
 fn choose_page_target(targets: &[Value]) -> Option<&Value> {
@@ -873,6 +937,7 @@ pub fn public_args(name: &str, args: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::browser::policy::normalize_browser_url;
 
     #[test]
     fn pilih_target_page() {
@@ -925,6 +990,39 @@ mod tests {
         assert_eq!(detect_captcha("https://challenges.cloudflare.com/turnstile/v0/api.js Just a moment..."), Some("Cloudflare"));
         assert_eq!(detect_captcha("VERIFY YOU ARE HUMAN to continue"), Some("Cloudflare"));
         assert_eq!(detect_captcha("silakan isi captcha di bawah ini"), Some("captcha"));
+    }
+
+    #[test]
+    fn gate_privat_menyebut_origin_dan_langkah() {
+        let g = OriginGrants::default();
+        let publik = normalize_browser_url("https://example.com");
+        assert!(gate_privat(&publik, &g).is_ok());
+        let privat = normalize_browser_url("http://192.168.1.5");
+        let e = gate_privat(&privat, &g).unwrap_err();
+        assert!(e.contains("192.168.1.5"), "{e}");
+        assert!(e.contains("browser_grant_private"), "{e}");
+        g.grant(privat.origin.as_deref().unwrap());
+        assert!(gate_privat(&privat, &g).is_ok());
+    }
+
+    #[test]
+    fn host_dari_url_mentah() {
+        assert_eq!(host_dari("https://news.google.com/home?hl=id"), "news.google.com");
+        assert_eq!(host_dari("http://192.168.1.5:8080/x"), "192.168.1.5");
+        assert_eq!(host_dari("chrome-error://chromewebdata"), "chromewebdata");
+        assert_eq!(host_dari("bukan url"), "");
+    }
+
+    #[test]
+    fn error_navigasi_diterjemahkan_jujur() {
+        let m = jelaskan_error_navigasi("net::ERR_NAME_NOT_RESOLVED", "news.google.com");
+        assert!(m.contains("DNS"), "{m}");
+        assert!(m.contains("news.google.com"), "{m}");
+        assert!(m.contains("[net::ERR_NAME_NOT_RESOLVED]"), "{m}");
+        assert!(jelaskan_error_navigasi("net::ERR_INTERNET_DISCONNECTED", "x").contains("tidak terhubung"));
+        assert!(jelaskan_error_navigasi("net::ERR_CONNECTION_TIMED_OUT", "x.test").contains("timeout"));
+        assert!(jelaskan_error_navigasi("net::ERR_CERT_AUTHORITY_INVALID", "x").contains("sertifikat"));
+        assert!(jelaskan_error_navigasi("net::ERR_ANEH_SEKALI", "x").contains("gagal memuat"));
     }
 
     #[test]

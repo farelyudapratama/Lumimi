@@ -67,7 +67,7 @@ pub fn normalize_browser_url(raw: &str) -> UrlDecision {
     let lower = text.to_lowercase();
     if let Some(scheme) = lower.split(':').next() {
         if DENIED_SCHEMES.contains(&scheme) && lower.contains(':') {
-            return err("scheme URL tidak diizinkan");
+            return err(&format!("scheme \"{scheme}:\" tidak diizinkan — hanya http/https"));
         }
     }
     let with_scheme = if lower.starts_with("http://") || lower.starts_with("https://") {
@@ -91,6 +91,24 @@ pub fn normalize_browser_url(raw: &str) -> UrlDecision {
     UrlDecision { ok: true, url: Some(u.to_string()), origin: Some(origin), private_network, error: None }
 }
 
+/// Resolve host dengan 1x retry. Gangguan DNS sering transien (Windows
+/// bangun dari tidur, DNS ISP sempat ngambek); kegagalan di sini dibaca
+/// agent sebagai "internet mati", jadi jangan menyerah di percobaan pertama.
+async fn resolve_host(host: &str) -> Result<Vec<std::net::SocketAddr>, String> {
+    let target = format!("{host}:80");
+    let mut last = String::new();
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+        match tokio::net::lookup_host(&target).await {
+            Ok(addrs) => return Ok(addrs.collect()),
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(last)
+}
+
 /// Resolve DNS dan cek SEMUA alamat hasilnya (cegah hostname → LAN).
 pub async fn inspect_browser_url(raw: &str) -> UrlDecision {
     let base = normalize_browser_url(raw);
@@ -103,21 +121,21 @@ pub async fn inspect_browser_url(raw: &str) -> UrlDecision {
     let url_str = base.url.clone().unwrap_or_default();
     let host = Url::parse(&url_str).ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();
     // resolve host:80 → cek tiap IP.
-    match tokio::net::lookup_host(format!("{host}:80")).await {
+    match resolve_host(&host).await {
         Ok(addrs) => {
-            let mut any = false;
+            if addrs.is_empty() {
+                return err(&format!("DNS tidak memberi alamat untuk \"{host}\" — coba lagi atau pakai URL lain"));
+            }
             for a in addrs {
-                any = true;
                 if is_private_address(&a.ip().to_string()) {
                     return UrlDecision { private_network: true, ..base };
                 }
             }
-            if !any {
-                return err("hostname tidak dapat di-resolve");
-            }
             base
         }
-        Err(_) => err("hostname tidak dapat di-resolve"),
+        Err(_) => err(&format!(
+            "DNS gagal men-resolve \"{host}\" — koneksi internet/DNS kemungkinan sedang gangguan; coba sekali lagi atau pakai URL lain"
+        )),
     }
 }
 
@@ -166,6 +184,7 @@ mod tests {
     #[test]
     fn normalize() {
         assert!(!normalize_browser_url("file:///etc/passwd").ok);
+        assert!(normalize_browser_url("file:///etc/passwd").error.unwrap().contains("file:"));
         assert!(!normalize_browser_url("javascript:alert(1)").ok);
         let d = normalize_browser_url("example.com");
         assert!(d.ok);
