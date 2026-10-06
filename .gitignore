@@ -49,3 +49,4 @@ tmp-hist*.json
 blackbox-artifacts/
 
 docs/STATUS-CUBISM5-EFEK.md
+.zcode-ref/

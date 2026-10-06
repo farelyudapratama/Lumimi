@@ -34,7 +34,7 @@ import * as i18n from "./i18n/index";
 import { transport } from "./transport/index";
 import "./agent/directive-parser";
 import "./agent/brain"; // installs window.__agent at module load
-import { startAssistantPanel } from "./agent/panel/panel";
+import { startWorkbench } from "./agent/panel/workbench";
 import { startProjekRail } from "./shell/projek";
 import { startBrowserPanel } from "./browser/panel";
 import { startStageHintFade } from "./shell/stage-hint";
@@ -93,7 +93,7 @@ if (typeof window !== "undefined") {
   }).catch(() => { /* server belum naik → biarkan */ });
   // Panel agent (mode Assistant) — dipanggil mode-runtime.js saat tab
   // assistant aktif. Remake tampilan ala ZCode tinggal di sini (TS).
-  window.__agentPanel = { start: startAssistantPanel };
+  window.__agentPanel = { start: startWorkbench };
   // Rail projek shell (activity bar kiri) — start sekali di boot app.
   window.__shellProjek = { start: startProjekRail };
   window.__browserPanel = { start: startBrowserPanel };

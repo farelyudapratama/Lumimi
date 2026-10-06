@@ -1,0 +1,929 @@
+/* ═══════════════════════════════════════════════════════════════════
+   workbench.css — Agent Workbench Lumimi (rebuild clean-slate 2026-10)
+   Bahasa visual: agent harness — spine aktifitas row-oriented, tipografi
+   14/12/10px, hierarki lewat weight + level muted, hairline pemisah,
+   chrome rendah untuk pekerjaan selesai, output mendapat ruang.
+   Scope: body.mode-agent saja — mode lain (chat/vtuber/pet) tidak tersentuh.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Token (nilai dari studi implementasi ZCode; dark theme) ─────── */
+body.mode-agent {
+  --wb-bg: #171717;
+  --wb-dock: #0a0a0a;
+  --wb-card: #262626;
+  --wb-popover: #262626;
+  --wb-input: #262626;
+  --wb-input-focus-bg: #0a0a0a;
+  --wb-fg: #e5e5e5;
+  --wb-fg-subtle: rgba(229, 229, 229, 0.6);
+  --wb-fg-subtlest: rgba(229, 229, 229, 0.4);
+  --wb-inverse: #0a0a0a;
+  --wb-border: rgba(250, 250, 250, 0.1);
+  --wb-border-hover: rgba(250, 250, 250, 0.3);
+  --wb-surface: rgba(255, 255, 255, 0.05);
+  --wb-surface-hover: rgba(255, 255, 255, 0.1);
+  --wb-selected: rgba(255, 255, 255, 0.1);
+  --wb-hover: rgba(255, 255, 255, 0.1);
+  --wb-brand: #0ea5e9;
+  --wb-success: #22c55e;
+  --wb-danger: #ef4444;
+  --wb-warning: #eab308;
+  --wb-added: #22c55e;
+  --wb-removed: #ef4444;
+  --wb-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --wb-sans: ui-sans-serif, system-ui, sans-serif, "Segoe UI", "Noto Sans";
+  --wb-r-sm: 4px;
+  --wb-r-md: 6px;
+  --wb-r: 8px;
+  --wb-r-lg: 12px;
+  --wb-r-xl: 16px;
+  --wb-dock-w: 300px;
+  --wb-shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --wb-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+}
+
+/* Scrollbar ala harness: thumb = border color, pill, track transparan */
+body.mode-agent * {
+  scrollbar-width: auto;
+  scrollbar-color: var(--wb-border) transparent;
+}
+body.mode-agent ::-webkit-scrollbar { width: 14px; height: 14px; }
+body.mode-agent ::-webkit-scrollbar-track { background: transparent; }
+body.mode-agent ::-webkit-scrollbar-thumb {
+  background: var(--wb-border);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  min-height: 32px;
+}
+body.mode-agent ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ── Layout mode agent: workbench = aplikasi utama, dock = presence ──
+   Grid .app (scope mode-agent saja): [rail | workbench | presence dock].
+   Kolom kanan terbelah vertikal: stage Live2D di atas, tab teknis di bawah.
+   #agent-tech dipindah jadi anak langsung .app (index.html) agar bisa
+   ditempatkan grid; elemen overlay (drawer, toast) tetap absolute. */
+body.mode-agent .app {
+  background: var(--wb-bg);
+  display: grid;
+  grid-template-columns: auto minmax(360px, 1fr) var(--wb-dock-w);
+  grid-template-rows: minmax(280px, 46%) minmax(0, 1fr);
+}
+body.mode-agent #left-workspace { grid-column: 1; grid-row: 1 / span 2; }
+body.mode-agent #agent-workspace {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-width: 0;
+  display: flex;
+}
+body.mode-agent #sb-gutter { display: none; }
+body.mode-agent #stage {
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  border: none;
+  border-left: 1px solid var(--wb-border);
+  border-bottom: 1px solid var(--wb-border);
+  border-radius: 0;
+  background: var(--wb-dock);
+}
+body.mode-agent #agent-tech {
+  grid-column: 3;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--wb-border);
+  background: var(--wb-dock);
+}
+/* Chrome lama sidebar disembunyikan: workbench punya header sendiri.
+   Elemen tetap ada di DOM (identitas karakter ditulis app.js ke .sb-name). */
+body.mode-agent .sb-header,
+body.mode-agent #live-state,
+body.mode-agent #hint,
+body.mode-agent #stage-agent-chip { display: none !important; }
+body.mode-agent #mode-assistant { display: flex; padding: 0; min-height: 0; height: 100%; }
+body.mode-agent #mode-assistant.hidden { display: none; }
+body.mode-agent #as-root { flex: 1 1 auto; min-width: 0; }
+body.mode-agent #sidebar {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+/* Dock terlipat: presence menyusut jadi kapsul status; area kerja melebar */
+body.mode-agent.agent-dock-collapsed #stage,
+body.mode-agent.agent-dock-collapsed #agent-tech,
+body.mode-agent.agent-dock-collapsed #sb-gutter { display: none !important; }
+body.mode-agent.agent-dock-collapsed .app {
+  grid-template-columns: auto minmax(360px, 1fr) 0px;
+}
+
+/* Kapsul presence saat dock terlipat — melayang kanan-bawah, sunyi */
+.wb-dock-capsule {
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 60;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px 0 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--wb-border);
+  background: var(--wb-card);
+  box-shadow: var(--wb-shadow-md);
+  color: var(--wb-fg-subtle);
+  font: 500 12px/1 var(--wb-sans);
+  cursor: pointer;
+}
+body.mode-agent.agent-dock-collapsed .wb-dock-capsule { display: inline-flex; }
+.wb-dock-capsule:hover { background: var(--wb-surface-hover); }
+.wb-dock-capsule .wb-dot { flex: none; }
+
+/* ═══ WORKBENCH COLUMN ═══ */
+.wb {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--wb-bg);
+  color: var(--wb-fg);
+  font: 400 14px/1.5 var(--wb-sans);
+  -webkit-font-smoothing: antialiased;
+}
+.wb button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+/* Atribut hidden harus selalu menang atas display komponen (stream/empty/
+   controls memakai display:flex yang akan menimpa UA [hidden]). */
+.wb [hidden] { display: none !important; }
+.wb button:disabled { opacity: 0.4; cursor: default; }
+.wb :focus { outline: none; }
+.wb :focus-visible { outline: 2px solid var(--wb-brand); outline-offset: 1px; border-radius: 4px; }
+.wb code, .wb pre { font-family: var(--wb-mono); }
+
+/* ── Header 48px: keadaan + tugas + aksi ─────────────────────────── */
+.wb-header {
+  display: flex;
+  height: 48px;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--wb-border);
+}
+.wb-header-main { display: flex; min-width: 0; flex: 1; align-items: center; gap: 10px; }
+.wb-header-task {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--wb-fg);
+}
+.wb-header-task.is-empty { color: var(--wb-fg-subtlest); font-weight: 400; }
+.wb-header-elapsed { flex: none; font: 400 12px/1 var(--wb-mono); color: var(--wb-fg-subtlest); }
+.wb-header-what { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 12px/1 var(--wb-mono); color: var(--wb-fg-subtlest); }
+.wb-header-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+
+.wb-dot { width: 8px; height: 8px; flex: none; border-radius: 9999px; background: var(--wb-fg-subtlest); }
+.wb-dot[data-state="idle"] { background: var(--wb-fg-subtlest); }
+.wb-dot[data-state="thinking"], .wb-dot[data-state="executing"] { background: var(--wb-brand); }
+.wb-dot[data-state="thinking"].wb-dot-spin, .wb-dot[data-state="executing"].wb-dot-spin {
+  animation: wb-pulse 1.6s ease-in-out infinite;
+}
+.wb-dot[data-state="waitingPlan"], .wb-dot[data-state="waitingApproval"] { background: var(--wb-warning); }
+.wb-dot[data-state="off"] { background: var(--wb-fg-subtlest); }
+@keyframes wb-pulse { 50% { opacity: 0.35; } }
+
+/* Tombol ikon (ghost) — 28px, ikon 16 */
+.wb-iconbtn {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: var(--wb-r);
+  color: var(--wb-fg);
+}
+.wb-iconbtn:hover { background: var(--wb-hover); }
+.wb-iconbtn[data-variant="danger"]:hover { color: var(--wb-danger); }
+.wb-iconbtn svg { width: 16px; height: 16px; }
+.wb-iconbtn.is-active { background: var(--wb-selected); }
+
+/* ── Stream ──────────────────────────────────────────────────────── */
+.wb-stream {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.wb-col {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 20px 24px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* Streaming: fade-in halus saat konten baru muncul */
+.wb [data-wb-in] { animation: wb-stream-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) both; }
+@keyframes wb-stream-in { from { opacity: 0; } }
+
+/* Label berjalan: gradien animasi (signature streaming harness) */
+.wb-anim-text {
+  display: inline-block;
+  transform: translateZ(0);
+  background: linear-gradient(90deg,
+    var(--wb-fg) 0%, var(--wb-fg) 34%,
+    rgba(229, 229, 229, 0.2) 50%,
+    var(--wb-fg) 66%, var(--wb-fg) 100%);
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: wb-gradient-flow 4s linear infinite;
+}
+@keyframes wb-gradient-flow { 0% { background-position: 100% 0; } 50% { background-position: 0 0; } 100% { background-position: 0 0; } }
+
+/* ── Bubble user (kanan; satu-satunya elemen berkotak dari percakapan) ── */
+.wb-user { display: flex; flex-direction: column; align-items: flex-end; padding-top: 8px; }
+.wb-user-bubble {
+  max-width: min(576px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-lg) var(--wb-r-sm) var(--wb-r-lg) var(--wb-r-lg);
+  background: var(--wb-surface);
+  color: var(--wb-fg);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.wb-user-meta { margin-top: 4px; font-size: 12px; color: var(--wb-fg-subtlest); }
+
+/* ── Baris tool (satu baris, chrome rendah) ──────────────────────── */
+.wb-trow { display: flex; flex-direction: column; padding-top: 2px; }
+.wb-trow-head {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  min-height: 24px;
+  text-align: left;
+  color: var(--wb-fg);
+  border-radius: var(--wb-r-sm);
+  padding: 1px 6px 1px 2px;
+  margin-left: -6px;
+}
+.wb-trow-head:hover { color: var(--wb-fg); background: var(--wb-surface); }
+.wb-trow-ico { flex: none; color: var(--wb-fg-subtlest); display: inline-flex; }
+.wb-trow-ico svg { width: 16px; height: 16px; }
+.wb-trow-kind { flex: none; font-weight: 500; white-space: nowrap; color: var(--wb-fg-subtlest); }
+.wb-trow-kind.is-running { color: var(--wb-fg); }
+.wb-trow-kind.is-error { color: var(--wb-danger); }
+.wb-trow-sum {
+  min-width: 0;
+  max-width: 520px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--wb-fg-subtlest);
+}
+.wb-trow-sum code { font-family: var(--wb-sans); font-size: inherit; }
+.wb-trow-pill {
+  flex: none;
+  padding: 2px 6px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-sm);
+  background: var(--wb-bg);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--wb-fg-subtlest);
+}
+.wb-trow-dur { flex: none; font: 400 12px/1 var(--wb-mono); color: var(--wb-fg-subtlest); }
+.wb-trow-stat { flex: none; font-size: 12px; color: var(--wb-fg-subtlest); }
+.wb-trow-stat.is-error { color: var(--wb-danger); }
+.wb-trow-chev { flex: none; color: var(--wb-fg-subtlest); opacity: 0; display: inline-flex; transition: transform 0.2s ease-out, opacity 0.2s ease-out; }
+.wb-trow-chev svg { width: 16px; height: 16px; }
+.wb-trow-head:hover .wb-trow-chev { opacity: 1; }
+.wb-trow-head.is-open .wb-trow-chev { opacity: 1; transform: rotate(90deg); }
+.wb-trow-badge { flex: none; display: inline-flex; color: var(--wb-danger); }
+.wb-trow-badge svg { width: 14px; height: 14px; }
+
+/* Isi tool terbuka: output diberi ruang, bukan kartu */
+.wb-trow-body { padding: 6px 0 6px 24px; display: flex; flex-direction: column; gap: 6px; }
+.wb-trow-body .wb-io-label {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--wb-fg-subtlest);
+}
+.wb-trow-body pre {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: var(--wb-r);
+  background: var(--wb-surface);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--wb-fg-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.wb-trow-body pre.is-err { color: var(--wb-danger); }
+
+/* Grup tool: rail indent + hairline kiri (ala grup ZCode) */
+.wb-grp { display: flex; flex-direction: column; padding-top: 2px; }
+.wb-grp-kids {
+  margin-left: 8px;
+  padding-left: 14px;
+  border-left: 1px solid var(--wb-border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wb-grp-kids .wb-trow-head { margin-left: -6px; }
+
+/* ── Narasi agent (thinking / work note): rail kiri, teks redup ──── */
+.wb-note { display: flex; flex-direction: column; padding-top: 4px; }
+.wb-note-head {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  min-height: 24px;
+  color: var(--wb-fg-subtlest);
+}
+.wb-note-head svg { width: 16px; height: 16px; flex: none; }
+.wb-note-head .wb-note-kind { font-weight: 500; white-space: nowrap; }
+.wb-note-head .wb-note-time { font: 400 12px/1 var(--wb-mono); }
+.wb-note-head:hover ~ .wb-note-body, .wb-note.is-open .wb-note-body { display: block; }
+.wb-note-body {
+  display: none;
+  margin-left: 8px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 4px 0 4px 14px;
+  border-left: 1px solid var(--wb-border);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  font-size: 14px;
+  color: var(--wb-fg-subtlest);
+}
+.wb-note.is-open .wb-note-head .wb-note-chev { transform: rotate(90deg); }
+.wb-note-chev { transition: transform 0.2s ease-out; display: inline-flex; opacity: 0; }
+.wb-note-head:hover .wb-note-chev { opacity: 1; }
+.wb-note-chev svg { width: 16px; height: 16px; }
+.wb-note:hover .wb-note-body, .wb-note.is-open .wb-note-body { display: block; }
+
+/* ── Kartu Todo (rencana kerja) ──────────────────────────────────── */
+.wb-todo {
+  margin-top: 6px;
+  padding: 8px 12px;
+  border-radius: var(--wb-r-lg);
+  background: var(--wb-surface);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.wb-todo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  color: var(--wb-fg-subtlest);
+}
+.wb-todo-head .wb-todo-kind { font-weight: 500; color: var(--wb-fg-subtlest); }
+.wb-todo-head .wb-todo-frac { font-family: var(--wb-mono); }
+.wb-todo-head .wb-todo-cur { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-todo-row { display: flex; min-width: 0; align-items: flex-start; gap: 8px; padding: 4px 0; }
+.wb-todo-row svg { width: 14px; height: 14px; flex: none; margin-top: 3px; }
+.wb-todo-row .wb-todo-txt { min-width: 0; overflow-wrap: break-word; }
+.wb-todo-row[data-status="done"] svg { color: var(--wb-success); }
+.wb-todo-row[data-status="done"] .wb-todo-txt { color: var(--wb-fg-subtlest); text-decoration: line-through; }
+.wb-todo-row[data-status="failed"] svg { color: var(--wb-danger); }
+.wb-todo-row[data-status="failed"] .wb-todo-txt { color: var(--wb-danger); }
+.wb-todo-row[data-status="in_progress"] svg { color: var(--wb-fg); }
+.wb-todo-row[data-status="in_progress"] .wb-todo-txt { color: var(--wb-fg); }
+.wb-todo-row[data-status="pending"] svg { color: var(--wb-fg-subtlest); }
+.wb-todo-row[data-status="pending"] .wb-todo-txt { color: var(--wb-fg-subtle); }
+
+/* ── Kartu perubahan file per giliran ────────────────────────────── */
+.wb-chg {
+  margin-top: 6px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-lg);
+  background: var(--wb-card);
+  overflow: hidden;
+}
+.wb-chg-head {
+  display: flex;
+  height: 36px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  width: 100%;
+  text-align: left;
+}
+.wb-chg-head:hover { background: var(--wb-hover); }
+.wb-chg-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.wb-chg-stats { flex: none; font-variant-numeric: tabular-nums; }
+.wb-chg-stats .add { color: var(--wb-added); }
+.wb-chg-stats .del { color: var(--wb-removed); }
+.wb-chg-rows { border-top: 1px solid var(--wb-border); }
+.wb-chg-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  text-align: left;
+  background: rgba(23, 23, 23, 0.5);
+}
+.wb-chg-row:hover { background: var(--wb-surface-hover); }
+.wb-chg-path { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wb-chg-path .fname { font-weight: 500; color: var(--wb-fg); }
+.wb-chg-path .fdir { color: var(--wb-fg-subtlest); }
+.wb-chg-row .wb-chg-stats { font-size: 12px; }
+.wb-chg-head .wb-trow-chev.is-open { opacity: 1; transform: rotate(90deg); }
+.wb-spin { display: inline-flex; animation: wb-rot 1s linear infinite; }
+.wb-spin svg { width: 14px; height: 14px; }
+@keyframes wb-rot { to { transform: rotate(360deg); } }
+
+/* Diff isi (per file, opsional) */
+.wb-diff { border-top: 1px solid var(--wb-border); overflow: auto; max-height: 260px; }
+.wb-diff-row {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+  font: 400 12px/1.6 var(--wb-mono);
+  white-space: pre;
+}
+.wb-diff-row .ln { flex: none; width: 14px; color: var(--wb-fg-subtlest); user-select: none; }
+.wb-diff-row[data-t="add"] { background: rgba(34, 197, 94, 0.1); color: var(--wb-added); }
+.wb-diff-row[data-t="del"] { background: rgba(239, 68, 68, 0.1); color: var(--wb-removed); }
+.wb-diff-row[data-t="ctx"] { color: var(--wb-fg-subtle); }
+
+/* ── Subagent: baris + rail nested ───────────────────────────────── */
+.wb-sub { display: flex; flex-direction: column; padding-top: 2px; }
+.wb-sub-head {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  min-height: 24px;
+  padding: 1px 6px 1px 2px;
+  margin-left: -6px;
+  border-radius: var(--wb-r-sm);
+  text-align: left;
+}
+.wb-sub-head:hover { background: var(--wb-surface); }
+.wb-sub-name {
+  font-family: var(--wb-mono);
+  font-weight: 500;
+  color: #b7bd75;
+  background: rgba(183, 189, 117, 0.16);
+  border-radius: var(--wb-r-sm);
+  padding: 1px 6px;
+  max-width: 224px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-sub-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wb-fg-subtlest); }
+.wb-sub.is-done .wb-sub-text { color: var(--wb-fg-subtlest); }
+
+/* ── Marker timeline (status sistem): hairline + label di tengah ─── */
+.wb-mark { display: flex; width: 100%; align-items: center; gap: 12px; padding: 6px 0; color: var(--wb-fg-subtlest); }
+.wb-mark::before, .wb-mark::after { content: ""; height: 1px; min-width: 32px; flex: 1; background: var(--wb-border); }
+.wb-mark span { display: inline-flex; min-width: 0; max-width: 70%; align-items: center; justify-content: center; gap: 6px; text-align: center; }
+.wb-mark svg { width: 14px; height: 14px; flex: none; }
+.wb-mark[data-variant="err"] span { color: var(--wb-danger); }
+.wb-mark[data-variant="warn"] span { color: var(--wb-warning); }
+.wb-mark[data-variant="ok"] span { color: var(--wb-success); }
+
+/* ── Jawaban final: markdown tanpa bubble, full width ────────────── */
+.wb-final { padding: 8px 0 4px; color: var(--wb-fg); }
+.wb-final > :first-child { margin-top: 0; }
+.wb-final > :last-child { margin-bottom: 0; }
+.wb-final p { margin: 0 0 8px; }
+.wb-final ul, .wb-final ol { margin: 8px 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; }
+.wb-final li::marker { color: var(--wb-fg-subtlest); }
+.wb-final h1, .wb-final h2, .wb-final h3 { margin: 14px 0 6px; font-weight: 600; }
+.wb-final h1 { font-size: 16px; } .wb-final h2 { font-size: 15px; } .wb-final h3 { font-size: 14px; }
+.wb-final code.wb-code-inline {
+  margin: 0 2px;
+  padding: 1px 6px;
+  border-radius: var(--wb-r-md);
+  background: var(--wb-card);
+  font-size: 12px;
+}
+.wb-final pre {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-lg);
+  background: var(--wb-card);
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.wb-final pre code { background: none; padding: 0; }
+.wb-final blockquote { margin: 12px 0; padding-left: 14px; border-left: 3px solid var(--wb-border); color: var(--wb-fg-subtle); }
+.wb-final a { color: var(--wb-brand); text-decoration: underline; text-underline-offset: 3px; }
+.wb-final table { border-collapse: collapse; margin: 12px 0; }
+.wb-final th, .wb-final td { border: 1px solid var(--wb-border); padding: 4px 10px; text-align: left; }
+
+.wb-final-actions { display: flex; opacity: 0; transition: opacity 0.15s ease; margin-top: 4px; }
+.wb-final:hover .wb-final-actions, .wb-final-actions:focus-within { opacity: 1; }
+
+/* ── Empty state (tugas baru) ────────────────────────────────────── */
+.wb-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 24px;
+  gap: 6px;
+}
+.wb-empty-title { font-size: 18px; font-weight: 600; color: var(--wb-fg); }
+.wb-empty-sub { font-size: 14px; color: var(--wb-fg-subtlest); margin-bottom: 18px; }
+.wb-empty-list { display: flex; width: 100%; max-width: 480px; flex-direction: column; gap: 4px; }
+.wb-empty-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r);
+  text-align: left;
+  color: var(--wb-fg-subtle);
+}
+.wb-empty-row:hover { background: var(--wb-surface-hover); color: var(--wb-fg); border-color: var(--wb-border-hover); }
+.wb-empty-row svg { width: 16px; height: 16px; flex: none; color: var(--wb-fg-subtlest); }
+
+/* ── Zona kontrol (approval) — pin di atas composer ──────────────── */
+.wb-controls { flex: none; display: flex; flex-direction: column; gap: 8px; padding: 0 24px; }
+.wb-col > .wb-controls, .wb-controls { max-width: 860px; margin: 0 auto; width: 100%; }
+.wb-appr {
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-xl);
+  background: var(--wb-popover);
+  box-shadow: var(--wb-shadow-xs);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wb-appr-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-weight: 500; color: var(--wb-fg-subtle); }
+.wb-appr-desc { color: var(--wb-fg); overflow-wrap: break-word; }
+.wb-appr-tool {
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r);
+  background: var(--wb-surface);
+  overflow: hidden;
+}
+.wb-appr-tool-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; }
+.wb-appr-tool-head pre {
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-top: 1px solid var(--wb-border);
+  font-size: 12px;
+  color: var(--wb-fg-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.wb-appr-opts { display: flex; flex-direction: column; gap: 4px; }
+.wb-appr-opt {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: var(--wb-r-lg);
+  text-align: left;
+  color: var(--wb-fg);
+}
+.wb-appr-opt:hover { background: var(--wb-hover); }
+.wb-appr-opt.is-sel { background: var(--wb-selected); }
+.wb-appr-opt .num { width: 20px; flex: none; font-weight: 500; color: var(--wb-fg-subtlest); }
+.wb-appr-opt.is-sel .num { color: var(--wb-fg); }
+.wb-appr-opt .lbl { font-weight: 500; }
+.wb-appr-opt .sub { font-size: 12px; color: var(--wb-fg-subtlest); }
+.wb-appr-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px; }
+.wb-appr-hint { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--wb-fg-subtle); }
+.wb-appr-hint svg { width: 16px; height: 16px; color: var(--wb-fg); }
+.wb-appr-hint kbd {
+  font-family: var(--wb-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--wb-border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--wb-surface);
+}
+
+.wb-btn {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-radius: var(--wb-r);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.wb-btn[data-variant="primary"] { background: var(--wb-brand); color: #fff; }
+.wb-btn[data-variant="primary"]:hover:not(:disabled) { background: rgba(14, 165, 233, 0.8); }
+.wb-btn[data-variant="outline"] { border: 1px solid var(--wb-border); color: var(--wb-fg); }
+.wb-btn[data-variant="outline"]:hover:not(:disabled) { border-color: var(--wb-border-hover); background: rgba(38, 38, 38, 0.5); }
+.wb-btn[data-variant="danger"] { background: var(--wb-danger); color: #fff; }
+.wb-btn[data-variant="danger"]:hover:not(:disabled) { background: rgba(239, 68, 68, 0.9); }
+
+/* ── Composer ────────────────────────────────────────────────────── */
+.wb-composer-zone { flex: none; padding: 10px 24px 14px; }
+.wb-composer {
+  max-width: 812px;
+  margin: 0 auto;
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-r-xl);
+  background: var(--wb-input);
+  padding: 10px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+.wb-composer:focus-within { border-color: var(--wb-brand); background: var(--wb-input-focus-bg); }
+.wb-composer textarea {
+  width: 100%;
+  resize: none;
+  border: none;
+  background: transparent;
+  color: var(--wb-fg);
+  font: 400 14px/1.5 var(--wb-sans);
+  min-height: 22px;
+  max-height: 200px;
+}
+.wb-composer textarea::placeholder { color: var(--wb-fg-subtlest); }
+.wb-composer textarea:focus { outline: none; }
+.wb-composer-bar { display: flex; align-items: flex-end; gap: 8px; }
+.wb-composer-lead { display: flex; min-width: 0; flex: 1; align-items: center; gap: 4px; }
+.wb-chip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 260px;
+  height: 24px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-radius: var(--wb-r-sm);
+  font-size: 12px;
+  color: var(--wb-fg-subtlest);
+}
+.wb-chip:hover { background: var(--wb-hover); color: var(--wb-fg-subtle); }
+.wb-chip svg { width: 12px; height: 12px; flex: none; }
+.wb-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
+.wb-chip .wb-chip-ico { color: var(--wb-fg-subtlest); }
+.wb-composer-tail { display: flex; flex: none; align-items: center; gap: 6px; }
+.wb-send {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--wb-r);
+  background: var(--wb-brand);
+  color: #fff;
+  flex: none;
+}
+.wb-send:hover:not(:disabled) { background: rgba(14, 165, 233, 0.8); }
+.wb-send:disabled { opacity: 0.4; }
+.wb-send svg { width: 16px; height: 16px; }
+.wb-send[data-kind="stop"] { background: var(--wb-card); border: 1px solid var(--wb-border); color: var(--wb-fg); }
+.wb-send[data-kind="stop"]:hover { background: var(--wb-surface-hover); }
+.wb-send[data-kind="stop"] svg { fill: currentColor; }
+.wb-composer-hint { font-size: 10px; color: var(--wb-fg-subtlest); padding: 0 4px; display: flex; justify-content: space-between; }
+.wb-composer-hint kbd { font-family: var(--wb-mono); }
+
+/* ── Dock presence (kanan) ───────────────────────────────────────── */
+.wb-dockhead {
+  display: flex;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--wb-border);
+  color: var(--wb-fg-subtlest);
+  font-size: 12px;
+  font-weight: 500;
+}
+.wb-dockhead .wb-dock-spacer { flex: 1; }
+
+.wb-state-line {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--wb-border);
+  font-size: 12px;
+  color: var(--wb-fg-subtle);
+  min-height: 34px;
+}
+.wb-state-line .wb-state-what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--wb-mono); color: var(--wb-fg-subtle); }
+.wb-state-line .wb-state-elapsed { margin-left: auto; flex: none; font-family: var(--wb-mono); color: var(--wb-fg-subtlest); }
+.wb-state-line[data-state="waitingPlan"] .wb-state-what,
+.wb-state-line[data-state="waitingApproval"] .wb-state-what { color: var(--wb-warning); }
+
+/* Tab strip dock: Review/Terminal/Browser/Memory */
+.wb-docktabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--wb-border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.wb-docktabs::-webkit-scrollbar { display: none; }
+.wb-docktab {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: var(--wb-r);
+  font-size: 11px;
+  white-space: nowrap;
+  color: var(--wb-fg-subtlest);
+}
+.wb-docktab:hover { color: var(--wb-fg); background: var(--wb-hover); }
+.wb-docktab.is-active { background: var(--wb-selected); color: var(--wb-fg); }
+.wb-docktab svg { width: 14px; height: 14px; }
+.wb-docktab .wb-tab-badge[hidden] { display: none; }
+.wb-docktab .wb-tab-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--wb-surface-hover);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wb-dockbody { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.wb-dockpane { display: flex; flex-direction: column; gap: 4px; height: 100%; min-height: 0; }
+
+/* Progress section (plan) di dock */
+.wb-dock-sec { display: flex; flex-direction: column; gap: 2px; }
+.wb-dock-sec-head {
+  display: flex;
+  height: 30px;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--wb-fg-subtle);
+}
+.wb-dock-sec-head .wb-dock-sec-meta { margin-left: auto; font-weight: 400; color: var(--wb-fg-subtlest); font-variant-numeric: tabular-nums; }
+.wb-dock-row {
+  display: flex;
+  min-height: 30px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--wb-r);
+  font-size: 14px;
+}
+.wb-dock-row:hover { background: var(--wb-hover); }
+.wb-dock-row svg { width: 14px; height: 14px; flex: none; margin-top: 3px; }
+.wb-dock-row .txt { min-width: 0; flex: 1; overflow-wrap: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.wb-dock-row[data-status="done"] svg { color: var(--wb-success); }
+.wb-dock-row[data-status="done"] .txt { color: var(--wb-fg-subtlest); text-decoration: line-through; }
+.wb-dock-row[data-status="failed"] svg { color: var(--wb-danger); }
+.wb-dock-row[data-status="failed"] .txt { color: var(--wb-danger); }
+.wb-dock-row[data-status="in_progress"] svg { color: var(--wb-fg); }
+.wb-dock-row[data-status="in_progress"] .txt { color: var(--wb-fg); }
+.wb-dock-row[data-status="pending"] svg { color: var(--wb-fg-subtlest); }
+.wb-dock-row[data-status="pending"] .txt { color: var(--wb-fg-subtle); }
+.wb-dock-row .row-act { flex: none; display: inline-flex; opacity: 0; color: var(--wb-fg-subtlest); }
+.wb-dock-row:hover .row-act { opacity: 1; }
+.wb-dock-row .row-act:hover { color: var(--wb-danger); }
+.wb-dock-row .row-act svg { width: 14px; height: 14px; margin-top: 3px; }
+
+/* Review rows (dock) */
+.wb-rev-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--wb-r);
+  text-align: left;
+  font-size: 12px;
+}
+.wb-rev-row:hover { background: var(--wb-hover); }
+.wb-rev-row .wb-chg-path { font-size: 12px; }
+.wb-rev-row .rev-act { flex: none; display: inline-flex; opacity: 0; color: var(--wb-fg-subtlest); }
+.wb-rev-row:hover .rev-act { opacity: 1; }
+.wb-rev-row .rev-act:hover { color: var(--wb-danger); }
+.wb-rev-row .rev-act svg { width: 14px; height: 14px; }
+
+/* Terminal rows (dock) */
+.wb-term-row { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: var(--wb-r); }
+.wb-term-row:hover { background: var(--wb-hover); }
+.wb-term-cmd { font: 400 12px/1.5 var(--wb-mono); color: var(--wb-fg); overflow-wrap: break-word; }
+.wb-term-out { font: 400 11px/1.5 var(--wb-mono); color: var(--wb-fg-subtlest); max-height: 120px; overflow: auto; white-space: pre-wrap; overflow-wrap: break-word; }
+.wb-term-out.is-err { color: var(--wb-danger); }
+.wb-term-run { font-size: 10px; color: var(--wb-fg-subtlest); display: inline-flex; align-items: center; gap: 6px; }
+
+/* Browser pane mengisi dock */
+.wb-browser-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.wb-browser-pane > * { flex: 1 1 auto; min-height: 0; }
+
+/* Memory pane */
+.wb-mem-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--wb-r);
+  font-size: 12px;
+}
+.wb-mem-row:hover { background: var(--wb-hover); }
+.wb-mem-key { flex: none; font-family: var(--wb-mono); color: var(--wb-fg-subtle); }
+.wb-mem-val { min-width: 0; flex: 1; color: var(--wb-fg-subtlest); overflow-wrap: break-word; }
+.wb-mem-row .rev-act { flex: none; display: inline-flex; opacity: 0; color: var(--wb-fg-subtlest); }
+.wb-mem-row:hover .rev-act { opacity: 1; }
+.wb-mem-row .rev-act:hover { color: var(--wb-danger); }
+.wb-mem-row .rev-act svg { width: 14px; height: 14px; }
+.wb-dock-empty { padding: 14px 8px; font-size: 12px; color: var(--wb-fg-subtlest); text-align: center; }
+
+/* ── Scroll-to-bottom pill ───────────────────────────────────────── */
+.wb-jump {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 9999px;
+  background: var(--wb-card);
+  border: 1px solid var(--wb-border);
+  box-shadow: var(--wb-shadow-md);
+  color: var(--wb-fg);
+  font-size: 12px;
+}
+.wb-jump.show { display: inline-flex; }
+.wb-jump:hover { background: #303030; }
+.wb-jump svg { width: 16px; height: 16px; }
+
+/* ── Responsive: layar sempit → dock otomatis menyusut ──────────── */
+@media (max-width: 980px) {
+  body.mode-agent .app { --wb-dock-w: 240px; }
+}
+@media (max-width: 780px) {
+  body.mode-agent #agent-tech { display: none; }
+  body.mode-agent #stage { grid-row: 1 / span 2; }
+  body.mode-agent .app { --wb-dock-w: 200px; }
+  .wb-col { padding: 16px 14px 8px; }
+  .wb-controls { padding: 0 14px; }
+  .wb-composer-zone { padding: 8px 14px 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wb [data-wb-in] { animation: none; }
+  .wb-anim-text { animation: none; background: none; color: var(--wb-fg); -webkit-text-fill-color: currentColor; }
+  .wb-dot-spin { animation: none; }
+}

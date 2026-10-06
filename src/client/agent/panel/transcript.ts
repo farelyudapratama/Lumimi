@@ -497,7 +497,11 @@ export class Transcript {
         // Tool yang menunggu izin (sesi dibuka ulang saat approval pending)
         // → kartu "running" supaya tool_result dari approve-stream mengisi.
         const wait = /^MENUNGGU PERSETUJUAN:\s*([a-z_]+)/.exec(content);
-        if (wait) {
+        const waitPlan = /^MENUNGGU PERSETUJUAN RENCANA/.test(content);
+        if (waitPlan) {
+          // Gate rencana: jeda sistem — marker ringkas, bukan kartu tool.
+          this.push({ kind: "status", text: t("as.bus.planWait"), variant: "warn" });
+        } else if (wait) {
           this.push({
             kind: "tool",
             name: wait[1],

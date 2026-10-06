@@ -21,7 +21,7 @@ import { diffLines, changeFromTool } from "../src/client/agent/panel/diff";
 import { parseMarkdown, parseInlines } from "../src/client/agent/panel/md";
 import { ChangeRegistry, TermLog } from "../src/client/agent/panel/registry";
 import { makeActor } from "../src/client/agent/panel/actor";
-import { toolRunIsTerminal } from "../src/client/agent/panel/view";
+import { toolRunIsTerminal } from "../src/client/agent/panel/workbench-model";
 
 // ═══════════════════════════════════════════════════════════════
 // Hierarki activity — grup selesai otomatis collapse

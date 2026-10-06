@@ -734,82 +734,10 @@ a:hover { text-decoration: underline; }
   border-top-color: var(--line-strong);
 }
 
-#agent-tech {
-  flex: 0 0 340px;
-  min-width: 300px;
-  min-height: 0;
-  padding: 12px;
-  border-radius: var(--r-xl);
-  background: var(--ink-1);
-  border: 1px solid var(--line);
-  border-top-color: var(--line-strong);
-}
-#agent-tech.hidden { display: none; }
-
-/* Tombol toggle panel Review/Terminal/Browser di header (sb-header). */
-#btn-tech-toggle.active {
-  color: var(--lamp);
-  border-color: var(--lamp);
-  background: var(--accent-subtle);
-}
-
-/* Panel ke-4 dibuka lewat tombol header → panggung Live2D otomatis
-   disembunyikan supaya ruang horizontalnya pindah ke agent-workspace,
-   bukan berebut lebar dengan karakter. Ditutup lagi → panggung balik normal.
-   Class agent-tech-open dipasang/dicabut oleh app.js (wireTechToggleHeader). */
-.app.agent-tech-open #stage,
-.app.agent-tech-open #sb-gutter {
-  display: none;
-}
-.app.agent-tech-open #agent-workspace,
-.app.agent-tech-open #agent-workspace.agent-wide {
-  flex: 1 1 auto;
-}
-#as-tech-root {
-  height: 100%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
 /* Technical pane bisa diciutkan saat detail tidak dibutuhkan. Di desktop,
    combined workspace ikut mengecil sehingga ruang kembali ke stage; inline
    resize lama dipertahankan dan kembali berlaku saat pane dibuka lagi. */
-#agent-tech.collapsed {
-  flex-basis: 38px;
-  min-width: 38px;
-  width: 38px;
-  padding: 8px 5px;
-  overflow: hidden;
-}
-#agent-tech.collapsed .as-tab,
-#agent-tech.collapsed .as-page {
-  display: none !important;
-}
-#agent-tech.collapsed .as-tabs {
-  justify-content: center;
-  border-bottom: 0;
-}
-.as-tech-collapse {
-  flex: none;
-  width: 24px;
-  height: 24px;
-  margin-left: auto;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-  font: 15px/1 var(--font-ui);
-}
-.as-tech-collapse:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
-  background: var(--ink-3);
-}
-/* Default agent-wide sudah clamp viewport — pengatur tech-collapsed lama
-   (558px !important) dicabut: bertabrakan dan membuat tech collapse justru
-   memperkecil workspace. */
+
 @media (min-width: 1500px) { /* (kosong — placeholder rentang) */ }
 
 /* Mode Agent (assistant) saja: panggung bersih — HUD (hint interaksi,
@@ -1005,22 +933,6 @@ body.mode-chat #live-state { display: none !important; }
 }
 .chat-input:focus-within { border-color: var(--line-focus); }
 
-#bubble-input,
-#as-input {
-  flex: 1;
-  min-width: 0;
-  height: 32px;
-  padding: 0 8px;
-  font-family: inherit;
-  font-size: 13px;
-  color: var(--text);
-  background: transparent;
-  border: none;
-  outline: none;
-}
-#bubble-input::placeholder,
-#as-input::placeholder { color: var(--muted); }
-
 #btn-mic {
   flex-shrink: 0;
   height: 32px;
@@ -1047,8 +959,7 @@ body.mode-chat #live-state { display: none !important; }
   pointer-events: none;
 }
 
-#btn-bubble,
-#btn-as-send {
+#btn-bubble {
   flex-shrink: 0;
   height: 32px;
   padding: 0 14px;
@@ -1061,10 +972,8 @@ body.mode-chat #live-state { display: none !important; }
   background: var(--lamp);
   border: 1px solid transparent;
 }
-#btn-bubble:hover,
-#btn-as-send:hover { background: var(--lamp-soft); }
-#btn-bubble:active,
-#btn-as-send:active { background: var(--lamp); }
+#btn-bubble:hover { background: var(--lamp-soft); }
+#btn-bubble:active { background: var(--lamp); }
 
 .quick-phrases {
   display: flex;
@@ -3368,182 +3277,6 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ── Assistant ──────────────────────────────────────────────────── */
-/* (kelas .as-* untuk panel agent ada di blok "Assistant (remake ala
-   ZCode)" di bawah — log lama .as-log/.as-line/.as-approval diganti
-   transcript baru bersama port panel ke TS) */
-/* Kotak rencana kerja (update_plan) & memory di panel assistant */
-.as-plan {
-  border: 1px solid var(--line);
-  border-left: 2px solid var(--mint);
-  background: var(--ink-1);
-  border-radius: var(--r-sm);
-  padding: 8px 10px;
-  font-size: 12px;
-  margin-bottom: 6px;
-  max-height: 180px;
-  overflow-y: auto;
-}
-.as-plan .as-plan-item {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  padding: 1px 0;
-}
-.as-plan .as-plan-item .st {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  flex: none;
-  width: 74px;
-}
-.as-plan .as-plan-item .st.pending { color: var(--muted); }
-.as-plan .as-plan-item .st.in_progress { color: var(--lamp); }
-.as-plan .as-plan-item .st.done { color: var(--ok, #7dc98f); }
-.as-plan .as-plan-item .st.failed { color: var(--lamp); text-decoration: line-through; }
-.as-plan .as-plan-item .note { color: var(--muted); font-size: 11px; }
-.as-plan .as-mem-row {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  padding: 2px 0;
-}
-.as-plan .as-mem-row .k {
-  font-family: var(--font-mono);
-  color: var(--mint);
-  flex: none;
-}
-.as-workdir {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.as-workdir input { width: 100%; }
-
-/* Kartu TASK hero → SECTION: pelajaran ZCode — struktur bukan dari kotak.
-   Task adalah header kerja di surface bersama; kekuatannya dari tipografi.
-   (P3: satu-satunya kotak yang sengaja kuat adalah decision bar.) */
-.as-task {
-  flex: none;
-  padding: 2px 2px 0;
-}
-.as-task-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 5px;
-}
-.as-task-label {
-  font-size: 9.5px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  color: var(--muted);
-}
-.as-task-prog {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-dim);
-}
-.as-task-text {
-  max-width: 72ch;
-  font-size: 14.5px;
-  font-weight: 600;
-  line-height: 1.42;
-  color: var(--text);
-}
-.as-task-empty {
-  font-size: 11.5px;
-  line-height: 1.45;
-  color: var(--muted);
-}
-.as-task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-top: 10px;
-  /* Checklist rencana = bagian dari header kerja (tanpa border penutup) —
-     hierarki lewat indentasi + glyph status, bukan kotak dalam kotak. */
-  padding: 0 0 2px 1px;
-}
-.as-task .as-plan-item {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  min-width: 0;
-  padding: 1px 0;
-  font-size: 11.5px;
-  color: var(--text-dim);
-}
-.as-task .as-plan-item .st {
-  flex: 0 0 12px;
-  width: 12px;
-  overflow: hidden;
-  font-size: 0;
-}
-.as-task .as-plan-item .st::before { font-family: var(--font-mono); font-size: 11px; }
-.as-task .as-plan-item .st.pending::before { content: "○"; color: var(--muted); }
-.as-task .as-plan-item .st.in_progress::before { content: "●"; color: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
-.as-task .as-plan-item .st.done::before { content: "✓"; color: var(--mint); }
-.as-task .as-plan-item .st.failed::before { content: "×"; color: var(--coral); }
-.as-task .as-plan-item .note { color: var(--muted); font-size: 10px; }
-
-/* Antrean task Worker (§9): daftar parked + batal per-task (§11).
-   Strip mikro di surface bersama — bukan panel kedua. */
-.as-queue {
-  flex: none;
-  padding: 0 2px;
-}
-.as-queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-top: 6px;
-}
-.as-queue-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.as-queue-pos {
-  flex: 0 0 auto;
-  min-width: 14px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-dim);
-  text-align: right;
-}
-.as-queue-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.as-queue-cancel {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-}
-.as-queue-cancel:hover {
-  color: var(--coral);
-  border-color: var(--coral);
-}
-
-/* ── Assistant (remake ala ZCode) ───────────────────────────────── */
-/* Kontrak kelas baru: .as-root, .as-statusbar, .as-pill*, .as-tl, .as-blk*,
-   .as-tool*, .as-appr*, .as-sub*, .as-caret, .as-clipped — dibangun oleh
-   src/client/agent/panel/view.ts (bundle.js). .as-plan/.as-mem-row lama
-   dipertahankan (dipakai widget plan & memory yang baru). */
 
 /* Workspace agent melebar saat mode Assistant; kolom percakapan dan teknis
    tetap dua permukaan matte terpisah. */
@@ -3551,912 +3284,77 @@ input[type="range"]::-moz-range-thumb {
   min-width: 360px;
 }
 
-.as-root {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  /* Skala ritme workbench: region dipisah napas sedang, item dalam region
-     rapat. Hierarki dari jarak + hairline, bukan dari kotak. */
-  gap: 7px;
-}
-
 /* HEAD terpadu: status ambient + TASK + PLAN — satu section kerja dengan
    hairline bawah (ganti dua kartu terpisah pada Fase 3.x). */
-.as-head {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line-soft);
-}
+
 /* Workspace chrome: satu baris utilitas, bukan form konfigurasi. */
-.as-ws {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-height: 28px;
-  padding-bottom: 5px;
-  border-bottom: 1px solid var(--line-soft);
-}
-.as-ws-label {
-  flex: none;
-  font-size: 9.5px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-.as-ws input {
-  flex: 1 1 auto;
-  /* Path panjang jangan menyita baris — biarkan ellipsis bekerja, sisakan
-     ruang tetap untuk 4 tombol ikon di kanannya. */
-  flex-basis: 0;
-  min-width: 0;
-  height: 24px;
-  padding: 2px 6px;
-  border: 0;
-  background: transparent;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-dim);
-  text-overflow: ellipsis;
-}
-.as-ws input:focus { background: var(--ink-input); outline: 1px solid var(--line-focus); }
-.as-ws .mini-btn {
-  flex: none;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  font-size: 11px;
-}
-/* Ikon toolbar workspace: netral (cancel/reset/memory) vs danger (stop/matikan
-   agent) — sebelumnya glyph teks (■ × ↺ M) ambigu, terutama × dan ■ yang
-   keduanya kesannya "berhenti". Sekarang ikon beda bentuk + as-stop dikasih
-   warna rose supaya jelas ini aksi yang lebih berat (matikan runtime). */
-.as-toolicon svg { display: block; }
-.as-toolicon--danger {
-  color: var(--rose);
-  border-color: var(--mint-border, var(--line));
-}
-.as-toolicon--danger:hover {
-  color: var(--rose);
-  background: color-mix(in srgb, var(--rose) 16%, var(--ink-2));
-  border-color: var(--rose);
-}
-.as-toolicon:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.as-toolicon:disabled:hover {
-  background: var(--ink-2);
-  border-color: var(--line);
-  color: var(--text-dim);
-}
-.as-statusbar {
-  display: flex;
-  align-items: center;
-  flex: none;
-  min-height: 24px;
-  padding: 0 2px;
-}
+
 /* Hero state: bukan badge dekoratif — ini jawaban pertama untuk "agent sedang
    apa?". Tanpa kapsul/background agar bobotnya datang dari teks + state. */
-.as-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-dim);
-}
-.as-pill-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-  flex: none;
-}
-.as-pill[data-state="idle"] .as-pill-dot { background: var(--mint); }
-.as-pill[data-state="busy"] .as-pill-dot,
-.as-pill[data-state="busyOther"] .as-pill-dot,
-.as-pill[data-state="thinking"] .as-pill-dot {
-  background: var(--lamp);
-  animation: ellipsis-dot 1.2s infinite;
-}
-.as-pill[data-state="busy"] { color: var(--text); }
-/* Nunggu izin: dot rose berkedip + label menonjol (state dari
-   pendingApprovals — saat loop pause untuk approval busy=false). */
-.as-pill[data-state="approval"] { color: var(--text); border-color: var(--coral-border); }
-.as-pill[data-state="approval"] .as-pill-dot {
-  background: var(--coral);
-  animation: ellipsis-dot 0.9s infinite;
-}
-
-/* ── STREAM: timeline aktivitas per giliran (Fase 4 rebuild) ────────
-   Satu permukaan tanpa frame; turn = unit kerja; baris = atom aktivitas.
-   Hierarki dari tipografi + indentasi + ritme, bukan kotak. */
-.as-stream {
-  flex: 1 1 auto;
-  min-height: 120px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 2px 6px 2px 2px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  scrollbar-gutter: stable;
-}
-.as-stream > * { flex: none; }
-.as-stream-empty {
-  margin: auto;
-  padding: 18px 14px;
-  font-size: 11.5px;
-  line-height: 1.5;
-  color: var(--muted);
-  text-align: center;
-  max-width: 46ch;
-}
 
 /* Turn: header kalimat dua-tingkat (label | snippet+meta) + isi. Aktif
    terbuka penuh (rail amber); selesai = header saja, meredup. */
-.as-turn { border-left: 2px solid transparent; }
-.as-turn[data-state="open"] { border-left-color: var(--lamp); }
-.as-turn[data-state="interrupted"] { border-left-color: var(--coral); }
-.as-turn + .as-turn { margin-top: 8px; }
-.as-turn-hd {
-  display: grid;
-  grid-template-columns: 74px 1fr 14px;
-  gap: 10px;
-  align-items: baseline;
-  width: 100%;
-  padding: 3px 4px 3px 2px;
-  border: none;
-  border-radius: var(--r-xs);
-  background: none;
-  cursor: pointer;
-  text-align: left;
-}
-.as-turn-hd:hover { background: var(--ink-2); }
-.as-turn-state {
-  font: 600 10px/1.6 var(--font-ui);
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  color: var(--muted);
-  white-space: nowrap;
-}
-.as-turn[data-state="open"] .as-turn-state { color: var(--lamp); }
-.as-turn[data-state="completed"] .as-turn-state { color: var(--mint); }
-.as-turn[data-state="interrupted"] .as-turn-state { color: var(--coral); }
-.as-turn-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.as-turn-task {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.as-turn[data-state="open"] .as-turn-task { color: var(--text); font-weight: 600; }
-.as-turn-meta { display: flex; gap: 8px; font: 10px/1.4 var(--font-mono); color: var(--muted); }
-.as-turn .as-chev { color: var(--muted); align-self: center; opacity: 0; transition: opacity .12s ease; }
-.as-turn-hd:hover .as-chev, .as-turn.open > .as-turn-hd .as-chev { opacity: 1; }
-.as-turn.closed > .as-turn-hd .as-chev { transform: rotate(-90deg); }
-.as-turn-bd { display: grid; gap: 2px; padding: 2px 0 6px 12px; }
-.as-turn.closed .as-turn-bd { display: none; }
 
 /* Baris tool — atom aktivitas tanpa frame; status lewat dot warna.
    Chevron invisible-until-hover (pola tool-summary ZCode). */
-.as-trow { font-family: var(--font-mono); font-size: 11.5px; }
-.as-trow-hd {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 2px 4px 2px 0;
-  border: none;
-  border-radius: var(--r-xs);
-  background: none;
-  text-align: left;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
-}
-.as-trow-hd:hover { background: var(--ink-2); }
-.as-trow .as-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-  flex: none;
-}
-.as-trow[data-status="running"] .as-dot { background: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
-.as-trow[data-status="done"] .as-dot { background: var(--mint); }
-.as-trow[data-status="error"] .as-dot { background: var(--coral); }
-.as-trow-name { color: var(--text); flex: none; }
-.as-trow-sum {
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.as-trow-dur { flex: none; color: var(--muted); font-size: 10px; }
-.as-trow .as-chev {
-  flex: none;
-  color: var(--muted);
-  opacity: 0;
-  transition: opacity .12s ease, transform .12s ease;
-}
-.as-trow-hd:hover .as-chev { opacity: 1; }
-.as-trow.open > .as-trow-hd .as-chev { opacity: 1; transform: rotate(90deg); }
+
 /* Detail terbuka = indentasi milik baris di atasnya (pola ⎿). */
-.as-trow-bd {
-  display: none;
-  margin: 1px 0 3px 12px;
-  padding: 2px 0 2px 10px;
-  border-left: 1px solid var(--line-soft);
-}
-.as-trow.open .as-trow-bd { display: grid; gap: 4px; }
 
 /* Grup agregat: run tool se-keluarga (jelajah/terminal) dilipat jadi satu
    baris; ada yang berjalan → terbuka otomatis. */
-.as-tgroup-hd {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 2px 4px 2px 0;
-  border: none;
-  border-radius: var(--r-xs);
-  background: none;
-  text-align: left;
-  color: var(--muted);
-  font: 11.5px/1.4 var(--font-mono);
-  cursor: pointer;
-}
-.as-tgroup-hd:hover { color: var(--text-dim); background: var(--ink-2); }
-.as-tgroup .as-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: var(--mint); flex: none;
-}
-.as-tgroup[data-status="running"] .as-dot { background: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
-.as-tgroup[data-status="error"] .as-dot { background: var(--coral); }
-.as-tgroup-label { color: var(--text-dim); flex: none; }
-.as-tgroup-cnt { color: var(--muted); font-size: 10px; }
-.as-tgroup .as-chev { color: var(--muted); margin-left: auto; opacity: 0; transition: opacity .12s ease, transform .12s ease; }
-.as-tgroup-hd:hover .as-chev { opacity: 1; }
-.as-tgroup.open > .as-tgroup-hd .as-chev { opacity: 1; transform: rotate(90deg); }
-.as-tgroup-bd { display: none; margin: 1px 0 3px 12px; padding: 2px 0 2px 10px; border-left: 1px solid var(--line-soft); }
-.as-tgroup.open .as-tgroup-bd { display: grid; gap: 2px; }
 
 /* Output/args panjang → clip + fade + pil "tampilkan semua" (bukan
    scrollbar dalam). Konten data tetap ber-background. */
-.as-out { position: relative; }
-.as-out.clipped { max-height: 168px; overflow: hidden; }
-.as-out.clipped::after {
-  content: "";
-  position: absolute;
-  inset: auto 0 0 0;
-  height: 44px;
-  background: linear-gradient(to bottom, transparent, var(--ink-0));
-  pointer-events: none;
-}
-.as-out-more {
-  position: absolute;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 2px 10px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--ink-1);
-  color: var(--text-dim);
-  font: 10px/1.6 var(--font-ui);
-  cursor: pointer;
-}
-.as-out-more:hover { color: var(--text); border-color: var(--line-strong); }
 
 /* Baris narasi kerja (agent bicara di tengah eksekusi) — kutipan redup,
    bukan bubble chat; conversation tetap khusus giliran user↔jawaban. */
-.as-note {
-  padding: 1px 2px 1px 12px;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.as-note.streaming .as-note-txt::after {
-  content: "▍";
-  color: var(--lamp);
-  animation: ellipsis-dot 1.2s infinite;
-}
 
-/* ── CONVERSATION strip: turun hierarki, tetap ada ─────────────────
-   Komunikasi ≠ pekerjaan: worklog = timeline kegiatan, strip ini = chat.
-   Pemisah hairline + napas sedang; compact memperkecil dengan mask fade. */
-.as-conv {
-  flex: 0 1 auto;
-  min-height: 44px;
-  max-height: 210px;
-  overflow-y: auto;
-  overflow-x: hidden;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 9px 2px 2px;
-  border-top: 1px solid var(--line-soft);
-  scrollbar-gutter: stable;
-}
-.as-conv > * { flex: none; }
-.as-conv.compact { max-height: 148px; -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent); mask-image: linear-gradient(to bottom, #000 72%, transparent); }
-.as-blk {
-  font-size: 12px;
-  line-height: 1.5;
-  padding: 2px 6px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.as-blk .as-who {
-  display: block;
-  font-size: 9.5px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 2px;
-}
 /* Di conversation, agent = teks polos (ZCode: prosa tanpa bubble) —
    "agent mengatakan sesuatu" ≠ kotak kerja. */
-.as-conv .as-blk { border: none; background: transparent; }
-.as-conv .as-blk.as-user {
-  align-self: flex-end;
-  max-width: 84%;
-  background: var(--ink-2);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-sm);
-  padding: 5px 10px;
-  color: var(--text-dim);
-}
-.as-conv .as-blk.as-speak {
-  align-self: flex-end;
-  max-width: 84%;
-  background: var(--accent-subtle);
-  border-radius: var(--r-sm);
-  padding: 5px 10px;
-  color: var(--lamp-soft);
-  font-style: italic;
-}
-.as-conv .as-blk.as-final { padding: 2px 2px; }
-.as-blk.as-agent { color: var(--text-dim); }
+
 /* Baris kejadian sistem di worklog — mikro, mono, redup; bukan blok. */
-.as-blk.as-status {
-  color: var(--muted);
-  font: 10.5px/1.5 var(--font-mono);
-  padding: 1px 2px 1px 12px;
-}
-.as-blk.as-status.ok { color: var(--ok, #7dc98f); }
-.as-blk.as-status.err { color: var(--coral); }
-.as-blk.as-status.warn { color: var(--lamp); }
 
 /* Caret streaming */
-.as-caret {
-  display: inline-block;
-  width: 7px;
-  height: 13px;
-  margin-left: 2px;
-  vertical-align: text-bottom;
-  background: var(--lamp);
-  animation: ellipsis-dot 0.9s infinite;
-}
 
 /* Badge level tool: "auto" (mint, jalan sendiri) / "izin" (amber, butuh
    persetujuan) — user paham kenapa sesuatu auto vs diminta izin. */
-.as-lvl {
-  flex: none;
-  font-family: var(--font-ui);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  padding: 0 4px;
-  color: var(--muted);
-}
-.as-lvl.safe { color: var(--mint); border-color: var(--mint-dim); }
-.as-lvl.mutating { color: var(--lamp-soft); border-color: var(--accent-border); }
-/* Blok data di dalam detail (indentasi): argumen & hasil — background hanya
-   untuk DATA; hasil panjang di-clip oleh .as-out (tanpa scrollbar dalam). */
-.as-tool-args,
-.as-tool-res {
-  margin: 0;
-  padding: 4px 7px;
-  background: var(--ink-0);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-dim);
-  font-size: 10.5px;
-  line-height: 1.5;
-}
-.as-lbl {
-  font-family: var(--font-ui);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-.as-clipped {
-  display: block;
-  margin-top: 3px;
-  color: var(--muted);
-  font-family: var(--font-ui);
-  font-style: italic;
-}
 
-/* Kartu approval di dalam decision bar — frame amber sudah dipikul kartu
-   luar (as-controls), jadi isi dibuat flush: tanpa border/bg ganda, cukup
-   rail pulse tipis sebagai penanda berkedip. */
-.as-blk.as-appr {
-  border: none;
-  background: transparent;
-  padding: 1px 2px 1px 10px;
-}
 /* Pulse perhatian: rail amber berkedip opacity (opacity-only, patuh
    manifesto — precedent keyframe ellipsis-dot). */
 @keyframes appr-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
 }
-.as-blk.as-appr::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--lamp);
-  animation: appr-pulse 1.4s ease-in-out infinite;
-}
-.as-blk.as-appr { position: relative; }
+
 /* Kartu approval hasil hydrate di luar decision bar (worklog) tetap perlu
    terlihat sebagai pengecualian. */
-.as-work .as-blk.as-appr {
-  border: 1px solid var(--accent-border);
-  border-left: 2px solid var(--lamp);
-  background: var(--accent-subtle);
-  padding: 6px 9px;
-}
-.as-appr-hd {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-}
-.as-appr-ttl {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--lamp-soft);
-}
-.as-appr-row {
-  display: flex;
-  gap: 8px;
-  margin-top: 9px;
-}
-/* Decision bar: tombol keputusan lebih besar dari mini-btn biasa — ini
-   titik kontrol eksekusi, target sentuh utama saat agent berhenti. */
-.as-appr-ok,
-.as-appr-no {
-  min-height: 30px;
-  padding: 4px 16px;
-  font-size: 12px;
-  font-weight: 600;
-}
-.as-appr-ok {
-  background: var(--lamp);
-  color: var(--ink-on-lamp);
-  border-color: var(--lamp);
-}
-.as-appr-ok:hover { background: var(--lamp-soft); }
-.as-appr-ok:disabled,
-.as-appr-no:disabled { opacity: 0.4; cursor: default; }
-.as-appr-always {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  margin-top: 7px;
-  color: var(--muted);
-  font-size: 11.5px;
-  cursor: pointer;
-  user-select: none;
-}
-.as-appr-always input { accent-color: var(--lamp); cursor: pointer; }
-/* Daftar rencana di dalam kartu approval rencana (Fase 2) — kotak as-plan
-   dipakai ulang, cukup dirapatkan agar tak bergaya kotak-dalam-kotak. */
-.as-appr-plan { margin-bottom: 4px; max-height: 150px; }
 
-/* ── Fase 3: harness-first ─────────────────────────────────────────────
-   Garis keadaan = anchor; zona kontrol eksekusi pinned; worklog tersegmen;
-   Live2D turun jadi presence dock yang bisa dilipat. Matte, satu aksen. */
 /* Statebar = baris status ambient di surface bersama (tanpa frame) —
    hairline bawah memisahkannya dari objek kerja di bawahnya. */
-.as-statebar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 1px 2px 8px;
-  border-bottom: 1px solid var(--line-soft);
-  min-height: 26px;
-}
-.as-state-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-.as-statebar[data-state="idle"] .as-state-dot { background: var(--mint); }
-.as-statebar[data-state="thinking"] .as-state-dot,
-.as-statebar[data-state="executing"] .as-state-dot { background: var(--lamp); animation: as-pulse 1.6s ease-in-out infinite; }
-.as-statebar[data-state="waitingPlan"] .as-state-dot,
-.as-statebar[data-state="waitingApproval"] .as-state-dot { background: var(--lamp); }
-.as-statebar[data-state="waitingPlan"],
-.as-statebar[data-state="waitingApproval"] { border-color: var(--lamp); }
-.as-state-word { color: var(--text); font-weight: 600; white-space: nowrap; }
-.as-state-what { color: var(--text-dim); font: 11px/1.3 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.as-state-elapsed { color: var(--muted); font: 10.5px/1.3 var(--font-mono); flex: none; }
-.as-state-counts { margin-left: auto; color: var(--muted); font: 10px/1.3 var(--font-mono); letter-spacing: .03em; white-space: nowrap; }
-.as-state-btn { flex: none; border: none; background: none; color: var(--muted); font: 10.5px/1.3 var(--font-ui); cursor: pointer; padding: 2px 4px; border-radius: var(--r-xs); }
-.as-state-btn:hover { color: var(--text); background: var(--ink-2); }
-@keyframes as-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
-@media (prefers-reduced-motion: reduce) { .as-state-dot { animation: none !important; } }
+
+@media (prefers-reduced-motion: reduce) {  }
 
 /* Chip allowlist sesi di statebar: kecil, mono, muted — menjawab
    "kok tool ini bebas?" tanpa menyembunyikan fakta itu. */
-.as-state-allow {
-  flex: none;
-  padding: 1px 6px;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--r-xs);
-  color: var(--muted);
-  font: 9.5px/1.5 var(--font-mono);
-  letter-spacing: .03em;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 180px;
-}
-
-/* Decision bar: SATU-SATUNYA kartu yang sengaja menonjol (pelajaran ZCode:
-   kotak mengekodekan pengecualian). Saat semua lainnya box-free, frame
-   amber inilah yang terbaca "agent berhenti, kamu memutuskan". */
-.as-controls {
-  display: grid;
-  gap: 8px;
-  margin-top: 0;
-  padding: 10px 12px 11px;
-  border: 1px solid var(--lamp);
-  border-left-width: 3px;
-  border-radius: var(--r-sm);
-  background: color-mix(in srgb, var(--lamp) 5%, var(--ink-1));
-}
-.as-controls.empty { display: none; }
-.as-controls-hd {
-  font: 600 11px/1.4 var(--font-ui);
-  color: var(--lamp);
-  letter-spacing: .02em;
-}
-
-/* RESULT: jawaban final giliran terakhir dipromosikan — prosa penuh warna
-   dengan meta turn; hairline atas/bawah memisahkannya dari stream dan
-   decision bar. Label "AGENT" disembunyikan (region sudah selaras). */
-.as-result {
-  flex: none;
-  padding: 7px 2px 8px;
-  border-top: 1px solid var(--line-soft);
-}
-.as-result.hidden { display: none; }
-.as-result-hd {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin-bottom: 4px;
-}
-.as-result-label {
-  font: 600 10px/1.6 var(--font-ui);
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  color: var(--mint);
-}
-.as-result-meta { font: 10px/1.4 var(--font-mono); color: var(--muted); }
-.as-result-body .as-who { display: none; }
-.as-result-body { font-size: 12px; }
-
-.as-task-step { margin: 5px 0 0; color: var(--text-dim); font: 11.5px/1.4 var(--font-mono); }
 
 /* Status live di dalam kartu TASK — menempel pada objek kerja, bukan
    terpisah; jawaban instan "sekarang di mana?" tanpa membaca percakapan. */
-.as-task-status {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 6px;
-  min-height: 18px;
-}
-.as-task-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
-.as-task.has-state[data-state="idle"] .as-task-dot { background: var(--mint); }
-.as-task.has-state[data-state="thinking"] .as-task-dot,
-.as-task.has-state[data-state="executing"] .as-task-dot { background: var(--lamp); animation: as-pulse 1.6s ease-in-out infinite; }
-.as-task.has-state[data-state="waitingPlan"] .as-task-dot,
-.as-task.has-state[data-state="waitingApproval"] .as-task-dot { background: var(--lamp); }
-.as-task.has-state[data-state="off"] .as-task-dot { background: var(--muted); }
-.as-task-stword { color: var(--text); font-weight: 600; font-size: 11.5px; white-space: nowrap; }
-.as-task-stwhat { color: var(--text-dim); font: 10.5px/1.3 var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.as-task-stelapsed { color: var(--muted); font: 10px/1.3 var(--font-mono); flex: none; }
 
 /* Dock presence Live2D di agent mode: pindah ke ujung kanan, ramping,
    bisa dilipat total — area kerja melebar, tanpa lubang. */
-body.agent-mode #stage {
-  order: 3;
-  flex: 0 0 250px;
-  min-width: 190px;
-  /* Presence layer, bukan aplikasi kedua: tanpa chrome kartu (radius/border
-     penuh), menyatu dengan background app — hanya hairline pemisah di kiri. */
-  border: none;
-  border-left: 1px solid var(--line);
-  border-radius: 0;
-}
-body.agent-mode #agent-workspace { order: 1; }
-body.agent-mode #sb-gutter { order: 2; }
-body.agent-stage-hidden #stage, body.agent-stage-hidden #sb-gutter { display: none !important; }
-body.agent-stage-hidden #agent-workspace { flex-grow: 1; }
+
 /* Aturan lama menyembunyikan panggung saat panel teknis terbuka — di agent
    mode panggung adalah DOCK (250px) dan tetap hadir di sampingnya. */
-body.agent-mode .app.agent-tech-open #stage,
-body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
 
 /* Baris subagent — event timeline, bukan chip berkotak. */
-.as-blk.as-sub {
-  display: flex;
-  gap: 7px;
-  align-items: baseline;
-  border: none;
-  background: transparent;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  padding: 2px 2px 2px 12px;
-}
-.as-sub-name {
-  color: var(--lamp-soft);
-  flex: none;
-}
-.as-sub-name::before { content: "⧉ "; }
-.as-sub[data-state="done"] .as-sub-name { color: var(--ok, #7dc98f); }
-
-/* ── Diff & ringkasan perubahan file (panel agent, vibecoding) ──── */
-/* Kelas: .as-diff*, .as-chg* — dibangun view.ts (bundle.js). Solid +
-   hairline, mono 11px; baris + mint / − coral / konteks redup. */
-.as-diff {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  background: var(--ink-0);
-  overflow: hidden;
-}
-.as-diff-hd {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 4px 8px;
-  text-align: left;
-  font: inherit;
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-}
-.as-diff-hd:hover { background: var(--ink-3); }
-.as-diff-kind {
-  flex: none;
-  font-family: var(--font-ui);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--muted);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xs);
-  padding: 0 4px;
-}
-.as-diff[data-kind="write"] .as-diff-kind { color: var(--lamp-soft); border-color: var(--accent-border); }
-.as-diff[data-kind="delete"] .as-diff-kind { color: var(--coral); border-color: var(--coral-border); }
-.as-diff-path {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl; /* path panjang: ekor (nama file) yang terlihat */
-  text-align: left;
-}
-.as-diff-stat {
-  flex: none;
-  display: inline-flex;
-  gap: 5px;
-  font-size: 10px;
-}
-.as-diff-stat .add { color: var(--mint); }
-.as-diff-stat .del { color: var(--coral); }
-.as-diff .as-chev {
-  flex: none;
-  color: var(--muted);
-  transition: transform 0.12s ease;
-}
-.as-diff.open .as-chev { transform: rotate(180deg); }
-.as-diff-bd {
-  display: none;
-  border-top: 1px solid var(--line-soft);
-  max-height: 260px;
-  overflow: auto;
-}
-.as-diff.open .as-diff-bd { display: block; }
-.as-diff-h {
-  padding: 2px 8px;
-  color: var(--muted);
-  background: var(--ink-2);
-  font-size: 10px;
-}
-.as-diff-ln {
-  padding: 0 8px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--text-dim);
-}
-.as-diff-ln.add { background: var(--mint-dim); color: var(--mint); }
-.as-diff-ln.del { background: var(--coral-soft); color: var(--coral); }
-.as-diff-ln.ctx { color: var(--muted); }
 
 /* Ringkasan giliran "N file berubah +a −r" — baris hasil (bukan kartu);
    daftar file terlipat default, diff per file tetap data-block. */
-.as-blk.as-chg { border: none; background: transparent; padding: 1px 2px 1px 12px; }
-.as-chg-hd {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 2px 4px 2px 0;
-  border: none;
-  border-radius: var(--r-xs);
-  background: none;
-  text-align: left;
-  font: inherit;
-  cursor: pointer;
-}
-.as-chg-hd:hover { background: var(--ink-2); }
-.as-chg-ttl {
-  font: 600 10px/1.5 var(--font-ui);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--mint);
-}
-.as-chg-list { display: none; padding: 2px 0 3px; }
-.as-chg-list.open, .as-chg.open .as-chg-list { display: grid; gap: 3px; }
-.as-chg-item .as-diff { margin: 2px 0 0 12px; }
-.as-chg-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 2px 0;
-  text-align: left;
-  font: inherit;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-}
-.as-chg-row:hover { color: var(--text); }
-.as-chg-kind {
-  flex: none;
-  width: 40px;
-  font-family: var(--font-ui);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--muted);
-}
-.as-chg-path {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 /* ── Markdown jawaban agent (render token, tanpa innerHTML) ─────── */
-/* Kelas: .as-md* — solid + hairline, tanpa efek. */
-.as-md { font-size: 12.5px; }
-.as-md-h { font-weight: 600; color: var(--text); margin: 6px 0 2px; }
-.as-md-h1 { font-size: 15px; }
-.as-md-h2 { font-size: 14px; }
-.as-md-h3, .as-md-h4, .as-md-h5, .as-md-h6 { font-size: 13px; }
-.as-md-p { margin: 2px 0; white-space: pre-wrap; word-break: break-word; }
-.as-md-code {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  background: var(--ink-input);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  padding: 0 4px;
-  color: var(--lamp-soft);
-}
-.as-md-pre {
-  margin: 4px 0;
-  padding: 6px 8px;
-  background: var(--ink-input);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.5;
-  max-height: 240px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-dim);
-}
-.as-md-quote {
-  border-left: 2px solid var(--line-strong);
-  padding: 1px 0 1px 8px;
-  margin: 4px 0;
-  color: var(--muted);
-  white-space: pre-wrap;
-}
-.as-md-list { margin: 2px 0; padding-left: 20px; }
-.as-md-list li { margin: 1px 0; }
-.as-md-link { color: var(--lamp-soft); text-decoration: underline; }
 
 /* ── Tab pane teknis agent: Review / Terminal / Browser ──────────── */
-/* Kelas: .as-tabs, .as-tab, .as-page*, .as-rev*, .as-term*, .as-browser */
-#agent-tech .as-tabs {
-  display: flex;
-  gap: 12px;
-  flex: none;
-  min-height: 25px;
-  border-bottom: 1px solid var(--line-soft);
-}
-.as-tab {
-  padding: 2px 1px 4px;
-  font: inherit;
-  font-size: 10.5px;
-  color: var(--muted);
-  background: none;
-  border: none;
-  border-bottom: 1px solid transparent;
-  cursor: pointer;
-}
-.as-tab:hover { color: var(--text-dim); }
-.as-tab.active {
-  color: var(--text);
-  border-bottom-color: var(--lamp);
-}
-.as-page {
-  flex: 1 1 auto;
-  min-height: 130px;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--ink-input);
-  padding: 5px;
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-.as-browser { padding: 0; }
+
 #as-browser-root {
   flex: 1 1 auto;
   min-height: 0;
@@ -4544,125 +3442,11 @@ body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
   .br-actions { flex-wrap: wrap; }
   .br-danger { margin-left: 0; }
 }
-.as-page-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 2px;
-}
-.as-page-ttl {
-  flex: 1 1 auto;
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-}
-.as-page-empty { color: var(--muted); font-size: 12px; padding: 8px 2px; }
-.as-rev-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 3px 4px;
-  border-radius: var(--r-xs);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-}
-.as-rev-row:hover { background: var(--ink-3); }
-.as-rev-path {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
-}
-.as-rev-revert { flex: none; }
-.as-term-row {
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  background: var(--ink-0);
-  padding: 5px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.as-term-row.err { border-color: var(--coral-border); }
-.as-term-cmd { color: var(--lamp-soft); white-space: pre-wrap; word-break: break-word; }
-.as-term-res {
-  margin: 4px 0 0;
-  padding: 4px 6px;
-  background: var(--ink-input);
-  border: 1px solid var(--line-soft);
-  border-radius: var(--r-xs);
-  max-height: 140px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-dim);
-}
-.as-term-row.err .as-term-res { color: var(--coral); }
-.as-term-run { color: var(--muted); font-style: italic; margin-top: 2px; }
 
 /* Composer: bidang command tunggal; tombol ↑ satu-satunya aksen kuat. */
-.as-composer {
-  flex: none;
-  align-items: flex-end;
-  gap: 6px;
-  padding: 7px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--r-md);
-  background: var(--ink-input);
-}
-#mode-assistant .as-composer textarea {
-  width: 100%;
-  resize: none;
-  min-height: 34px;
-  max-height: 120px;
-  padding: 5px 3px;
-  border: 0;
-  background: transparent;
-  line-height: 1.45;
-  color: var(--text);
-}
-#mode-assistant .as-composer textarea:focus { outline: none; }
-.as-send {
-  flex: 0 0 34px;
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid var(--lamp);
-  border-radius: var(--r-sm);
-  background: var(--lamp);
-  color: var(--ink-on-lamp);
-  font-size: 18px;
-  line-height: 1;
-}
-.as-send:hover { background: var(--lamp-soft); }
-.as-send:disabled { opacity: 0.4; }
 
 /* Quick actions — satu gestur dengan quick phrase mode chat: tombol kecil
    berbingkai, bukan teks telanjang (affordance klik harus kelihatan). */
-.as-quick {
-  flex: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px;
-  padding: 1px 2px;
-}
-.as-quick-chip {
-  font: inherit;
-  font-size: 10.5px;
-  color: var(--text-dim);
-  background: var(--ink-2);
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  padding: 3px 9px;
-  cursor: pointer;
-  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-.as-quick-chip:hover { color: var(--text); border-color: var(--line-strong); background: var(--ink-3); }
 
 /* ── Splitter vertikal stage ↔ right panel ──────────────────── */
 #sb-gutter {
@@ -4704,10 +3488,7 @@ body.sb-resizing #agent-workspace { transition: none; }
   #agent-workspace.agent-wide {
     flex-basis: clamp(560px, 100vw - 360px, 900px);
   }
-  #agent-tech {
-    flex: 0 0 260px;
-    min-width: 220px;
-  }
+  
 }
 
 /* Di bawah 1025px shell pindah ke arah kolom penuh (media 1024) — splitter
@@ -4715,7 +3496,6 @@ body.sb-resizing #agent-workspace { transition: none; }
 @media (max-width: 1024px) {
   #sb-gutter { display: none; }
 }
-
 
 /* ── Status & utilitas ──────────────────────────────────────────── */
 
@@ -4807,11 +3587,7 @@ body.sb-resizing #agent-workspace { transition: none; }
     flex-basis: clamp(420px, 100vw - 300px, 700px);
   }
   #sidebar { padding: 10px; }
-  #agent-tech {
-    flex: 0 0 220px;
-    min-width: 200px;
-    padding: 10px;
-  }
+  
   #chat-log { min-height: 130px; }
   .msg-bubble { max-width: 88%; }
   .cfg-row { grid-template-columns: 1fr; }
