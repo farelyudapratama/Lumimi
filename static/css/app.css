@@ -3556,9 +3556,20 @@ input[type="range"]::-moz-range-thumb {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  /* Skala ritme workbench (pelajaran ZCode): region dipisah napas sedang,
-     item dalam region rapat. Hierarki dari jarak, bukan dari kotak. */
-  gap: 9px;
+  /* Skala ritme workbench: region dipisah napas sedang, item dalam region
+     rapat. Hierarki dari jarak + hairline, bukan dari kotak. */
+  gap: 7px;
+}
+
+/* HEAD terpadu: status ambient + TASK + PLAN — satu section kerja dengan
+   hairline bawah (ganti dua kartu terpisah pada Fase 3.x). */
+.as-head {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
 }
 /* Workspace chrome: satu baris utilitas, bukan form konfigurasi. */
 .as-ws {
@@ -3670,23 +3681,22 @@ input[type="range"]::-moz-range-thumb {
   animation: ellipsis-dot 0.9s infinite;
 }
 
-/* ── Workbench: WORK region (worklog eksekusi) ─────────────────────
-   Worklog = timeline di SURFACE BERSAMA — ZCode tidak membingkai
-   transkripnya; batas scroll cukup dari scrollbar + fade, bukan kotak. */
-.as-work {
+/* ── STREAM: timeline aktivitas per giliran (Fase 4 rebuild) ────────
+   Satu permukaan tanpa frame; turn = unit kerja; baris = atom aktivitas.
+   Hierarki dari tipografi + indentasi + ritme, bukan kotak. */
+.as-stream {
   flex: 1 1 auto;
-  min-height: 140px;
+  min-height: 120px;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 2px 6px 2px 2px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
   scrollbar-gutter: stable;
 }
-/* Anak-anak work region tak boleh ikut menyusut (scroll internal). */
-.as-work > * { flex: none; }
-.as-wempty {
+.as-stream > * { flex: none; }
+.as-stream-empty {
   margin: auto;
   padding: 18px 14px;
   font-size: 11.5px;
@@ -3695,6 +3705,167 @@ input[type="range"]::-moz-range-thumb {
   text-align: center;
   max-width: 46ch;
 }
+
+/* Turn: header kalimat dua-tingkat (label | snippet+meta) + isi. Aktif
+   terbuka penuh (rail amber); selesai = header saja, meredup. */
+.as-turn { border-left: 2px solid transparent; }
+.as-turn[data-state="open"] { border-left-color: var(--lamp); }
+.as-turn[data-state="interrupted"] { border-left-color: var(--coral); }
+.as-turn + .as-turn { margin-top: 8px; }
+.as-turn-hd {
+  display: grid;
+  grid-template-columns: 74px 1fr 14px;
+  gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 3px 4px 3px 2px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+.as-turn-hd:hover { background: var(--ink-2); }
+.as-turn-state {
+  font: 600 10px/1.6 var(--font-ui);
+  text-transform: uppercase;
+  letter-spacing: .07em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.as-turn[data-state="open"] .as-turn-state { color: var(--lamp); }
+.as-turn[data-state="completed"] .as-turn-state { color: var(--mint); }
+.as-turn[data-state="interrupted"] .as-turn-state { color: var(--coral); }
+.as-turn-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.as-turn-task {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.as-turn[data-state="open"] .as-turn-task { color: var(--text); font-weight: 600; }
+.as-turn-meta { display: flex; gap: 8px; font: 10px/1.4 var(--font-mono); color: var(--muted); }
+.as-turn .as-chev { color: var(--muted); align-self: center; opacity: 0; transition: opacity .12s ease; }
+.as-turn-hd:hover .as-chev, .as-turn.open > .as-turn-hd .as-chev { opacity: 1; }
+.as-turn.closed > .as-turn-hd .as-chev { transform: rotate(-90deg); }
+.as-turn-bd { display: grid; gap: 2px; padding: 2px 0 6px 12px; }
+.as-turn.closed .as-turn-bd { display: none; }
+
+/* Baris tool — atom aktivitas tanpa frame; status lewat dot warna.
+   Chevron invisible-until-hover (pola tool-summary ZCode). */
+.as-trow { font-family: var(--font-mono); font-size: 11.5px; }
+.as-trow-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 2px 4px 2px 0;
+  border: none;
+  border-radius: var(--r-xs);
+  background: none;
+  text-align: left;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.as-trow-hd:hover { background: var(--ink-2); }
+.as-trow .as-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+.as-trow[data-status="running"] .as-dot { background: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
+.as-trow[data-status="done"] .as-dot { background: var(--mint); }
+.as-trow[data-status="error"] .as-dot { background: var(--coral); }
+.as-trow-name { color: var(--text); flex: none; }
+.as-trow-sum {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.as-trow-dur { flex: none; color: var(--muted); font-size: 10px; }
+.as-trow .as-chev {
+  flex: none;
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity .12s ease, transform .12s ease;
+}
+.as-trow-hd:hover .as-chev { opacity: 1; }
+.as-trow.open > .as-trow-hd .as-chev { opacity: 1; transform: rotate(90deg); }
+/* Detail terbuka = indentasi milik baris di atasnya (pola ⎿). */
+.as-trow-bd {
+  display: none;
+  margin: 1px 0 3px 12px;
+  padding: 2px 0 2px 10px;
+  border-left: 1px solid var(--line-soft);
+}
+.as-trow.open .as-trow-bd { display: grid; gap: 4px; }
+
+/* Grup agregat: run tool se-keluarga (jelajah/terminal) dilipat jadi satu
+   baris; ada yang berjalan → terbuka otomatis. */
+.as-tgroup-hd {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 2px 4px 2px 0;
+  border: none;
+  border-radius: var(--r-xs);
+  background: none;
+  text-align: left;
+  color: var(--muted);
+  font: 11.5px/1.4 var(--font-mono);
+  cursor: pointer;
+}
+.as-tgroup-hd:hover { color: var(--text-dim); background: var(--ink-2); }
+.as-tgroup .as-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--mint); flex: none;
+}
+.as-tgroup[data-status="running"] .as-dot { background: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
+.as-tgroup[data-status="error"] .as-dot { background: var(--coral); }
+.as-tgroup-label { color: var(--text-dim); flex: none; }
+.as-tgroup-cnt { color: var(--muted); font-size: 10px; }
+.as-tgroup .as-chev { color: var(--muted); margin-left: auto; opacity: 0; transition: opacity .12s ease, transform .12s ease; }
+.as-tgroup-hd:hover .as-chev { opacity: 1; }
+.as-tgroup.open > .as-tgroup-hd .as-chev { opacity: 1; transform: rotate(90deg); }
+.as-tgroup-bd { display: none; margin: 1px 0 3px 12px; padding: 2px 0 2px 10px; border-left: 1px solid var(--line-soft); }
+.as-tgroup.open .as-tgroup-bd { display: grid; gap: 2px; }
+
+/* Output/args panjang → clip + fade + pil "tampilkan semua" (bukan
+   scrollbar dalam). Konten data tetap ber-background. */
+.as-out { position: relative; }
+.as-out.clipped { max-height: 168px; overflow: hidden; }
+.as-out.clipped::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 44px;
+  background: linear-gradient(to bottom, transparent, var(--ink-0));
+  pointer-events: none;
+}
+.as-out-more {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--ink-1);
+  color: var(--text-dim);
+  font: 10px/1.6 var(--font-ui);
+  cursor: pointer;
+}
+.as-out-more:hover { color: var(--text); border-color: var(--line-strong); }
+
 /* Baris narasi kerja (agent bicara di tengah eksekusi) — kutipan redup,
    bukan bubble chat; conversation tetap khusus giliran user↔jawaban. */
 .as-note {
@@ -3788,39 +3959,6 @@ input[type="range"]::-moz-range-thumb {
   animation: ellipsis-dot 0.9s infinite;
 }
 
-/* Baris tool — timeline item, BUKAN kartu (ZCode: `● Bash — desc`).
-   Status lewat dot warna; detail terbuka = indent ber-left-hairline yang
-   jelas milik baris di atasnya. */
-.as-blk.as-tool {
-  padding: 0;
-  border: none;
-  background: transparent;
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.as-tool-hd {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 3px 4px;
-  border-radius: var(--r-xs);
-  text-align: left;
-  color: var(--text-dim);
-  font: inherit;
-}
-.as-tool-hd:hover { background: var(--ink-2); }
-.as-tool .as-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-  flex: none;
-}
-.as-tool[data-status="running"] .as-dot { background: var(--lamp); animation: ellipsis-dot 1.2s infinite; }
-.as-tool[data-status="done"] .as-dot { background: var(--mint); }
-.as-tool[data-status="error"] .as-dot { background: var(--coral); }
-.as-tool-name { color: var(--text); flex: none; }
 /* Badge level tool: "auto" (mint, jalan sendiri) / "izin" (amber, butuh
    persetujuan) — user paham kenapa sesuatu auto vs diminta izin. */
 .as-lvl {
@@ -3836,40 +3974,20 @@ input[type="range"]::-moz-range-thumb {
 }
 .as-lvl.safe { color: var(--mint); border-color: var(--mint-dim); }
 .as-lvl.mutating { color: var(--lamp-soft); border-color: var(--accent-border); }
-.as-tool-sum {
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1 1 auto;
-}
-.as-tool .as-chev {
-  flex: none;
-  color: var(--muted);
-  transition: transform 0.12s ease;
-}
-.as-tool.open .as-chev { transform: rotate(180deg); }
-/* Detail terbuka = zona milik baris di atasnya (indentasi mengkodekan
-   kepemilikan — pelajaran ZCode ⎿). Data tetap ber-background. */
-.as-tool-bd {
-  display: none;
-  margin: 1px 0 4px 13px;
-  padding: 2px 0 2px 9px;
-  border-left: 1px solid var(--line-soft);
-}
-.as-tool.open .as-tool-bd { display: block; }
+/* Blok data di dalam detail (indentasi): argumen & hasil — background hanya
+   untuk DATA; hasil panjang di-clip oleh .as-out (tanpa scrollbar dalam). */
 .as-tool-args,
 .as-tool-res {
-  margin: 2px 0 6px;
-  padding: 5px 7px;
-  background: var(--ink-input);
+  margin: 0;
+  padding: 4px 7px;
+  background: var(--ink-0);
   border: 1px solid var(--line-soft);
   border-radius: var(--r-xs);
-  max-height: 160px;
-  overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.5;
 }
 .as-lbl {
   font-family: var(--font-ui);
@@ -3877,7 +3995,6 @@ input[type="range"]::-moz-range-thumb {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--muted);
-  margin-top: 4px;
 }
 .as-clipped {
   display: block;
@@ -4034,57 +4151,32 @@ input[type="range"]::-moz-range-thumb {
   letter-spacing: .02em;
 }
 
-/* Segmen kerja per giliran — baris ringkas dua-tingkat (mock user):
-   kolom label tetap + konten (snippet, meta di baris kedua). Segmen AKTIF
-   diberi rail amber (satu-satunya emphasis); selesai meredup tanpa frame. */
-.as-wseg { margin: 1px 0; padding: 0; border-left: 2px solid transparent; }
-.as-wseg[data-state="open"] { border-left-color: var(--lamp); padding-left: 9px; margin-left: 1px; }
-.as-wseg[data-state="interrupted"] { border-left-color: var(--coral); padding-left: 9px; margin-left: 1px; }
-.as-wseg[data-state="completed"] { padding-left: 11px; }
-.as-wseg-hd {
-  display: grid;
-  grid-template-columns: 74px 1fr 14px;
-  gap: 10px;
-  align-items: baseline;
-  width: 100%;
-  padding: 3px 2px;
-  border: none;
-  border-radius: var(--r-xs);
-  background: none;
-  cursor: pointer;
-  text-align: left;
+/* RESULT: jawaban final giliran terakhir dipromosikan — prosa penuh warna
+   dengan meta turn; hairline atas/bawah memisahkannya dari stream dan
+   decision bar. Label "AGENT" disembunyikan (region sudah selaras). */
+.as-result {
+  flex: none;
+  padding: 7px 2px 8px;
+  border-top: 1px solid var(--line-soft);
 }
-.as-wseg-hd:hover { background: var(--ink-2); }
-.as-wseg-state {
+.as-result.hidden { display: none; }
+.as-result-hd {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.as-result-label {
   font: 600 10px/1.6 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: .07em;
-  color: var(--muted);
-  white-space: nowrap;
+  color: var(--mint);
 }
-.as-wseg[data-state="open"] .as-wseg-state { color: var(--lamp); }
-.as-wseg[data-state="completed"] .as-wseg-state { color: var(--mint); }
-.as-wseg[data-state="interrupted"] .as-wseg-state { color: var(--coral); }
-.as-wseg-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.as-wseg-task {
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.as-wseg[data-state="open"] .as-wseg-task { color: var(--text); font-weight: 600; }
-.as-wseg-meta { display: flex; gap: 8px; font: 10px/1.4 var(--font-mono); color: var(--muted); }
-.as-wseg .as-chev { color: var(--muted); align-self: center; }
-.as-wseg.closed .as-chev { transform: rotate(-90deg); }
-.as-wseg-work { display: grid; gap: 3px; padding: 4px 0 6px 2px; }
-.as-wseg.closed .as-wseg-work { display: none; }
-
-/* Transkrip ringkas: conversation diperkecil, harness tetap terbaca */
+.as-result-meta { font: 10px/1.4 var(--font-mono); color: var(--muted); }
+.as-result-body .as-who { display: none; }
+.as-result-body { font-size: 12px; }
 
 .as-task-step { margin: 5px 0 0; color: var(--text-dim); font: 11.5px/1.4 var(--font-mono); }
-.as-tool-dur { margin-left: auto; color: var(--muted); font: 10px/1.3 var(--font-mono); }
 
 /* Status live di dalam kartu TASK — menempel pada objek kerja, bukan
    terpisah; jawaban instan "sekarang di mana?" tanpa membaca percakapan. */
@@ -4227,26 +4319,32 @@ body.agent-mode .app.agent-tech-open #sb-gutter { display: flex; }
 .as-diff-ln.del { background: var(--coral-soft); color: var(--coral); }
 .as-diff-ln.ctx { color: var(--muted); }
 
-/* Ringkasan giliran "N file berubah +a −r" — baris hasil dengan indentasi
-   file di bawahnya; diff per file tetap data-block ber-background. */
-.as-blk.as-chg {
-  border: none;
-  background: transparent;
-  padding: 2px 2px 2px 12px;
-}
+/* Ringkasan giliran "N file berubah +a −r" — baris hasil (bukan kartu);
+   daftar file terlipat default, diff per file tetap data-block. */
+.as-blk.as-chg { border: none; background: transparent; padding: 1px 2px 1px 12px; }
 .as-chg-hd {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 2px;
+  width: 100%;
+  padding: 2px 4px 2px 0;
+  border: none;
+  border-radius: var(--r-xs);
+  background: none;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
 }
+.as-chg-hd:hover { background: var(--ink-2); }
 .as-chg-ttl {
   font: 600 10px/1.5 var(--font-ui);
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--mint);
 }
-.as-chg-item .as-diff { margin: 3px 0 0 14px; }
+.as-chg-list { display: none; padding: 2px 0 3px; }
+.as-chg-list.open, .as-chg.open .as-chg-list { display: grid; gap: 3px; }
+.as-chg-item .as-diff { margin: 2px 0 0 12px; }
 .as-chg-row {
   display: flex;
   align-items: center;
