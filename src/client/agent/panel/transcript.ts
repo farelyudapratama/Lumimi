@@ -353,6 +353,26 @@ export class Transcript {
     return true;
   }
 
+  /**
+   * Pensiunkan kartu "berjalan" sisa hidrasi yang tak akan terisi: mode
+   * follow, bukan kartu live, dan namanya tidak ada di daftar approval
+   * aktif. Dipanggil panel dari refreshStatus (sumber kebenaran /status).
+   * Kartu live (SSE berjalan) dan yang benar-benar menunggu izin tetap.
+   */
+  retireStaleRunning(activeNames: string[]): number {
+    const active = new Set(activeNames);
+    let n = 0;
+    for (const b of this.blocks) {
+      if (b.kind === "tool" && b.status === "running" && !b.live && !active.has(b.name)) {
+        b.result = t("wb.io.noResult");
+        b.status = "done";
+        this.touch(b);
+        n++;
+      }
+    }
+    return n;
+  }
+
   /** Tandai kartu izin yang disetujui: blok hilang, kartu tool jadi jangkar. */
   resolveApprovalVisual(apId: string, byOtherClient: boolean): void {
     const blk = this.blocks.find((b) => b.kind === "approval" && b.apId === apId);
@@ -501,6 +521,11 @@ export class Transcript {
         if (waitPlan) {
           // Gate rencana: jeda sistem — marker ringkas, bukan kartu tool.
           this.push({ kind: "status", text: t("as.bus.planWait"), variant: "warn" });
+        } else if (wait && msgs.slice(i + 1).some((n) =>
+          n.role === "tool" && String(n.content || "").startsWith("[" + wait[1] + "]"))) {
+          // Hasil tool ini sudah ada di history setelahnya → kartu hasil
+          // akan dirender saat pesan itu tercapai; jangan buat kartu
+          // "berjalan" abadi.
         } else if (wait) {
           this.push({
             kind: "tool",

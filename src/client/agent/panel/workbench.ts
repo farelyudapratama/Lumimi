@@ -156,6 +156,7 @@ export function startWorkbench(): () => void {
       if (tab === "memory") { memoryLoaded = true; void loadMemory(); }
     },
     toolLevel: (name) => toolLevels.get(name) ?? null,
+    awaitingTools: () => pendingApprovalViews.filter((a) => !a.plan).map((a) => a.tool),
   });
 
   const actor = makeActor({
@@ -299,10 +300,22 @@ export function startWorkbench(): () => void {
     });
   }
 
+  // Plan tugas LAIN tidak boleh tampil sebagai todo aktif: snapshot plan saat
+  // tugas mulai (send / busy naik) — kartu hanya muncul bila agent menyusun
+  // ulang rencana (isi plan berubah dari snapshot).
+  let planSnapshot = "[]";
+  let planBootstrapped = false;
+  function snapshotPlan(): void {
+    planSnapshot = JSON.stringify(currentPlan || []);
+  }
+  function planVisible(): boolean {
+    return JSON.stringify(currentPlan || []) !== planSnapshot;
+  }
+
   /** Sisipkan kartu todo di awal segmen aktif (setelah user terakhir). */
   function itemsForRender() {
     const items = buildActivityItems(transcript.blocks, expanded);
-    const todo = buildTodoItem(currentPlan, expanded);
+    const todo = buildTodoItem(planVisible() ? currentPlan : null, expanded);
     if (!todo) return items;
     // Posisi: setelah user terakhir (segmen aktif); fallback: paling atas.
     let at = 0;
@@ -328,7 +341,7 @@ export function startWorkbench(): () => void {
   function renderDock(): void {
     view.setDock({
       sv: lastSv,
-      plan: currentPlan,
+      plan: planVisible() ? currentPlan : [],
       queue: lastQueue,
       review: reviewEntries(),
       term: termLog.list(),
@@ -484,6 +497,7 @@ export function startWorkbench(): () => void {
   function send(text: string): void {
     const txt = String(text || "").trim();
     if (!txt || liveAsk) return;
+    snapshotPlan();
     transcript.appendUser(txt);
     // Tugas baru: buka giliran (auto-collapse grup selesai sudah di model).
     render();
@@ -552,6 +566,8 @@ export function startWorkbench(): () => void {
     termLog.clear();
     expanded.clear();
     changesOpen.clear();
+    currentPlan = [];
+    snapshotPlan();
     memoryLoaded = false;
     await syncHistory();
     pushMarker(t("as.resetDone"), "ok");
@@ -602,13 +618,16 @@ export function startWorkbench(): () => void {
     } catch {
       return;
     }
-    if (st.busy && !prevBusy) busySinceMs = Date.now();
+    if (st.busy && !prevBusy) { busySinceMs = Date.now(); snapshotPlan(); }
     if (!st.busy) busySinceMs = 0;
     lastSv = deriveAgentState(st, busySinceMs, Date.now());
     pendingApprovalViews = (st.pendingApprovals || []).map((a) => ({
       apId: a.id, tool: a.tool, args: a.args, plan: a.kind === "plan",
     }));
     currentPlan = st.plan || [];
+    // Plan yang dimuat dari sesi sebelumnya = basi: snapshot saat fetch status
+    // pertama supaya kartu todo tak menampilkan 0/4 hantu di load tanpa tugas.
+    if (!planBootstrapped) { planBootstrapped = true; snapshotPlan(); }
     lastQueue = (st.parkedTasks || []).map((q) => ({ taskId: q.taskId, prompt: q.prompt }));
     lastFilesTouched = st.notes?.filesTouched?.length ?? 0;
     if (Array.isArray(st.tools) && st.tools.length) {
@@ -636,6 +655,9 @@ export function startWorkbench(): () => void {
     }
     localApprovals = new Set([...localApprovals].filter((id) => pendingIds.includes(id)));
     transcript.reconcileApprovals(pendingIds);
+    // Mode follow: kartu "berjalan" sisa hidrasi yang tool-nya tak menunggu
+    // izin dan tak akan terisi → pensiunkan (jangan spinner abadi).
+    if (!liveAsk) transcript.retireStaleRunning(pendingIds);
     render();
     if (prevBusy && !st.busy && !liveAsk) await syncHistory();
     prevBusy = !!st.busy;

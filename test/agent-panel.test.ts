@@ -22,6 +22,57 @@ import { parseMarkdown, parseInlines } from "../src/client/agent/panel/md";
 import { ChangeRegistry, TermLog } from "../src/client/agent/panel/registry";
 import { makeActor } from "../src/client/agent/panel/actor";
 import { toolRunIsTerminal } from "../src/client/agent/panel/workbench-model";
+// ═══════════════════════════════════════════════════════════════
+// Hidrasi: kartu "menunggu izin" yang usang
+// ═══════════════════════════════════════════════════════════════
+
+describe("hidrasi kartu menunggu izin", () => {
+  it("MENUNGGU PERSETUJUAN dengan hasil di history setelahnya → tanpa kartu berjalan", () => {
+    const tr = new Transcript();
+    tr.syncFromHistory([
+      { role: "user", content: "buka halaman" },
+      { role: "tool", content: "MENUNGGU PERSETUJUAN: browser_navigate {\"url\":\"x\"} (id ap_1)" },
+      { role: "assistant", content: "⏳ butuh izin" },
+      { role: "tool", content: "[browser_navigate] ERROR: CDP timeout" },
+    ]);
+    const running = tr.blocks.filter((b) => b.kind === "tool" && b.status === "running");
+    const done = tr.blocks.filter((b) => b.kind === "tool" && b.status === "done");
+    expect(running.length).toBe(0);
+    expect(done.length).toBe(1);
+  });
+
+  it("MENUNGGU PERSETUJUAN tanpa hasil di history → kartu berjalan tetap (menunggu approve-stream)", () => {
+    const tr = new Transcript();
+    tr.syncFromHistory([
+      { role: "user", content: "tulis file" },
+      { role: "tool", content: "MENUNGGU PERSETUJUAN: write_file {\"path\":\"a\"} (id ap_2)" },
+    ]);
+    const running = tr.blocks.filter((b) => b.kind === "tool" && b.status === "running");
+    expect(running.length).toBe(1);
+  });
+
+  it("retireStaleRunning: kartu hidrasi non-aktif pensiun; yang menunggu izin & live tetap", () => {
+    const tr = new Transcript();
+    tr.syncFromHistory([
+      { role: "user", content: "tulis file" },
+      { role: "tool", content: "MENUNGGU PERSETUJUAN: write_file {\"path\":\"a\"} (id ap_2)" },
+    ]);
+    // kartu live (mis. dari bus CLI) — tak boleh disentuh.
+    tr.applyBus({ seq: 1, type: "tool_call_start", label: "read_file {\"path\":\"b\"}", ts: 0 });
+    const retired = tr.retireStaleRunning(["write_file"]);
+    const blocks = tr.blocks.filter((b) => b.kind === "tool");
+    const wf = blocks.find((b) => b.name === "write_file");
+    const rf = blocks.find((b) => b.name === "read_file");
+    expect(retired).toBe(0); // write_file masih di daftar aktif
+    expect(wf?.status).toBe("running");
+    expect(rf?.status).toBe("running"); // live tetap
+    const retired2 = tr.retireStaleRunning([]); // approval sudah tidak ada
+    expect(retired2).toBe(1);
+    expect(wf?.status).toBe("done");
+    expect(rf?.status).toBe("running"); // live tetap disentuh? tidak — live dikecualikan
+  });
+});
+
 
 // ═══════════════════════════════════════════════════════════════
 // Hierarki activity — grup selesai otomatis collapse

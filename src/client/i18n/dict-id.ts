@@ -970,6 +970,7 @@ export const DICT_ID: Record<string, string> = {
   /* ═══ Agent Workbench (rebuild clean-slate 2026-10, wb.*) ═══ */
   "wb.boot.ready": "{name} siap. Ada tugas apa hari ini?",
   "wb.header.idle": "Tidak ada tugas aktif",
+  "wb.tool.waiting": "Menunggu izin",
   "wb.tool.running": "Menjalankan",
   "wb.tool.read_file": "Membaca",
   "wb.tool.list_dir": "Menjelajah",
@@ -993,6 +994,8 @@ export const DICT_ID: Record<string, string> = {
   "wb.tool.update_plan": "Merencanakan",
   "wb.io.args": "Masukan",
   "wb.io.result": "Hasil",
+  "wb.io.noResult": "(tanpa catatan hasil — sesi berakhir sebelum tool tereksekusi)",
+  "wb.io.waitPerm": "menunggu izin…",
   "wb.io.running": "berjalan…",
   "wb.group.count": "{n}",
   "wb.group.cmds": "perintah",

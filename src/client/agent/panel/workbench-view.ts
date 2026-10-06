@@ -191,6 +191,9 @@ export type ViewDeps = {
   onForget: (key: string) => void;
   onTab: (tab: DockTab) => void;
   toolLevel: (name: string) => "safe" | "mutating" | null;
+  /** Tool yang kartu izinnya sedang pending — kartu berjalan berubah jadi
+   *  "menunggu izin…" (jangan mengecoh user bahwa tool sedang jalan). */
+  awaitingTools: () => string[];
   agentName: string;
 };
 
@@ -303,6 +306,7 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     iconName: string;
     kind: string;
     running: boolean;
+    waiting?: boolean;
     error?: boolean;
     summary: string;
     pill?: string | null;
@@ -313,8 +317,8 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     head.type = "button";
     const ico = el("span", "wb-trow-ico");
     ico.appendChild(icon(o.iconName));
-    const kind = el("span", "wb-trow-kind" + (o.running ? " is-running" : o.error ? " is-error" : ""));
-    if (o.running) kind.classList.add("wb-anim-text");
+    const kind = el("span", "wb-trow-kind" + (o.waiting ? " is-wait" : o.running ? " is-running" : o.error ? " is-error" : ""));
+    if (o.running && !o.waiting) kind.classList.add("wb-anim-text");
     kind.textContent = o.kind;
     head.append(ico, kind);
     if (o.summary) {
@@ -353,9 +357,13 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
       body.appendChild(pre);
     } else if (b.status === "running") {
       const run = el("div", "wb-term-run");
-      const sp = el("span", "wb-spin");
-      sp.appendChild(icon("loader"));
-      run.append(sp, el("span", "", t("wb.io.running")));
+      if (deps.awaitingTools().includes(b.name)) {
+        run.appendChild(el("span", "wb-io-wait", "⏳ " + t("wb.io.waitPerm")));
+      } else {
+        const sp = el("span", "wb-spin");
+        sp.appendChild(icon("loader"));
+        run.append(sp, el("span", "", t("wb.io.running")));
+      }
       body.appendChild(run);
     }
     return body;
@@ -383,10 +391,12 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     const running = b.status === "running";
     const error = b.status === "error";
     const lvl = deps.toolLevel(b.name);
+    const waiting = running && deps.awaitingTools().includes(b.name);
     const head = toolHead({
       iconName: toolIcon(b.name),
-      kind: toolKindLabel(b.name, running),
+      kind: waiting ? t("wb.tool.waiting") + " " + (toolKindLabel(b.name, false)) : toolKindLabel(b.name, running),
       running,
+      waiting,
       error,
       summary: b.summary || toolPrimaryText(b.name, b.args),
       pill: lvl === "mutating" ? t("wb.lvl.mutating") : null,
@@ -420,10 +430,12 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
         const kid = el("div", "wb-trow");
         kid.dataset.key = item.key + ":" + b.id;
         const kb = deps.toolLevel(b.name) === "mutating" ? t("wb.lvl.mutating") : null;
+        const kWaiting = b.status === "running" && deps.awaitingTools().includes(b.name);
         const khead = toolHead({
           iconName: toolIcon(b.name),
-          kind: toolKindLabel(b.name, b.status === "running"),
+          kind: kWaiting ? t("wb.tool.waiting") + " " + toolKindLabel(b.name, false) : toolKindLabel(b.name, b.status === "running"),
           running: b.status === "running",
+          waiting: kWaiting,
           error: b.status === "error",
           summary: b.summary || toolPrimaryText(b.name, b.args),
           dur: b.durMs ?? null,

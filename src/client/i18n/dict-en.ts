@@ -962,6 +962,7 @@ export const DICT_EN: Record<string, string> = {
   /* ═══ Agent Workbench (clean-slate rebuild 2026-10, wb.*) ═══ */
   "wb.boot.ready": "{name} is ready. What shall we work on?",
   "wb.header.idle": "No active task",
+  "wb.tool.waiting": "Awaiting approval",
   "wb.tool.running": "Running",
   "wb.tool.read_file": "Read",
   "wb.tool.list_dir": "Explored",
@@ -985,6 +986,8 @@ export const DICT_EN: Record<string, string> = {
   "wb.tool.update_plan": "Planning",
   "wb.io.args": "Input",
   "wb.io.result": "Result",
+  "wb.io.noResult": "(no recorded result — session ended before the tool ran)",
+  "wb.io.waitPerm": "waiting for approval…",
   "wb.io.running": "running…",
   "wb.group.count": "{n}",
   "wb.group.cmds": "commands",

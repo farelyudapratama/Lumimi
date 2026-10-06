@@ -88,6 +88,7 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "5. Task done → stop calling tools. If unclear, ask ONE specific question.",
             "6. NEVER write/delete beyond the request or run destructive commands — mutating tools ask permission.",
             "7. MOTION: the active Live2D model is ALREADY loaded (see 'Active model'). Do NOT search the filesystem for model files (a path in the user's text is NOT the model). REQUIRED chain, one tool per turn: motion_analyze → emit the FULL draft JSON via motion_validate (fix until ok) → motion_save. A prose description of the motion is NOT a motion and NOT completion — you must output the draft JSON and save it. Do NOT say 'done'/stop before motion_save succeeds. (motion_verify is optional, only if a vision connection exists.)",
+            "8. PLAN: if an update_plan list exists for this task, keep it LIVE — when you start a step call update_plan marking it in_progress, when you finish it mark done (or failed). Before your final answer every step must be done/failed. If the task needs no plan, do not create one.",
             "9. MEMORY: user prefs / key decisions → remember (short key). Need context → recall. Need USER FACTS across sessions (favorite color, city, decisions) → memory_recall with a free-form query.",
         ]
     } else {
@@ -100,6 +101,7 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "5. Tugas selesai → berhenti memanggil tool. Kalau tak jelas, tanya SEKALI yang spesifik.",
             "6. DILARANG menulis/menghapus di luar kebutuhan atau perintah merusak — tool mutating minta izin.",
             "7. MOTION: model Live2D aktif SUDAH dimuat (lihat 'Model aktif'). JANGAN cari file model di folder (path di teks user BUKAN modelnya). Alur WAJIB, satu tool per giliran: motion_analyze → keluarkan draft JSON LENGKAP lewat motion_validate (perbaiki sampai ok) → motion_save. Deskripsi gerakan dalam prosa BUKAN motion dan BUKAN penyelesaian — kamu HARUS mengeluarkan draft JSON-nya lalu menyimpannya. JANGAN bilang 'selesai'/berhenti sebelum motion_save berhasil. (motion_verify opsional, hanya bila ada koneksi vision.)",
+            "8. RENCANA: kalau ada daftar update_plan untuk tugas ini, JAGA tetap hidup — saat mulai satu langkah panggil update_plan yang menandainya in_progress, saat selesai tandai done (atau failed). Sebelum jawaban final, semua langkah harus done/failed. Kalau tugas tak butuh rencana, jangan buat.",
             "9. MEMORY: preferensi/keputusan penting → remember (key singkat). Butuh konteks → recall. Butuh FAKTA/PREFERENSI USER lintas sesi (warna favorit, kota, keputusan) → memory_recall dengan query bebas.",
         ]
     };

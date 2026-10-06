@@ -345,6 +345,8 @@ body.mode-agent.agent-dock-collapsed .wb-dock-capsule { display: inline-flex; }
 .wb-trow-ico svg { width: 16px; height: 16px; }
 .wb-trow-kind { flex: none; font-weight: 500; white-space: nowrap; color: var(--wb-fg-subtlest); }
 .wb-trow-kind.is-running { color: var(--wb-fg); }
+.wb-trow-kind.is-wait { color: var(--wb-warning); }
+.wb-io-wait { color: var(--wb-warning); }
 .wb-trow-kind.is-error { color: var(--wb-danger); }
 .wb-trow-sum {
   min-width: 0;
