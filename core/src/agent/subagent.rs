@@ -73,7 +73,7 @@ async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &st
                 }
             })
             .collect();
-        let reply = llm::llm_for_role(config_path, "assistant", &messages, &system).await.map_err(|(_, m)| m)?.reply;
+        let reply = llm::llm_for_role_tools(config_path, "assistant", &messages, &system, &loop_::tool_defs_json()).await.map_err(|(_, m)| m)?.reply;
 
         let detected = loop_::detect_tool_call(&reply);
         let (name, args) = match detected {

@@ -231,6 +231,122 @@ pub async fn systemone_probe(conn: &Value) -> Result<String, LlmError> {
 /// `images` (opsional) ditempel ke pesan user terakhir — kosong = jalur teks
 /// murni byte-identical dengan sebelumnya.
 pub async fn call_llm(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage]) -> Result<String, LlmError> {
+    call_llm_tools(conn, messages, client_system, images, &[]).await
+}
+
+/// Koneksi yang pernah MENOLAK param `tools` (server OpenAI-shape tanpa
+/// dukungan function calling) → jangan kirim `tools` lagi untuk base+model
+/// yang sama. In-memory per proses; setiap provider tetap dicoba dulu.
+static NO_NATIVE_TOOLS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+
+fn no_tools_key(conn: &Value) -> String {
+    let base = conn.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
+    let model = conn.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    format!("{base}|{model}")
+}
+
+fn native_tools_ditolak(key: &str) -> bool {
+    NO_NATIVE_TOOLS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new())).lock().map(|m| m.contains(key)).unwrap_or(false)
+}
+
+fn tandai_native_tools_ditolak(key: &str) {
+    if let Ok(mut m) = NO_NATIVE_TOOLS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new())).lock() {
+        m.insert(key.to_string());
+    }
+}
+
+/// Badan error 400 menandakan server menolak PARAM `tools` itu sendiri
+/// (bukan generation model) → layak diulang tanpa `tools`.
+fn server_menolak_param_tools(body: &str) -> bool {
+    let l = body.to_lowercase();
+    ["tools is not supported", "tool_choice is not supported", "does not support tools", "does not support function", "function calling is not supported", "unknown field: tools", "unknown parameter: tools", "unrecognized request argument", "extra_forbidden", "tools.unsupported"]
+        .iter()
+        .any(|t| l.contains(t))
+}
+
+/// Cari string `failed_generation` di mana pun dalam pohon JSON error
+/// (provider beda-beda menyarangnya) — berisi generation model yang ditolak.
+/// String berisi JSON bersarang (proxy membungkus error provider) di-parse
+/// ulang lalu ditelusuri, berbatas kedalaman.
+fn cari_failed_generation(v: &Value, depth: u8) -> Option<String> {
+    if depth > 4 {
+        return None;
+    }
+    match v {
+        Value::Object(o) => {
+            if let Some(fg) = o.get("failed_generation").and_then(|x| x.as_str()) {
+                return Some(fg.to_string());
+            }
+            for val in o.values() {
+                if let Some(f) = cari_failed_generation(val, depth + 1) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        Value::Array(a) => a.iter().find_map(|x| cari_failed_generation(x, depth + 1)),
+        Value::String(s) if s.contains("failed_generation") => {
+            let inner: Value = serde_json::from_str(s.trim()).ok().or_else(|| crate::jsonx::extract_json_object_loose(s))?;
+            cari_failed_generation(&inner, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+/// Ubah panggilan tool dari pesan native OpenAI-shape (`message.tool_calls`)
+/// jadi balasan kanonik protokol teks kita. SATU tool per giliran: panggilan
+/// pertama dikonversi; sisa (bila model mem-batch) diabaikan — model akan
+/// menerbitkan ulang setelah melihat hasil tool pertama.
+pub(crate) fn tool_calls_to_reply(msg: &Value) -> Option<String> {
+    let calls = msg.get("tool_calls")?.as_array()?;
+    for tc in calls {
+        let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let args_v = tc.pointer("/function/arguments").cloned().unwrap_or(json!({}));
+        let args_str = match &args_v {
+            // OpenAI wire-format: arguments = STRING berisi JSON.
+            Value::String(s) => s.trim().to_string(),
+            // Proxy tertentu mengirim objek langsung.
+            v => v.to_string(),
+        };
+        let args_json = if args_str.is_empty() {
+            "{}".to_string()
+        } else {
+            match serde_json::from_str::<Value>(&args_str) {
+                Ok(v) if v.is_object() => v.to_string(),
+                _ => crate::jsonx::extract_json_object_loose(&args_str).map(|v| v.to_string()).unwrap_or_else(|| "{}".into()),
+            }
+        };
+        return Some(format!("TOOL: {name} {args_json}"));
+    }
+    None
+}
+
+/// Salvage: provider menolak generation native tool-call (mis. Groq
+/// "Tool choice is none, but model called a tool") tetapi melampirkan
+/// generation yang gagal berisi JSON panggilannya. Dikonversi ke balasan
+/// kanonik supaya satu giliran model tidak terbuang percuma.
+pub(crate) fn salvage_tool_call_from_error(body: &str) -> Option<String> {
+    let root: Value = serde_json::from_str(body).ok()?;
+    let failed = cari_failed_generation(&root, 0)?;
+    let obj = serde_json::from_str::<Value>(failed.trim()).ok().or_else(|| crate::jsonx::extract_json_object_loose(&failed))?;
+    let name = obj.get("name").and_then(|v| v.as_str())?.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let args = obj.get("arguments").cloned().unwrap_or(json!({}));
+    let args_json = if args.is_object() { args.to_string() } else { json!({ "value": args }).to_string() };
+    Some(format!("TOOL: {name} {args_json}"))
+}
+
+/// `call_llm` + pendaftaran `tools` native (openai-shape). Model terlatih
+/// FC memanggil tool lewat jalur native yang VALID di provider; balasannya
+/// dikonversi ke `TOOL: …` kanonik. Model protokol-teks tetap bisa memakai
+/// `TOOL: …` di content. Provider yang menolak param `tools` dicoba ulang
+/// tanpa `tools` sekali lalu diingat (kompatibilitas universal).
+pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage], tools: &[Value]) -> Result<String, LlmError> {
     let provider = conn.get("provider").and_then(|v| v.as_str()).unwrap_or("openai-compatible").to_lowercase();
     let api_key = clean_key(conn.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""));
     let model = {
@@ -271,44 +387,71 @@ pub async fn call_llm(conn: &Value, messages: &[ChatMessage], client_system: &st
                 b
             }
         };
-        let mut msgs_val = build_chat_messages(messages, &sys);
-        attach_images(&mut msgs_val, images, "openai");
-        let body = json!({
-            "model": model,
-            "messages": msgs_val,
-            "temperature": temp,
-            "max_tokens": max_t,
-            "stream": false
-        });
-        let resp = client
-            .post(format!("{base}/chat/completions"))
-            .header("Authorization", format!("Bearer {api_key}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
-        let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
-        if status >= 400 {
-            return Err(LlmError { status, message: text.chars().take(300).collect() });
+        let msgs_val = build_chat_messages(messages, &sys);
+        let key = no_tools_key(conn);
+        // `tools` native: kirim bila ada katalog & koneksi tidak pernah menolak.
+        let mut with_tools = !tools.is_empty() && !native_tools_ditolak(&key);
+        loop {
+            let mut msgs_val = msgs_val.clone();
+            attach_images(&mut msgs_val, images, "openai");
+            let mut body = json!({
+                "model": model,
+                "messages": msgs_val,
+                "temperature": temp,
+                "max_tokens": max_t,
+                "stream": false
+            });
+            if with_tools {
+                body["tools"] = json!(tools);
+                body["tool_choice"] = json!("auto");
+            }
+            let resp = client
+                .post(format!("{base}/chat/completions"))
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            if status >= 400 {
+                // 1) Generation native tool-call ditolak provider tapi JSON-nya
+                //    dilampirkan → selamatkan, jangan buang giliran model.
+                if let Some(reply) = salvage_tool_call_from_error(&text) {
+                    return Ok(reply);
+                }
+                // 2) Server menolak param `tools` itu sendiri → ulang tanpa
+                //    `tools` dan ingat koneksi ini (protokol teks tetap jalan).
+                if with_tools && server_menolak_param_tools(&text) {
+                    tandai_native_tools_ditolak(&key);
+                    with_tools = false;
+                    continue;
+                }
+                return Err(LlmError { status, message: text.chars().take(300).collect() });
+            }
+            let j: Value = serde_json::from_str(&text).map_err(|_| LlmError { status, message: format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>()) })?;
+            // Native function-calling: model memanggil tool lewat jalur resmi
+            // provider → konversi ke baris `TOOL: …` kanonik untuk loop agent.
+            if let Some(reply) = j.pointer("/choices/0/message").and_then(tool_calls_to_reply) {
+                return Ok(reply);
+            }
+            let msg = j.pointer("/choices/0/message");
+            let mut content = msg.and_then(|m| m.get("content")).and_then(|v| v.as_str()).unwrap_or("");
+            // Model reasoning: sebagian provider menaruh teks di reasoning_content/
+            // reasoning dan membiarkan content kosong (budget output habis untuk
+            // berpikir). Tanpa fallback ini, loop agent melihat balasan hampa →
+            // "(kosong)"/berhenti. Fallback HANYA saat content kosong.
+            if content.trim().is_empty() {
+                content = msg
+                    .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+            }
+            if content.trim().is_empty() {
+                return Err(LlmError { status, message: format!("{provider} kosong: {}", text.chars().take(200).collect::<String>()) });
+            }
+            return Ok(content.trim().to_string());
         }
-        let j: Value = serde_json::from_str(&text).map_err(|_| LlmError { status, message: format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>()) })?;
-        let msg = j.pointer("/choices/0/message");
-        let mut content = msg.and_then(|m| m.get("content")).and_then(|v| v.as_str()).unwrap_or("");
-        // Model reasoning: sebagian provider menaruh teks di reasoning_content/
-        // reasoning dan membiarkan content kosong (budget output habis untuk
-        // berpikir). Tanpa fallback ini, loop agent melihat balasan hampa →
-        // "(kosong)"/berhenti. Fallback HANYA saat content kosong.
-        if content.trim().is_empty() {
-            content = msg
-                .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-        }
-        if content.trim().is_empty() {
-            return Err(LlmError { status, message: format!("{provider} kosong: {}", text.chars().take(200).collect::<String>()) });
-        }
-        return Ok(content.trim().to_string());
     }
 
     if provider == "gemini" {
@@ -576,6 +719,19 @@ pub async fn llm_for_role(
     messages: &[ChatMessage],
     client_system: &str,
 ) -> Result<LlmOk, (u16, String)> {
+    llm_for_role_tools(config_path, role, messages, client_system, &[]).await
+}
+
+/// `llm_for_role` + katalog `tools` native (openai-shape) — dipakai loop
+/// agent agar model native FC (gpt-oss dkk.) memanggil tool lewat jalur
+/// yang valid di provider. Provider lain tetap lewat protokol teks.
+pub async fn llm_for_role_tools(
+    config_path: &Path,
+    role: &str,
+    messages: &[ChatMessage],
+    client_system: &str,
+    tools: &[Value],
+) -> Result<LlmOk, (u16, String)> {
     let cfg = config::load(config_path);
     let mut conns: Vec<Value> = cfg.get("connections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let active_id = cfg.get("activeId").and_then(|v| v.as_str()).map(String::from);
@@ -615,7 +771,7 @@ pub async fn llm_for_role(
         // membunuh loop multi-langkah. Error non-transient (auth/kuota) langsung.
         let mut attempt = 0u32;
         let outcome = loop {
-            match call_llm(&conns[i], messages, client_system, &[]).await {
+            match call_llm_tools(&conns[i], messages, client_system, &[], tools).await {
                 Ok(reply) => break Ok(reply),
                 Err(e) => {
                     if is_transient(e.status, &e.message) && attempt < 2 {
@@ -743,6 +899,52 @@ mod tests {
     }
 
     #[test]
+    fn tool_calls_native_jadi_balasan_kanonik() {
+        // Wire-format OpenAI: arguments = string JSON.
+        let msg = json!({
+            "role": "assistant",
+            "tool_calls": [
+                { "id": "c1", "type": "function",
+                  "function": { "name": "browser_open", "arguments": "{\"url\":\"https://news.google.com\"}" } }
+            ]
+        });
+        let r = tool_calls_to_reply(&msg).unwrap();
+        assert!(r.starts_with("TOOL: browser_open "), "{r}");
+        assert!(r.contains("news.google.com"), "{r}");
+        // Proxy tertentu: arguments = objek langsung.
+        let msg2 = json!({ "tool_calls": [ { "function": { "name": "list_dir", "arguments": { "path": "." } } } ] });
+        assert_eq!(tool_calls_to_reply(&msg2).unwrap(), r#"TOOL: list_dir {"path":"."}"#);
+        // Tanpa tool_calls → None (jalur teks biasa).
+        assert!(tool_calls_to_reply(&json!({ "role": "assistant", "content": "halo" })).is_none());
+        // arguments string rusak → fallback {} (loop memberi tahu model).
+        let rusak = json!({ "tool_calls": [ { "function": { "name": "browser_open", "arguments": "{url tanpa kutip" } } ] });
+        assert_eq!(tool_calls_to_reply(&rusak).unwrap(), "TOOL: browser_open {}");
+    }
+
+    #[test]
+    fn salvage_failed_generation_dari_error_400() {
+        // Bentuk Groq: error.message berisi JSON bersarang dgn failed_generation.
+        let body = r#"{"error":{"message":"[400]: {\"error\":{\"message\":\"Tool choice is none, but model called a tool\",\"code\":\"tool_use_failed\",\"failed_generation\":\"{\\\"name\\\": \\\"browser_open\\\", \\\"arguments\\\": {\\\"url\\\": \\\"https://news.google.com\\\"}}\"}}"}}"#;
+        let r = salvage_tool_call_from_error(body).unwrap();
+        assert!(r.starts_with("TOOL: browser_open "), "{r}");
+        assert!(r.contains("news.google.com"), "{r}");
+        // failed_generation langsung di root error (bentuk proxy lain).
+        let body2 = r#"{"error":{"code":"tool_use_failed","failed_generation":"{\"name\":\"list_dir\",\"arguments\":{\"path\":\"src\"}}"}}"#;
+        assert_eq!(salvage_tool_call_from_error(body2).unwrap(), r#"TOOL: list_dir {"path":"src"}"#);
+        // Bukan error tool-call → None.
+        assert!(salvage_tool_call_from_error(r#"{"error":{"message":"unauthorized"}}"#).is_none());
+        assert!(salvage_tool_call_from_error("bukan json").is_none());
+    }
+
+    #[test]
+    fn penolakan_param_tools_terdeteksi() {
+        assert!(server_menolak_param_tools(r#"{"error":{"message":"tools is not supported by this endpoint"}}"#));
+        assert!(server_menolak_param_tools("Unknown field: tools"));
+        assert!(!server_menolak_param_tools(r#"{"error":{"message":"Tool choice is none, but model called a tool"}}"#));
+        assert!(!server_menolak_param_tools("rate limit"));
+    }
+
+    #[test]
     fn transient_terdeteksi() {
         // Blip jaringan → transient (dicoba-ulang, tanpa cooldown panjang).
         assert!(is_transient(0, "error sending request for url (https://x/v1/chat/completions)"));
@@ -859,3 +1061,5 @@ mod tests {
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
     }
 }
+
+

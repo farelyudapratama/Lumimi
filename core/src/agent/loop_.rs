@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::agent::{memory, tools};
 
@@ -57,6 +57,29 @@ pub fn is_motion_tool(name: &str) -> bool {
 /// True bila tool dijalankan lewat jalur async browser manager (bukan exec_tool sinkron).
 pub fn is_browser_tool(name: &str) -> bool {
     name.starts_with("browser_")
+}
+
+/// Katalog tool sebagai definisi native function-calling (OpenAI-shape).
+/// Lapisan kompatibilitas llm.rs: model terlatih native FC (gpt-oss, GPT-4o,
+/// Qwen/GLM/DeepSeek FC dkk.) menerima `tools` eksplisit sehingga panggilan
+/// tool-nya VALID di provider; hasil `tool_calls` dikonversi balik ke baris
+/// `TOOL: …` kanonik. Protokol teks tetap jalan untuk SEMUA model — ini
+/// lapisan TAMBAHAN, bukan pengganti (provider yang menolak param `tools`
+/// otomatis dicoba ulang tanpanya, lihat llm.rs).
+pub fn tool_defs_json() -> Vec<Value> {
+    TOOLS
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.params,
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            })
+        })
+        .collect()
 }
 
 pub fn tool_level(name: &str) -> Option<&'static str> {

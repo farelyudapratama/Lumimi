@@ -367,7 +367,7 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
         };
         let system = format!("{}{}", loop_::build_system(&lang, &work_dir, &model_name), memory::memory_prompt_block(root));
 
-        let reply = match llm::llm_for_role(config_path, "assistant", &messages, &system).await {
+        let reply = match llm::llm_for_role_tools(config_path, "assistant", &messages, &system, &loop_::tool_defs_json()).await {
             Ok(ok) => ok.reply,
             Err((_, msg)) => {
                 bus::emit("error", &msg);
