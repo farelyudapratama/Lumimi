@@ -48,8 +48,8 @@ export const DICT_ID: Record<string, string> = {
   // ── chat — rail obrolan ────────────────────────────────────────
   "chat.clear": "Clear",
   "chat.clearTip": "Bersihkan riwayat obrolan",
-  "chat.greeting": "Halo! Ada yang bisa kubantu?",
-  "chat.thinking": "Mikir...",
+  "chat.greeting": "Hei, kamu datang! Lagi kepikiran apa?",
+  "chat.thinking": "lagi dipikir...",
   "chat.mic": "Mic",
   "chat.micTip": "Voice: bicara lalu kirim (klik lagi untuk berhenti)",
   "chat.inputPh": "Ketik pesan lalu Enter...",
@@ -62,7 +62,7 @@ export const DICT_ID: Record<string, string> = {
   "chat.phrase5": "Semangat!",
   "chat.phrase6": "Hmmm...",
   "chat.phrase7": "Maaf ya...",
-  "chat.brainToggle": "Mode Otak (LLM mikir & balas sendiri)",
+  "chat.brainToggle": "Biar dia mikir sendiri",
 
   // ── vt — panel AI VTuber ───────────────────────────────────────
   "vt.title": "AI VTuber — Live Stream",

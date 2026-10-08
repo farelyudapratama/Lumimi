@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::agent::{bus, loop_, memory, plan, tools};
+use crate::agent::{bus, loop_, memory, plan, sessions, tools};
 use crate::llm::{self, ChatMessage};
 
 const MAX_ITERATIONS: usize = 25;
@@ -38,6 +38,11 @@ pub struct Runtime {
     pub running: bool,
     pub busy: bool,
     pub work_dir: String,
+    /// Sesi store yang terikat runtime saat ini (`assistant-sessions.json`).
+    /// Kosong = belum terikat (belum ada permukaan yang menyentuh agent) —
+    /// ask tetap jalan tapi transcript tidak dipersist. Bind terjadi saat:
+    /// start panel/hand-off chat (→ sesi run aplikasi) atau switch rail.
+    pub session_id: String,
     /// Model Live2D aktif (nama folder) + peta role→paramId dari klien —
     /// konteks untuk tool motion (motion_*). Klien mengirimnya saat start.
     pub model: String,
@@ -121,6 +126,53 @@ fn strip_tool_directive(text: &str) -> String {
         .to_string()
 }
 
+/// Bind runtime ke sesi store: ganti `rt.session_id`, hydrate `rt.history`
+/// dari pesan tersimpan, dan jadikan sesi itu aktif (persist — kontrak
+/// MODES.md "pindah sesi TIDAK mematikan runtime"). Ditolak saat tugas
+/// berjalan: history yang sedang dipakai loop tidak boleh diganti di bawah
+/// kaki loop.
+pub async fn bind_session(data_dir: &Path, id: &str) -> Result<Value, String> {
+    let mut r = rt().lock().await;
+    if r.busy {
+        return Err("tugas sedang berjalan — sesi tidak bisa diganti sekarang".into());
+    }
+    let msgs = sessions::messages(data_dir, id)
+        .ok_or_else(|| format!("sesi tidak dikenal: {id}"))?;
+    let mut hist: Vec<Value> = msgs
+        .into_iter()
+        .filter(|m| {
+            let role = m.get("role").and_then(|x| x.as_str()).unwrap_or("");
+            role == "user" || role == "assistant"
+        })
+        .collect();
+    if hist.len() > MAX_HISTORY {
+        let drop = hist.len() - MAX_HISTORY;
+        hist.drain(0..drop);
+    }
+    r.session_id = id.to_string();
+    r.history = hist;
+    sessions::switch_to(data_dir, id);
+    Ok(json!({ "ok": true, "id": id, "count": r.history.len() }))
+}
+
+/// Sesi store yang sedang terikat runtime ("" bila belum).
+pub async fn bound_session() -> String {
+    rt().lock().await.session_id.clone()
+}
+
+/// Slot tugas sedang dipakai? Guard untuk operasi yang menyentuh ikatan sesi.
+pub async fn is_busy() -> bool {
+    rt().lock().await.busy
+}
+
+/// Lepas ikatan sesi (sesi terikat dihapus & store kosong). History runtime
+/// ikut dikosongkan — tanpa sesi, tidak ada transcript yang bermakna.
+pub async fn unbind_session() {
+    let mut r = rt().lock().await;
+    r.session_id.clear();
+    r.history.clear();
+}
+
 /// Mulai/attach runtime ke workDir. Bus di-reset (sesi baru). `model` +
 /// `role_map` opsional: konteks untuk tool motion (motion_*).
 pub async fn start(work_dir: &str, model: &str, role_map: Value) -> Value {
@@ -168,6 +220,7 @@ pub async fn status() -> Value {
         "running": r.running,
         "busy": r.busy,
         "workDir": r.work_dir,
+        "sessionId": r.session_id,
         "historyCount": r.history.len(),
         "pendingApprovals": pending,
         "allowlist": allowlist,
@@ -188,6 +241,9 @@ pub async fn stop() -> Value {
     r.history.clear();
     r.approvals.clear();
     r.allowed.clear();
+    // session_id SENGAJA dipertahankan: stop = batas sesi runtime (allowlist
+    // dsb.), bukan unbind dari store — start berikutnya hydrate ulang
+    // transcript sesi yang sama, bukan mulai kosong.
     r.ask_seq = 0;
     r.plan_seq = 0;
     r.plan_ok = false;
@@ -323,7 +379,8 @@ fn lang_of(config_path: &Path) -> String {
 
 /// Jalankan loop dari history saat ini sampai final / paused / batas iterasi.
 /// Runtime di-lock per-langkah (lepas saat await LLM) supaya status bisa dibaca.
-async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
+/// `data_dir` = lokasi store sesi untuk persist transcript.
+async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult {
     let lang = lang_of(config_path);
     let (work_dir, model_name) = { let r = rt().lock().await; (r.work_dir.clone(), r.model.clone()) };
     let wd = PathBuf::from(&work_dir);
@@ -345,9 +402,14 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
             if r.cancel {
                 r.cancel = false;
                 push_msg(&mut r, "assistant", "Dibatalkan oleh user.");
-                bus::emit("error", "dibatalkan: oleh user");
                 r.busy = false;
                 r.active_task = None;
+                let sid = r.session_id.clone();
+                drop(r);
+                if !sid.is_empty() {
+                    sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":"Dibatalkan oleh user."})]);
+                }
+                bus::emit("error", "dibatalkan: oleh user");
                 return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), paused: false, error: None };
             }
         }
@@ -373,6 +435,11 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
                 bus::emit("error", &msg);
                 let mut r = rt().lock().await;
                 push_msg(&mut r, "assistant", &format!("⚠️ {msg}"));
+                // Tugas GAGAL = slot lepas — dulu busy & active_task dibiarkan
+                // tergantung sehingga agent "brick" (composer mati, ask berikut
+                // ditolak, cancel tak pernah dikonsumsi karena loop sudah exit).
+                r.busy = false;
+                r.active_task = None;
                 return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
             }
         };
@@ -575,6 +642,12 @@ async fn run_loop(config_path: &Path, root: &Path) -> AskResult {
             r.busy = false;
             r.active_task = None;
         }
+        // Persist giliran assistant final ke sesi terikat (transcript store).
+        // Jalur error LLM sudah return di atas — tidak menulis giliran gagal.
+        let sid = r.session_id.clone();
+        if !sid.is_empty() {
+            sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":&final_clean})]);
+        }
     }
     AskResult { ok: true, reply: final_clean, paused, error: None }
 }
@@ -656,7 +729,20 @@ pub async fn set_model_context(model: &str, role_map: Value) {
 }
 
 /// POST /api/assistant/ask — jalankan tugas (loop penuh, sinkron).
-pub async fn ask(config_path: &Path, root: &Path, text: &str) -> AskResult {
+/// `session` opsional: `Some("run")` = ikat dulu runtime ke sesi run aplikasi
+/// (dipakai hand-off chat/panggung — percakapan companion selalu berlabuh ke
+/// sesi run, terpisah dari pilihan manual rail).
+pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, session: Option<&str>) -> AskResult {
+    if session == Some("run") {
+        // Bind GAGAL saat busy → ask di bawah menolak dengan pesan yang sama;
+        // bind sukses = runtime berlabuh ke sesi run sebelum tugas jalan.
+        let run = sessions::ensure_run_session(data_dir);
+        if let Some(id) = run.get("id").and_then(|i| i.as_str()) {
+            if bound_session().await != id {
+                let _ = bind_session(data_dir, id).await;
+            }
+        }
+    }
     {
         let mut r = rt().lock().await;
         // GUARD SATU-SLOT: dulu ask kedua diterima saat tugas pertama masih
@@ -682,14 +768,21 @@ pub async fn ask(config_path: &Path, root: &Path, text: &str) -> AskResult {
         r.mutated = false;
         r.active_task = Some(json!({ "taskId": tid, "prompt": t.chars().take(120).collect::<String>(), "status": "running" }));
         push_msg(&mut r, "user", &t);
+        // Persist giliran user ke sesi terikat SEBELUM loop (tugas jalan lama
+        // pun sudah tercatat; approval resume menambah giliran final nanti).
+        let sid = r.session_id.clone();
+        drop(r);
+        if !sid.is_empty() {
+            sessions::append(data_dir, &sid, &[json!({"role":"user","content":&t})]);
+        }
     }
-    run_loop(config_path, root).await
+    run_loop(config_path, root, data_dir).await
 }
 
 /// POST /api/assistant/modify {taskId?, text} — ganti tugas. Model core sinkron:
 /// tanpa antrean parked penuh, "modify" = batalkan tugas aktif (kooperatif) lalu
 /// jalankan pengganti di background. Return {ok, taskId, target}.
-pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str) -> Value {
+pub async fn modify(config_path: &Path, root: &Path, data_dir: &Path, _task_id: &str, text: &str) -> Value {
     let text: String = text.chars().take(4000).collect();
     if text.trim().is_empty() {
         return json!({ "ok": false, "error": "teks task kosong" });
@@ -710,6 +803,7 @@ pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str)
         }
         let cp = config_path.to_path_buf();
         let rt_root = root.to_path_buf();
+        let rt_data = data_dir.to_path_buf();
         let replacement = text.clone();
         tokio::spawn(async move {
             // tunggu tugas lama melepas slot (cancel kooperatif), lalu jalankan.
@@ -719,7 +813,7 @@ pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str)
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
-            let _ = ask(&cp, &rt_root, &replacement).await;
+            let _ = ask(&cp, &rt_root, &rt_data, &replacement, None).await;
         });
         let tid = {
             let r = rt().lock().await;
@@ -728,7 +822,7 @@ pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str)
         json!({ "ok": true, "taskId": tid, "target": "active" })
     } else {
         // Idle → jalankan sebagai tugas baru (foreground).
-        let r = ask(config_path, root, &text).await;
+        let r = ask(config_path, root, data_dir, &text, None).await;
         json!({ "ok": r.ok, "reply": r.reply, "paused": r.paused, "target": "idle" })
     }
 }
@@ -736,7 +830,7 @@ pub async fn modify(config_path: &Path, root: &Path, _task_id: &str, text: &str)
 /// POST /api/assistant/approve — resume loop setelah izin tool mutating.
 /// `always` = sekalian masukkan tool/perintah ke allowlist sesi (gate
 /// berikutnya untuk kunci yang sama tidak pause lagi).
-pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool, always: bool) -> AskResult {
+pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str, approve_it: bool, always: bool) -> AskResult {
     let pending = {
         let mut r = rt().lock().await;
         let idx = r.approvals.iter().position(|a| a.get("id").and_then(|x| x.as_str()) == Some(id));
@@ -767,7 +861,7 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
         }
         drop(r);
         bus::emit("permission_resolved", &format!("{}: rencana kerja", if approve_it { "disetujui" } else { "ditolak" }));
-        return run_loop(config_path, root).await;
+        return run_loop(config_path, root, data_dir).await;
     }
 
     bus::emit("permission_resolved", &format!("{}: {name}", if approve_it { "disetujui" } else { "ditolak" }));
@@ -809,7 +903,7 @@ pub async fn approve(config_path: &Path, root: &Path, id: &str, approve_it: bool
         let mut r = rt().lock().await;
         push_msg(&mut r, "tool", &format!("User MENOLAK menjalankan {name}. Cari pendekatan lain atau tanyakan."));
     }
-    run_loop(config_path, root).await
+    run_loop(config_path, root, data_dir).await
 }
 
 #[cfg(test)]
@@ -834,9 +928,10 @@ mod tests {
         let _g = bus::BUS_TEST_LOCK.lock().unwrap();
         // mock LLM (echo) tak emit "TOOL:" → loop langsung final.
         let dir = tmp_dir("as");
+        let data = dir.join("data");
         let f = mock_config(&dir);
         start("/tmp/work", "", Value::Null).await;
-        let res = ask(&f, &dir, "halo agent").await;
+        let res = ask(&f, &dir, &data, "halo agent", None).await;
         assert!(res.ok);
         assert!(!res.paused);
         assert!(res.reply.to_lowercase().contains("halo"));
@@ -845,9 +940,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_persist_ke_sesi_terikat() {
+        // Runtime terikat sesi store → ask mempersist giliran user + final.
+        // Tanpa ikatan → store tidak tersentuh (perilaku lama tetap aman).
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("aspersist");
+        let data = dir.join("data");
+        let f = mock_config(&dir);
+        stop().await;
+        // Runtime global dibagi antar test (router test juga bisa mem-bind) —
+        // pastikan mulai dari keadaan TANPA ikatan.
+        unbind_session().await;
+
+        // (1) belum terikat → ask jalan, store kosong.
+        let res = ask(&f, &dir, &data, "tanpa sesi", None).await;
+        assert!(res.ok);
+        assert_eq!(bound_session().await, "");
+        assert!(sessions::load(&data)["sessions"].as_array().unwrap().is_empty());
+
+        // (2) terikat sesi → user + final tercatat.
+        let rec = sessions::create(&data, "");
+        let sid = rec["id"].as_str().unwrap().to_string();
+        bind_session(&data, &sid).await.unwrap();
+        assert_eq!(bound_session().await, sid);
+        let res = ask(&f, &dir, &data, "halo dari chat", None).await;
+        assert!(res.ok);
+        let msgs = sessions::messages(&data, &sid).unwrap();
+        assert_eq!(msgs.len(), 2, "user + final assistant");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "halo dari chat");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], res.reply);
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bind_hydrate_dan_tolak_saat_busy() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("asbind");
+        let data = dir.join("data");
+        stop().await;
+
+        // sesi dengan isi → bind meng-hydrate history runtime.
+        let a = sessions::create(&data, "");
+        let aid = a["id"].as_str().unwrap().to_string();
+        sessions::append(&data, &aid, &[
+            json!({"role":"user","content":"tugas kemarin"}),
+            json!({"role":"assistant","content":"sudah beres"}),
+        ]);
+        let ok = bind_session(&data, &aid).await.unwrap();
+        assert_eq!(ok["count"], 2);
+        assert_eq!(bound_session().await, aid);
+        let r = rt().lock().await;
+        assert_eq!(r.history.len(), 2);
+        assert_eq!(r.history[0]["content"], "tugas kemarin");
+        drop(r);
+        // bind juga memindah sesi aktif store (persist — kontrak MODES.md).
+        assert_eq!(sessions::load(&data)["active"], json!(aid));
+
+        // busy → bind ditolak.
+        let b = sessions::create(&data, "");
+        let bid = b["id"].as_str().unwrap().to_string();
+        { rt().lock().await.busy = true; }
+        let err = bind_session(&data, &bid).await.unwrap_err();
+        assert!(err.contains("berjalan"), "pesan harus jelas: {err}");
+        assert_eq!(bound_session().await, aid, "bind gagal tidak mengubah ikatan");
+        { rt().lock().await.busy = false; }
+
+        // id asing → ditolak; history tak tersentuh.
+        assert!(bind_session(&data, "s_hilang").await.is_err());
+        assert_eq!(rt().lock().await.history.len(), 2);
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ask_llm_error_melepas_slot() {
+        // Provider rusak (koneksi aktif hilang) → ask gagal DAN slot bebas:
+        // busy=false, active_task null — agent tidak boleh brick setelah error.
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("aserr");
+        let data = dir.join("data");
+        // config TANPA koneksi → llm_for_role_tools pasti error.
+        let f = dir.join("config.json");
+        std::fs::write(&f, r#"{"activeId":"m","connections":[]}"#).unwrap();
+        start(&dir.to_string_lossy(), "", Value::Null).await;
+        let res = ask(&f, &dir, &data, "tugas yang pasti gagal", None).await;
+        assert!(!res.ok);
+        assert!(res.error.is_some());
+        let st = status().await;
+        assert_eq!(st["busy"], json!(false), "busy harus lepas setelah error");
+        assert_eq!(st["activeTask"], Value::Null, "activeTask harus bersih");
+        // Slot benar-benar bebas: ask berikutnya diterima (bukan ditolak busy).
+        std::fs::write(&f, r#"{"activeId":"m","connections":[{"id":"m","provider":"mock"}]}"#).unwrap();
+        let res2 = ask(&f, &dir, &data, "halo lagi", None).await;
+        assert!(res2.ok, "ask setelah error harus jalan normal");
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn ask_ditolak_saat_busy_atau_approval_menggantung() {
         let _g = bus::BUS_TEST_LOCK.lock().unwrap();
         let dir = tmp_dir("asguard");
+        let data = dir.join("data");
         let f = mock_config(&dir);
         start(&dir.to_string_lossy(), "", Value::Null).await;
         // busy=true → ask kedua ditolak dengan pesan jelas (bukan jalan paralel).
@@ -855,7 +1052,7 @@ mod tests {
             let mut r = rt().lock().await;
             r.busy = true;
         }
-        let res1 = ask(&f, &dir, "tugas kedua").await;
+        let res1 = ask(&f, &dir, &data, "tugas kedua", None).await;
         assert!(!res1.ok);
         assert!(res1.error.unwrap_or_default().contains("berjalan"));
         // approval pending → ditolak juga (approval harus diputuskan dulu).
@@ -864,7 +1061,7 @@ mod tests {
             r.busy = false;
             r.approvals.push(json!({ "id": "ap_guard", "tool": "write_file", "args": {}, "ts": now_ms() }));
         }
-        let res2 = ask(&f, &dir, "tugas ketiga").await;
+        let res2 = ask(&f, &dir, &data, "tugas ketiga", None).await;
         assert!(!res2.ok);
         assert!(res2.error.unwrap_or_default().contains("keputusan"));
         stop().await;
@@ -894,7 +1091,7 @@ mod tests {
         let _g = bus::BUS_TEST_LOCK.lock().unwrap();
         stop().await;
         let s = status().await;
-        for k in ["running", "busy", "workDir", "historyCount", "pendingApprovals", "plan", "notes", "lastEvent", "tools", "activeTask", "parkedTasks"] {
+        for k in ["running", "busy", "workDir", "sessionId", "historyCount", "pendingApprovals", "plan", "notes", "lastEvent", "tools", "activeTask", "parkedTasks"] {
             assert!(s.get(k).is_some(), "field hilang: {k}");
         }
         assert!(s["notes"]["filesTouched"].is_array());
@@ -919,7 +1116,7 @@ mod tests {
             r.approvals.push(json!({ "id": id, "tool": name, "args": args, "ts": now_ms() }));
         }
         let cfg = mock_config(wd);
-        let res = approve(&cfg, wd, &id, true, false).await;
+        let res = approve(&cfg, wd, &wd.join("data"), &id, true, false).await;
         assert!(res.ok);
     }
 
@@ -943,7 +1140,7 @@ mod tests {
             r.approvals.push(json!({ "id": id, "tool": "edit_file", "args": json!({ "path": "a.txt", "old": "x", "new": "y" }), "ts": now_ms() }));
         }
         let cfg = mock_config(&wd);
-        let res = approve(&cfg, &wd, &id, true, true).await;
+        let res = approve(&cfg, &wd, &wd.join("data"), &id, true, true).await;
         assert!(res.ok);
         assert!(rt().lock().await.allowed.contains("edit_file"), "approve + always harus memasukkan allowlist");
         let st = status().await;
@@ -995,7 +1192,7 @@ mod tests {
             r.approvals.push(json!({ "id": id, "kind": "plan", "tool": "update_plan", "args": { "todos": todos_snapshot }, "ts": now_ms() }));
         }
         // Approve → rencana disetujui, loop resume, TIDAK ada eksekusi gantung.
-        let res_ok = approve(&cfg, &wd, &id, true, false).await;
+        let res_ok = approve(&cfg, &wd, &wd.join("data"), &id, true, false).await;
         assert!(res_ok.ok);
         assert!(!res_ok.paused, "approve rencana → resume tanpa approval yang tersisa");
         assert!(rt().lock().await.plan_ok, "approve menandai rencana disetujui");
@@ -1008,7 +1205,7 @@ mod tests {
             let mut r = rt().lock().await;
             r.approvals.push(json!({ "id": id2, "kind": "plan", "tool": "update_plan", "args": { "todos": [] }, "ts": now_ms() }));
         }
-        let res_no = approve(&cfg, &wd, &id2, false, false).await;
+        let res_no = approve(&cfg, &wd, &wd.join("data"), &id2, false, false).await;
         assert!(res_no.ok);
         assert!(!plan_gate_required(&*rt().lock().await), "reject melucuti gate (tidak ping-pong)");
         assert!(rt().lock().await.history.iter().any(|m| m["content"].as_str().unwrap_or("").contains("MENOLAK rencana")));
@@ -1023,7 +1220,7 @@ mod tests {
         assert!(!plan_gate_required(&*rt().lock().await), "setelah mutasi, update_plan cuma pelacakan");
 
         // Tugas baru via ask() sungguhan (LLM mock) → kontrak di-reset.
-        let res_task = ask(&cfg, &wd, "halo").await;
+        let res_task = ask(&cfg, &wd, &wd.join("data"), "halo", None).await;
         assert!(res_task.ok);
         {
             let r = rt().lock().await;
@@ -1135,12 +1332,13 @@ mod tests {
         // ditolak saat idle.
         let _g = bus::BUS_TEST_LOCK.lock().unwrap();
         let wd = tmp_dir("canc");
+        let data = wd.join("data");
         let cfg = mock_config(&wd);
         start(&wd.to_string_lossy(), "", Value::Null).await;
 
         // (1) flag sisa dibuang ask baru — jawaban bukan "Dibatalkan".
         { rt().lock().await.cancel = true; }
-        let r = ask(&cfg, &wd, "tugas segar").await;
+        let r = ask(&cfg, &wd, &data, "tugas segar", None).await;
         assert!(r.ok);
         assert_ne!(r.reply, "Dibatalkan oleh user.");
         assert!(!rt().lock().await.cancel);
@@ -1148,8 +1346,8 @@ mod tests {
         // (2) cancel di tengah ask (mock delay 300 ms): flag dibaca antar-turn —
         // mock final di turn 0, jadi ask tetap selesai normal; yang dikunci:
         // runtime HIDUP & busy lepas (padanan semantik agent-cancel TS).
-        let (cp, root) = (cfg.clone(), wd.clone());
-        let h = tokio::spawn(async move { ask(&cp, &root, "tugas yang dicancl di tengah").await });
+        let (cp, root, rt_data) = (cfg.clone(), wd.clone(), data.clone());
+        let h = tokio::spawn(async move { ask(&cp, &root, &rt_data, "tugas yang dicancl di tengah", None).await });
         for _ in 0..100 {
             if rt().lock().await.busy { break; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

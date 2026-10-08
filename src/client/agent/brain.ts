@@ -474,7 +474,10 @@ bila memang pas.
       // Gerbang recall murah dulu; hanya pesan ber-isyarat permintaan yang
       // diadukan ke klasifikasi makna (LLM role "memory", fail-soft). Kata
       // kerja tunggal TIDAK pernah memutuskan routing.
-      const decision = await this.classifyIntent(userText, myGen);
+      // Signal ikut: dulu intent TANPA timeout — model role memory yang
+      // lambat/gantung bikin slot "thinking" menggantung >90 dtk tanpa
+      // pelarian (ada yang menunggu 141+ dtk di QA live).
+      const decision = await this.classifyIntent(userText, myGen, ctrl.signal);
       if (this.gen !== myGen) return; // digulingkan selama klasifikasi
       if (decision?.isTask) {
         // Slot thinking dilepas di finally; hand-off berjalan di alur
@@ -485,7 +488,7 @@ bila memang pas.
       }
 
       // ── Context: memori relevan + potongan lama + jendela terakhir ──
-      const mem = await this.retrieveMemory(userText);
+      const mem = await this.retrieveMemory(userText, ctrl.signal);
       if (this.gen !== myGen) return;
       const { messages, olderUsed } = buildContextMessages(this.ctx.turns, userText);
       const system =
@@ -557,6 +560,7 @@ bila memang pas.
   private async classifyIntent(
     userText: string,
     myGen: number,
+    signal?: AbortSignal,
   ): Promise<{ isTask: boolean; task: string } | null> {
     if (!looksTaskish(userText)) return null;
     try {
@@ -568,6 +572,7 @@ bila memang pas.
           summary: this.ctx.summary,
           recent: this.ctx.turns.slice(-6),
         }),
+        signal,
       });
       if (!resp.ok) return null;
       const d = await resp.json();
@@ -584,13 +589,14 @@ bila memang pas.
 
   /** Entri memori jangka panjang yang relevan untuk query (server-side
    *  scoring). Gagal → kosong: chat tidak boleh mati karena memori. */
-  private async retrieveMemory(query: string): Promise<MemoryEntry[]> {
+  private async retrieveMemory(query: string, signal?: AbortSignal): Promise<MemoryEntry[]> {
     try {
       const resp = await fetch(
         httpBase() +
           "/api/companion/memory?q=" +
           encodeURIComponent(query) +
           "&limit=6",
+        { signal },
       );
       if (!resp.ok) return [];
       const d = await resp.json();
@@ -624,7 +630,11 @@ bila memang pas.
       }
       let status: any = null;
       try {
-        const r = await fetch(httpBase() + "/api/assistant/status");
+        // Hand-off berjalan di luar slot ctrl think() — pakai timeout mandiri
+        // supaya status yang gantung tidak membekukan penyerahan tugas.
+        const r = await fetch(httpBase() + "/api/assistant/status", {
+          signal: AbortSignal.timeout(8_000),
+        });
         status = await r.json();
       } catch {
         status = null;
@@ -636,7 +646,7 @@ bila memang pas.
       this.handoffBusy = true;
       this.ctx.pushAssistant(ack.ok);
       this.announce(ack.ok);
-      const mem = await this.retrieveMemory(task);
+      const mem = await this.retrieveMemory(task, AbortSignal.timeout(10_000));
       const text = composeHandoffText({
         task,
         summary: this.ctx.summary,
@@ -647,10 +657,17 @@ bila memang pas.
       const resp = await fetch(httpBase() + "/api/assistant/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
+        // session:"run" → server berlabuhkan tugas ini ke sesi run aplikasi
+        // (SATU sesi agent baru per app dibuka) — percakapan chat/panggung
+        // yang masuk agent selalu berlabuh ke sana, terpisah dari sesi manual
+        // pilihan user di rail projek. Transcript-nya dipersist di server.
+        body: JSON.stringify({ text, session: "run" }),
       });
       const d = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(d.error || "HTTP " + resp.status);
+      // Runtime sudah (re)bind ke sesi run → panel & rail perlu hydrate ulang
+      // agar transkrip mengikuti ikatan baru (panel me-rebuild dari /history).
+      window.dispatchEvent(new CustomEvent("agent:session-changed"));
       if (d.paused) {
         // Loop agent berhenti menunggu approval tool mutating.
         this.ctx.pushAssistant(ack.paused);

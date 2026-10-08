@@ -171,6 +171,73 @@ pub fn create(data_dir: &Path, work_dir: &str) -> Value {
     rec
 }
 
+/// Pesan tersimpan satu sesi (untuk hydrate runtime). None bila id tak dikenal.
+pub fn messages(data_dir: &Path, id: &str) -> Option<Vec<Value>> {
+    let f = load(data_dir);
+    f["sessions"].as_array()?.iter().find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))?
+        .get("messages").and_then(|m| m.as_array()).cloned()
+}
+
+/// Tambah giliran user/assistant ke sesi (persist transcript agent). Cap
+/// MAX_HISTORY per sesi. No-op diam bila id tak dikenal / tidak ada giliran /
+/// role di luar user|assistant — penyimpanan tidak boleh pernah menggagalkan
+/// tugas yang sedang jalan.
+pub fn append(data_dir: &Path, id: &str, turns: &[Value]) {
+    if turns.is_empty() || id.is_empty() {
+        return;
+    }
+    let clean: Vec<Value> = turns.iter().filter(|t| {
+        let role = t.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        (role == "user" || role == "assistant")
+            && t.get("content").and_then(|c| c.as_str()).map(|c| !c.trim().is_empty()).unwrap_or(false)
+    }).map(|t| json!({
+        "role": t["role"],
+        "content": take_chars(t.get("content").and_then(|c| c.as_str()).unwrap_or("").trim(), 4000),
+    })).collect();
+    if clean.is_empty() {
+        return;
+    }
+    let mut f = load(data_dir);
+    let Some(sess) = f["sessions"].as_array_mut().unwrap().iter_mut()
+        .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))
+    else { return };
+    if let Some(arr) = sess.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        arr.extend(clean);
+        let len = arr.len();
+        if len > MAX_HISTORY {
+            arr.drain(0..len - MAX_HISTORY);
+        }
+    }
+    sess["ts"] = json!(now_ms());
+    let _ = save(data_dir, &f);
+}
+
+/// Sesi "run" aplikasi: SATU sesi baru per proses (app dibuka = sesi agent
+/// baru), dibuat lazy saat permukaan pertama menyentuh agent (hand-off chat
+/// atau start panel). Memo per-proses supaya panggilan berulang idempoten;
+/// sesi run yang dihapus user → dibuat lagi pada panggilan berikutnya.
+pub fn ensure_run_session(data_dir: &Path) -> Value {
+    static RUN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut memo = RUN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = memo.as_deref() {
+        let f = load(data_dir);
+        if let Some(rec) = f["sessions"].as_array().unwrap().iter()
+            .find(|s| s.get("id").and_then(|i| i.as_str()) == Some(id))
+        {
+            return rec.clone();
+        }
+        memo.take(); // sesi run dihapus user — buat ulang di bawah.
+    }
+    let rec = create_run(data_dir);
+    *memo = Some(rec["id"].as_str().unwrap_or("").to_string());
+    rec
+}
+
+/// Buat sesi run TANPA memo (selalu sesi baru) — testable.
+pub fn create_run(data_dir: &Path) -> Value {
+    create(data_dir, "")
+}
+
 /// Pindah sesi aktif. Return rekaman atau None.
 pub fn switch_to(data_dir: &Path, id: &str) -> Option<Value> {
     let mut f = load(data_dir);
@@ -261,6 +328,70 @@ mod tests {
         assert_eq!(new_active, active_id, "hapus non-aktif tidak mengubah sesi aktif");
         assert_eq!(list(&data)["active"], json!(active_id));
         assert!(list(&data)["sessions"].as_array().unwrap().len() == MAX_SESSIONS - 1);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn append_dan_messages_roundtrip() {
+        let data = std::env::temp_dir().join(format!("l2dsessap-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&data).unwrap();
+        let rec = create(&data, "/p/x");
+        let id = rec["id"].as_str().unwrap().to_string();
+
+        // append kosong / id asing → no-op, store tak berubah.
+        append(&data, &id, &[]);
+        append(&data, "s_tidak_ada", &[json!({"role":"user","content":"hmm"})]);
+        assert_eq!(messages(&data, &id).unwrap().len(), 0);
+
+        // append giliran sah; role aneh & konten kosong disaring.
+        append(&data, &id, &[
+            json!({"role":"user","content":"  tolong rapikan folder  "}),
+            json!({"role":"tool","content":"[read_file] ..."}),
+            json!({"role":"assistant","content":"beres."}),
+        ]);
+        let msgs = messages(&data, &id).unwrap();
+        assert_eq!(msgs.len(), 2, "role tool tidak ikut disimpan");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "tolong rapikan folder");
+        assert_eq!(msgs[1]["role"], "assistant");
+
+        // cap history 60: append 70 giliran → menyisakan 60 TERAKHIR.
+        let bulk: Vec<Value> = (0..70)
+            .map(|i| json!({"role":"user","content":format!("g{i}")}))
+            .collect();
+        append(&data, &id, &bulk);
+        let msgs = messages(&data, &id).unwrap();
+        assert_eq!(msgs.len(), MAX_HISTORY);
+        assert_eq!(msgs[0]["content"], "g10", "yang terbuang = yang terlama");
+        assert_eq!(msgs.last().unwrap()["content"], "g69");
+        // ts sesi naik (persist menyentuh rekaman, bukan cuma messages).
+        let f = load(&data);
+        let sess = f["sessions"].as_array().unwrap().iter().find(|s| s["id"] == json!(id)).unwrap();
+        assert!(sess["ts"].as_i64().unwrap_or(0) >= rec["ts"].as_i64().unwrap_or(0));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn create_run_sesi_baru_aktif() {
+        // CATATAN: ensure_run_session ber-memo PER-PROSES — test ini satu-satunya
+        // pemakainya; test lain memakai create/append murni agar tak saling ganggu.
+        let data = std::env::temp_dir().join(format!("l2dsessrun-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&data).unwrap();
+        // Ensure pertama = buat sesi run baru + jadikan aktif.
+        let a = ensure_run_session(&data);
+        let aid = a["id"].as_str().unwrap().to_string();
+        assert!(aid.starts_with("s_"));
+        assert_eq!(load(&data)["active"], json!(aid), "sesi run jadi aktif saat dibuat");
+        // Panggilan berikutnya = sesi yang SAMA (idempoten dalam proses ini).
+        let b = ensure_run_session(&data);
+        assert_eq!(b["id"], json!(aid), "ensure idempoten dalam proses yang sama");
+        // Sesi run dihapus user → panggilan berikutnya membuat pengganti.
+        let (ok, _) = remove(&data, &aid);
+        assert!(ok);
+        let c = ensure_run_session(&data);
+        let cid = c["id"].as_str().unwrap().to_string();
+        assert_ne!(cid, aid, "sesi run yang dihapus digantikan sesi run baru");
+        assert_eq!(load(&data)["active"], json!(cid));
         let _ = std::fs::remove_dir_all(&data);
     }
 

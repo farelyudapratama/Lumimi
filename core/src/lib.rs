@@ -431,14 +431,34 @@ async fn post_tts_translate(State(paths): State<AppPaths>, body: axum::body::Byt
 }
 
 /// POST /api/assistant/start {workDir?, persona?}.
-async fn post_assistant_start(body: axum::body::Bytes) -> Response {
+async fn post_assistant_start(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let wd = v.get("workDir").and_then(|x| x.as_str()).unwrap_or("");
     // Konteks tool motion: model aktif + peta role→paramId dari klien
     // (sumber inferensi role tetap role-mapping.ts; server hanya melipat).
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
-    json_status(StatusCode::OK, agent::assistant::start(wd, model, role_map).await)
+    let mut out = agent::assistant::start(wd, model, role_map).await;
+    // Sesi run aplikasi: app dibuka = sesi agent baru. Dibuat lazy saat
+    // permukaan pertama menyentuh agent (start panel / hand-off chat), dan
+    // hanya bila runtime belum terikat sesi manual pilihan user di rail.
+    if agent::assistant::bound_session().await.is_empty() {
+        let run = agent::sessions::ensure_run_session(&paths.data_dir);
+        if let Some(id) = run.get("id").and_then(|i| i.as_str()) {
+            match agent::assistant::bind_session(&paths.data_dir, id).await {
+                Ok(_) => { out["sessionId"] = json!(id); }
+                Err(e) => { out["sessionWarning"] = json!(e); }
+            }
+        }
+    } else {
+        // Sudah terikat (masuk mode Assistant ke-N): hydrate ulang transcript
+        // dari store — stop() mengosongkan history runtime, sesi tidak.
+        let bound = agent::assistant::bound_session().await;
+        if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &bound).await {
+            out["sessionWarning"] = json!(e);
+        }
+    }
+    json_status(StatusCode::OK, out)
 }
 
 /// GET /api/assistant/status.
@@ -451,7 +471,9 @@ async fn post_assistant_stop() -> Response {
     json_status(StatusCode::OK, agent::assistant::stop().await)
 }
 
-/// POST /api/assistant/ask {text} — jalankan tugas agent (loop penuh).
+/// POST /api/assistant/ask {text, session?} — jalankan tugas agent (loop penuh).
+/// `session:"run"` (dari hand-off chat/panggung) → runtime berlabuh ke sesi
+/// run aplikasi dulu; tanpa field → lanjut di sesi terikat saat ini (panel).
 async fn post_assistant_ask(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     // Konteks motion di-refresh tiap ask (model bisa dimuat/ganti setelah panel hidup).
@@ -459,10 +481,11 @@ async fn post_assistant_ask(State(paths): State<AppPaths>, body: axum::body::Byt
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     agent::assistant::set_model_context(model, role_map).await;
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+    let session = v.get("session").and_then(|x| x.as_str());
     let cfg = paths.data_dir.join("config.json");
-    let r = agent::assistant::ask(&cfg, &paths.root, text).await;
+    let r = agent::assistant::ask(&cfg, &paths.root, &paths.data_dir, text, session).await;
     if r.ok {
-        json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused }))
+        json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused, "sessionId": agent::assistant::bound_session().await }))
     } else {
         json_status(StatusCode::BAD_GATEWAY, json!({ "error": r.error.unwrap_or_default() }))
     }
@@ -479,15 +502,17 @@ async fn post_assistant_ask_stream(State(paths): State<AppPaths>, body: axum::bo
 
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let session = v.get("session").and_then(|x| x.as_str()).map(|s| s.to_string());
     // Konteks motion di-refresh tiap ask (model bisa dimuat/ganti setelah panel hidup).
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     agent::assistant::set_model_context(&model, role_map).await;
     let cfg = paths.data_dir.join("config.json");
     let root = paths.root.clone();
+    let data_dir = paths.data_dir.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let r = agent::assistant::ask(&cfg, &root, &text).await;
+        let r = agent::assistant::ask(&cfg, &root, &data_dir, &text, session.as_deref()).await;
         // Frame SSE WAJIB ber-field "type" — kontrak stream.ts (AsSseEvent):
         // parser panel membuang frame tanpa type, jadi dulu seluruh streaming
         // mati diam-diam dan panel hidup dari hydrate history saja.
@@ -511,7 +536,7 @@ async fn post_assistant_approve(State(paths): State<AppPaths>, body: axum::body:
     let approve_it = v.get("approve").and_then(|x| x.as_bool()).unwrap_or(false);
     let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
-    let r = agent::assistant::approve(&cfg, &paths.root, id, approve_it, always).await;
+    let r = agent::assistant::approve(&cfg, &paths.root, &paths.data_dir, id, approve_it, always).await;
     if r.ok {
         json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused }))
     } else {
@@ -533,9 +558,10 @@ async fn post_assistant_approve_stream(State(paths): State<AppPaths>, body: axum
     let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
     let root = paths.root.clone();
+    let data_dir = paths.data_dir.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let r = agent::assistant::approve(&cfg, &root, &id, approve_it, always).await;
+        let r = agent::assistant::approve(&cfg, &root, &data_dir, &id, approve_it, always).await;
         // Kontrak sama dengan ask-stream: frame ber-type (lihat stream.ts).
         if r.ok {
             if !r.reply.is_empty() {
@@ -569,7 +595,7 @@ async fn post_assistant_modify(State(paths): State<AppPaths>, body: axum::body::
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let task_id = v.get("taskId").and_then(|x| x.as_str()).unwrap_or("");
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-    let out = agent::assistant::modify(&paths.data_dir.join("config.json"), &paths.root, task_id, text).await;
+    let out = agent::assistant::modify(&paths.data_dir.join("config.json"), &paths.root, &paths.data_dir, task_id, text).await;
     let ok = out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     json_status(if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST }, out)
 }
@@ -723,34 +749,59 @@ async fn get_sessions(State(paths): State<AppPaths>) -> Json<serde_json::Value> 
     Json(agent::sessions::list(&paths.data_dir))
 }
 
-/// POST /api/assistant/sessions/new {workDir?} — buat sesi baru.
+/// POST /api/assistant/sessions/new {workDir?} — buat sesi baru dan LANGSUNG
+/// ikatkan ke runtime (transcript panel berlanjut di sesi ini). Ditolak saat
+/// tugas berjalan (kontrak MODES.md).
 async fn post_sessions_new(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let work_dir = v.get("workDir").and_then(|x| x.as_str()).unwrap_or("");
     let rec = agent::sessions::create(&paths.data_dir, work_dir);
+    let id = rec.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &id).await {
+        return json_status(StatusCode::CONFLICT, json!({ "error": e, "session": rec }));
+    }
     json_status(StatusCode::OK, json!({ "ok": true, "session": rec }))
 }
 
-/// POST /api/assistant/sessions/switch {id}.
+/// POST /api/assistant/sessions/switch {id} — pindah sesi aktif DAN ikatkan ke
+/// runtime (history hydrate dari store; panel meng-hydrate ulang transcript
+/// via event `agent:session-changed`). Ditolak saat tugas berjalan.
 async fn post_sessions_switch(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    match agent::sessions::switch_to(&paths.data_dir, id) {
-        Some(rec) => json_status(StatusCode::OK, json!({ "ok": true, "session": rec })),
-        None => json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" })),
+    if agent::sessions::switch_to(&paths.data_dir, id).is_none() {
+        return json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }));
+    }
+    match agent::assistant::bind_session(&paths.data_dir, id).await {
+        Ok(_) => json_status(StatusCode::OK, json!({ "ok": true })),
+        Err(e) => json_status(StatusCode::CONFLICT, json!({ "error": e })),
     }
 }
 
-/// POST /api/assistant/sessions/delete {id}.
+/// POST /api/assistant/sessions/delete {id} — hapus sesi. Menghapus sesi yang
+/// SEDANG terikat runtime butuh slot kosong (task tidak sedang menulis ke
+/// sana); runtime pindah ke sesi aktif pengganti (hydrate) atau lepas bila
+/// store kosong.
 async fn post_sessions_delete(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    let (ok, new_active) = agent::sessions::remove(&paths.data_dir, id);
-    if ok {
-        json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active }))
-    } else {
-        json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }))
+    if agent::assistant::bound_session().await == id && agent::assistant::is_busy().await {
+        return json_status(StatusCode::CONFLICT, json!({ "error": "tugas sedang berjalan — sesi aktif tidak bisa dihapus sekarang" }));
     }
+    let (ok, new_active) = agent::sessions::remove(&paths.data_dir, id);
+    if !ok {
+        return json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }));
+    }
+    if agent::assistant::bound_session().await == id {
+        if new_active.is_empty() {
+            agent::assistant::unbind_session().await;
+        } else if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &new_active).await {
+            // Store sudah terhapus; pindah ikatan gagal (kasus nyaris mustahil
+            // karena tidak busy di cek di atas) → lapangkan sebagai warning.
+            return json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active, "warning": e }));
+        }
+    }
+    json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active }))
 }
 
 /// GET /api/mode — status mode (kunci "active" dipakai probe shell Tauri).
@@ -1830,6 +1881,9 @@ mod tests {
     async fn parity_rute_klien_terklaim() {
         // Padanan "is handled by the dispatcher" (44 test TS) — satu tabel,
         // tiap rute klien harus dikenali router (bukan penanda unknown).
+        // POST /api/assistant/start kini IKAT sesi run ke runtime global —
+        // kunci test assistant supaya mutasi itu tidak menyeberang test.
+        let _g = crate::agent::bus::BUS_TEST_LOCK.lock().unwrap();
         let cases: Vec<(&str, &str, Option<Value>)> = vec![
             ("POST", "/api/chat", Some(json!({"messages":[{"role":"user","content":"hai"}]}))),
             ("POST", "/api/tts", Some(json!({"text":""}))),

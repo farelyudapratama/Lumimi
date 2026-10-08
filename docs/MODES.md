@@ -44,24 +44,42 @@ Layout app ala coding-agent: `[activity+projek/history][stage Live2D][conversati
 - Breakpoint `<1280px`: technical pane ditumpuk di bawah conversation dan
   gutter desktop mati; `<1024px`: shell menjadi vertikal.
 
-## Multi-session assistant (2026-09-07)
+## Multi-session assistant (2026-09-07, dipersist 2026-10-07)
 
 Riwayat sesi bernama di `data/assistant-sessions.json`
 (`{active, sessions: [{id, name, workDir, ts, messages}]}`, cap 20 sesi,
 migrasi sekali dari `assistant-history.json` lama + arsip `.bak`):
 
-- Store: `core/src/agent/sessions.rs` (`sessions::load/create/switch_to/remove` —
-  path injectable untuk test). Auto-nama sesi = pesan user pertama
-  (40 char), fallback tanggal. Tulis atomic tmp→rename.
+- Store: `core/src/agent/sessions.rs` (`sessions::load/create/switch_to/remove/
+  messages/append/ensure_run_session` — path injectable untuk test).
+  Auto-nama sesi = pesan user pertama (40 char), fallback tanggal. Tulis
+  atomic tmp→rename.
+- **Transcript dipersist**: tiap `/api/assistant/ask` menulis giliran user
+  (sebelum loop) + jawaban final assistant (termasuk "Dibatalkan oleh user.")
+  ke sesi yang terikat runtime — giliran tool antara TIDAK disimpan (yang
+  tercatat = permintaan + hasil; detail tool tetap hidup di transcript panel).
+  Runtime error TIDAK menulis giliran. Jalur approve (resume setelah izin)
+  mempersist finalnya juga.
+- **Sesi run per app dibuka** (`ensure_run_session`, memo per-proses): sesi
+  agent BARU dibuat lazy saat permukaan pertama menyentuh agent (start panel,
+  hand-off chat, atau CLI start) — dibuka lagi = sesi baru. Hand-off
+  chat/panggung (`POST /api/assistant/ask {text, session:"run"}`) SELALU
+  berlabuh ke sesi run aplikasi, terpisah dari sesi manual pilihan user di
+  rail — user bebas bikin/switch sesi lain tanpa konflik; hand-off chat
+  berikutnya menarik ikatan kembali ke sesi run. Yang dibawa lintas sesi
+  adalah long-term memory (companion-memory), bukan transcript sesi lain.
 - API: `GET /api/assistant/sessions`, `POST /api/assistant/sessions/new
   {workDir?}`, `POST /api/assistant/sessions/switch {id}`,
-  `POST /api/assistant/sessions/delete {id}` — semua menolak saat `busy`
-  (409/404 sesuai kasus).
-- **Pindah sesi TIDAK mematikan runtime** (kontrak mode utuh): facade
-  mengganti `rt.history`/`rt.workDir`/`rt.sessionId` lalu persist. Panel
-  menangkap event DOM `agent:session-changed` (dilempar `projek.ts`) dan
-  hydrate ulang transcript dari `/history`.
-- `loadSession`/`saveSession` (state.ts) kini wrapper store — CLI
+  `POST /api/assistant/sessions/delete {id}` — new/switch menolak saat `busy`
+  (409) dan LANGSUNG mengikatkan runtime (hydrate `rt.history` dari store);
+  delete menghapus sesi terikat hanya saat tidak busy, lalu runtime pindah ke
+  sesi aktif pengganti (atau lepas bila store kosong).
+- **Pindah sesi TIDAK mematikan runtime** (kontrak mode utuh): handler
+  mengganti `rt.history`/`rt.sessionId` via `assistant::bind_session` lalu
+  persist `active`. Panel menangkap event DOM `agent:session-changed`
+  (dilempar `projek.ts` — dan brain setelah hand-off chat) dan hydrate ulang
+  transcript dari `/history`. Masuk mode Assistant ke-N (setelah stop)
+  meng-hydrate ulang transcript sesi terikat, bukan mulai kosong.
   `bun run agent` ikut membuka sesi aktif tanpa perubahan.
 
 ## Cancel per-task & status global (2026-09-07 (2))

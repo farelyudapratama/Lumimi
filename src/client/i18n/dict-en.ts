@@ -40,8 +40,8 @@ export const DICT_EN: Record<string, string> = {
   // ── chat — chat rail ───────────────────────────────────────────
   "chat.clear": "Clear",
   "chat.clearTip": "Clear chat history",
-  "chat.greeting": "Hi! Anything I can help with?",
-  "chat.thinking": "Thinking...",
+  "chat.greeting": "Hey, you're here! What's on your mind?",
+  "chat.thinking": "thinking it over...",
   "chat.mic": "Mic",
   "chat.micTip": "Voice: speak then send (click again to stop)",
   "chat.inputPh": "Type a message and press Enter...",
@@ -54,7 +54,7 @@ export const DICT_EN: Record<string, string> = {
   "chat.phrase5": "You got this!",
   "chat.phrase6": "Hmmm...",
   "chat.phrase7": "Sorry...",
-  "chat.brainToggle": "Brain Mode (LLM thinks & replies on its own)",
+  "chat.brainToggle": "Let them think for themselves",
 
   // ── vt — AI VTuber panel ───────────────────────────────────────
   "vt.title": "AI VTuber — Live Stream",
