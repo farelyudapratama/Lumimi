@@ -12,6 +12,7 @@
        first paint tidak boleh menunggu jaringan. app.css memakai stack
        font sistem. -->
   <link rel="stylesheet" href="css/app.css?v=matte1" />
+  <link rel="stylesheet" href="css/ai-connections.css" />
   <!-- Agent Workbench (mode assistant) — token & komponen ala harness.
        Scope-nya body.agent-mode; mode lain tidak tersentuh. -->
   <link rel="stylesheet" href="css/workbench.css?v=wb2" />
@@ -576,12 +577,7 @@
 
         <!-- ===== AI: koneksi LLM + perilaku proaktif + persepsi kamera. -->
         <div class="tab-pane" data-pane="ai">
-          <!-- AI Connections (9router-style) -->
-          <div class="section-title"><span data-i18n="cfg.connTitle">Koneksi AI</span>
-            <button id="btn-add-conn" class="mini-btn" data-i18n-title="cfg.addConnTip">＋</button>
-          </div>
-          <div id="conn-list" class="conn-list"></div>
-          <div class="conn-hint" data-i18n-html="cfg.connHint">Router otomatis pakai connection <b>Active</b>; kalau gagal (quota/limit) fallback ke berikutnya.</div>
+          <section id="conn-list" class="api-management" aria-label="Koneksi AI" data-i18n-aria="cfg.connTitle"></section>
 
           <!-- Inisiatif (Kelakuan).
                User atur KAPAN karakter mulai proaktif lewat profil (Mati..Hidup)
@@ -749,66 +745,6 @@
   </div><!-- /.app -->
 
   <!-- § Connection editor modal -->
-  <div id="conn-modal" class="modal hidden">
-    <div class="modal-box">
-      <div class="modal-title" data-i18n="conn.title">Connection</div>
-      <div class="api-form">
-        <label><span data-i18n="conn.name">Name</span>
-          <input type="text" id="m-name" data-i18n-ph="conn.namePh" placeholder="mis. koneksi utama" />
-        </label>
-        <label><span data-i18n="cfg.provider">Provider</span>
-          <select id="m-provider">
-            <option value="openai-compatible" data-i18n="conn.prov.openaiCompat">OpenAI-Compatible (router)</option>
-            <option value="systemone" data-i18n="conn.prov.systemone">SystemOne — Jev / Laya (mesin keputusan)</option>
-            <option value="gemini" data-i18n="conn.prov.gemini">Gemini</option>
-            <option value="groq" data-i18n="conn.prov.groq">Groq</option>
-            <option value="openai" data-i18n="conn.prov.openai">OpenAI</option>
-            <option value="anthropic" data-i18n="conn.prov.anthropic">Anthropic</option>
-            <option value="mock" data-i18n="conn.prov.mock">Mock (tes lokal)</option>
-          </select>
-        </label>
-        <label><span data-i18n="conn.baseUrl">Base URL</span>
-          <input type="text" id="m-baseurl" placeholder="https://api.example.com/v1" />
-        </label>
-        <label><span data-i18n="cfg.apiKey">API Key</span>
-          <input type="password" id="m-apikey" data-i18n-ph="conn.apiKeyPh" placeholder="isi api key" autocomplete="off" />
-        </label>
-        <label><span data-i18n="cfg.modelLabel">Model</span>
-          <input type="text" id="m-model" placeholder="gpt-4o-mini" />
-        </label>
-        <label id="m-row-system"><span data-i18n="conn.systemPrompt">System Prompt</span>
-          <span class="form-hint" data-i18n="conn.systemHint">Instruksi teknis untuk sambungan INI (semua peran yang memakainya) — mis. gaya jawaban, format, bahasa. Persona karakter jangan di sini: pakai Catatan Karakter (tab Model) yang per-model.</span>
-          <textarea id="m-system" rows="2" data-i18n-ph="conn.systemPh" placeholder="mis. Jawab singkat dalam bahasa Indonesia."></textarea>
-        </label>
-        <label id="m-row-tokens"><span data-i18n="conn.maxTokTitle">Max Tokens &amp; Temperature</span>
-          <span class="form-hint" data-i18n="conn.maxTokHint">Kosong = default (2048 &amp; 0.8). Model reasoning butuh lebih besar (mis. 8192) supaya jawaban tak terpotong sebelum reasoning-nya selesai.</span>
-          <span class="cfg-pair">
-            <input type="number" id="m-maxtokens" min="64" max="200000" step="1" placeholder="2048" />
-            <input type="number" id="m-temp" min="0" max="2" step="0.1" placeholder="0.8" />
-          </span>
-        </label>
-        <label class="cfg-check" id="m-row-stream">
-          <input type="checkbox" id="m-stream" /> <span data-i18n="conn.stream">Stream mode — untuk gateway yang memotong generasi lambat</span>
-        </label>
-        <label><span data-i18n="conn.roles">Peran (roles)</span>
-          <span class="form-hint" data-i18n="conn.rolesHint">Kosongkan semua = connection ini boleh dipakai untuk semua peran.</span>
-        </label>
-        <div class="cfg-checks" id="m-roles">
-          <label class="cfg-check"><input type="checkbox" value="chat" /> <span data-i18n="conn.role.chat">chat (teks balasan)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="assistant" /> <span data-i18n="conn.role.assistant">assistant (otak agent &amp; tools)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="motion" /> <span data-i18n="conn.role.motion">motion (gerak &amp; ekspresi)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="sheet" /> <span data-i18n="conn.role.sheet">sheet (analisa parameter)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="motion-vision" /> <span data-i18n="conn.role.motionVision">motion-vision (menilai gambar — wajib model vision)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="behavior" /> <span data-i18n="conn.role.behavior">behavior (keputusan perilaku saat idle)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="memory" /> <span data-i18n="conn.role.memory">memory (intent chat→agent, ringkas sesi, ekstraksi memori)</span></label>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button id="m-save" data-i18n="conn.save">Simpan</button>
-        <button id="m-cancel" data-i18n="conn.cancel">Batal</button>
-      </div>
-    </div>
-  </div>
 
   <!-- § Load indicator -->
   <div id="loader">

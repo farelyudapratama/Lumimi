@@ -63,6 +63,12 @@ async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &st
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for _ in 0..SUB_MAX_ITERATIONS {
+        if crate::agent::assistant::is_cancelled().await {
+            return Ok("(subagent dibatalkan oleh user)".into());
+        }
+        if !crate::agent::assistant::spend_llm_call().await {
+            return Ok("(anggaran tugas habis — subagent dihentikan)".into());
+        }
         let messages: Vec<ChatMessage> = history
             .iter()
             .map(|(role, content)| {

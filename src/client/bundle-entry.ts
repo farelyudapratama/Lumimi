@@ -38,6 +38,7 @@ import { startWorkbench } from "./agent/panel/workbench";
 import { startProjekRail } from "./shell/projek";
 import { startBrowserPanel } from "./browser/panel";
 import { startStageHintFade } from "./shell/stage-hint";
+import { startLlmRouting } from "./shell/llm-routing";
 
 if (typeof window !== "undefined") {
   window.MotionDSL = MotionDSL;
@@ -100,6 +101,8 @@ if (typeof window !== "undefined") {
   try { startProjekRail(); } catch {}
   // Hint panggung memudar setelah interaksi pertama (drag/zoom).
   try { startStageHintFade(); } catch {}
+  // Rencana routing LLM (read-only) di bawah daftar koneksi tab AI.
+  try { startLlmRouting(); } catch {}
   // Mount ada setelah panel Assistant membangun halaman teknis; panel memanggil
   // start ulang saat tab Browser tersedia.
   i18n.init();

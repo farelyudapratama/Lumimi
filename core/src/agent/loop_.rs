@@ -34,7 +34,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef { name: "memory_recall", params: "query: string, limit: number opsional — cari MEMORI USER lintas sesi (fakta/preferensi/keputusan companion; beda store dgn recall)", level: "safe" },
     ToolDef { name: "spawn_subagent", params: "tasks: [{task: deskripsi goal}] — delegasi riset/analisa INDEPENDEN ke subagent read-only paralel (maks 4)", level: "safe" },
     ToolDef { name: "browser_status", params: "", level: "safe" },
-    ToolDef { name: "browser_open", params: "url: string opsional (default https://example.com) — buka browser terisolasi", level: "mutating" },
+    ToolDef { name: "browser_open", params: "url: string opsional — kosong = luncurkan browser di halaman kosong; isi URL dari tugas user bila ada — buka browser terisolasi", level: "mutating" },
     ToolDef { name: "browser_navigate", params: "url: string", level: "mutating" },
     ToolDef { name: "browser_inspect", params: "cursor: number opsional, maxChars: number opsional (maks 3500), snapshotId: string opsional — bila hasil memuat captcha+captchaHint: STOP, beri tahu user menyelesaikan captcha manual di jendela browser dan tunggu konfirmasi; jangan mencoba menyelesaikannya", level: "safe" },
     ToolDef { name: "browser_click", params: "snapshotId: string, ref: string (dari inspect terakhir)", level: "mutating" },
@@ -59,23 +59,73 @@ pub fn is_browser_tool(name: &str) -> bool {
     name.starts_with("browser_")
 }
 
+/// Argumen wajib per tool: (nama, tipe JSON). Sumber kebenaran tunggal untuk
+/// skema function-calling dan validasi sebelum gerbang izin.
+pub fn required_args(name: &str) -> &'static [(&'static str, &'static str)] {
+    match name {
+        "read_file" | "delete_file" => &[("path", "string")],
+        "write_file" => &[("path", "string"), ("content", "string")],
+        "edit_file" => &[("path", "string"), ("old", "string"), ("new", "string")],
+        "search_code" => &[("query", "string")],
+        "run_command" => &[("command", "string")],
+        "remember" => &[("key", "string"), ("value", "string")],
+        "memory_recall" => &[("query", "string")],
+        "update_plan" => &[("todos", "array")],
+        "spawn_subagent" => &[("tasks", "array")],
+        "browser_navigate" => &[("url", "string")],
+        "browser_click" => &[("snapshotId", "string"), ("ref", "string")],
+        "browser_type" => &[("snapshotId", "string"), ("ref", "string"), ("text", "string")],
+        "browser_history" => &[("action", "string")],
+        "browser_grant_private" => &[("origin", "string")],
+        "motion_validate" | "motion_save" => &[("motion", "object")],
+        _ => &[],
+    }
+}
+
+/// Cek argumen wajib + tipe. None = lolos; Some(pesan) = ditolak sebelum
+/// gerbang izin, supaya panggilan rusak tidak meminta approval user.
+pub fn validate_args(name: &str, args: &Value) -> Option<String> {
+    let obj = args.as_object();
+    for (field, ty) in required_args(name) {
+        let Some(v) = obj.and_then(|o| o.get(*field)) else {
+            return Some(format!("ERROR: argumen '{field}' wajib untuk {name}"));
+        };
+        let ok = match *ty {
+            "string" => v.is_string(),
+            "array" => v.is_array(),
+            "object" => v.is_object(),
+            _ => true,
+        };
+        if !ok {
+            return Some(format!("ERROR: argumen '{field}' untuk {name} harus {ty}"));
+        }
+    }
+    None
+}
+
 /// Katalog tool sebagai definisi native function-calling (OpenAI-shape).
 /// Lapisan kompatibilitas llm.rs: model terlatih native FC (gpt-oss, GPT-4o,
 /// Qwen/GLM/DeepSeek FC dkk.) menerima `tools` eksplisit sehingga panggilan
 /// tool-nya VALID di provider; hasil `tool_calls` dikonversi balik ke baris
-/// `TOOL: …` kanonik. Protokol teks tetap jalan untuk SEMUA model — ini
+/// `TOOL: ...` kanonik. Protokol teks tetap jalan untuk SEMUA model — ini
 /// lapisan TAMBAHAN, bukan pengganti (provider yang menolak param `tools`
 /// otomatis dicoba ulang tanpanya, lihat llm.rs).
 pub fn tool_defs_json() -> Vec<Value> {
     TOOLS
         .iter()
         .map(|t| {
+            let mut props = serde_json::Map::new();
+            let mut required = Vec::new();
+            for (field, ty) in required_args(t.name) {
+                props.insert((*field).into(), json!({ "type": ty }));
+                required.push(json!(field));
+            }
             json!({
                 "type": "function",
                 "function": {
                     "name": t.name,
                     "description": t.params,
-                    "parameters": { "type": "object", "properties": {} }
+                    "parameters": { "type": "object", "properties": props, "required": required }
                 }
             })
         })
@@ -114,6 +164,8 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "8. PLAN: if an update_plan list exists for this task, keep it LIVE — when you start a step call update_plan marking it in_progress, when you finish it mark done (or failed). Before your final answer every step must be done/failed. If the task needs no plan, do not create one.",
             "9. MEMORY: user prefs / key decisions → remember (short key). Need context → recall. Need USER FACTS across sessions (favorite color, city, decisions) → memory_recall with a free-form query.",
             "10. TOOL FAILED: in the final reply state the ACTUAL cause from the '[hasil tool] ERROR: …' line (condensed is fine, quote the key phrase). NEVER invent a cause the error does not state (e.g. claiming 'no internet' or 'unsafe' when the error says something else). If the error names a next step (e.g. browser_grant_private), do it before giving up.",
+            "11. BROWSER: required order browser_open/browser_navigate → browser_inspect → browser_click/browser_type (use snapshotId and ref FROM the latest inspect, never guess a ref). After a navigation, history change, or a click that changes the page, the snapshot is stale: inspect again before the next action. localhost/LAN pages need browser_grant_private first. If browser_inspect returns a captcha, stop and ask the user to solve it.",
+            "12. WEB DEV: to test a web app being built, first check the server with run_command (e.g. curl), then open the localhost URL in the browser. Report what is actually visible on the page, not assumptions.",
         ]
     } else {
         &[
@@ -128,6 +180,8 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "8. RENCANA: kalau ada daftar update_plan untuk tugas ini, JAGA tetap hidup — saat mulai satu langkah panggil update_plan yang menandainya in_progress, saat selesai tandai done (atau failed). Sebelum jawaban final, semua langkah harus done/failed. Kalau tugas tak butuh rencana, jangan buat.",
             "9. MEMORY: preferensi/keputusan penting → remember (key singkat). Butuh konteks → recall. Butuh FAKTA/PREFERENSI USER lintas sesi (warna favorit, kota, keputusan) → memory_recall dengan query bebas.",
             "10. TOOL GAGAL: di jawaban final sebutkan SEBAB ASLI dari baris '[hasil tool] ERROR: …' (boleh diringkas, kutip frasa kuncinya). JANGAN mengarang sebab yang tidak tertulis di error (mis. bilang 'internet mati' atau 'tidak aman' padahal error bilang hal lain). Bila error menyarankan langkah berikutnya (mis. browser_grant_private), jalankan dulu sebelum menyerah.",
+            "11. BROWSER: urutan wajib browser_open/browser_navigate → browser_inspect → browser_click/browser_type (pakai snapshotId dan ref DARI inspect terakhir, jangan menebak ref). Setelah navigasi, history, atau klik yang mengubah halaman, snapshot lama basi: inspect ulang sebelum aksi berikutnya. Halaman localhost/LAN butuh browser_grant_private dulu. Kalau browser_inspect memuat captcha, berhenti dan minta user menyelesaikannya.",
+            "12. WEB DEV: untuk menguji aplikasi web yang sedang dibuat, cek server dulu dengan run_command (mis. curl) lalu buka URL localhost lewat browser. Laporkan hasil nyata yang terlihat di halaman, bukan asumsi.",
         ]
     };
     let final_line = if en {
@@ -481,6 +535,22 @@ mod tests {
         let p2 = build_system("id", "", "");
         assert!(p2.contains("BELUM DISET"), "{p2}");
         assert!(p2.contains("belum ada yang dimuat"), "{p2}");
+    }
+
+    #[test]
+    fn validate_args_tolak_panggilan_rusak() {
+        assert!(validate_args("write_file", &json!({ "path": "a.txt" })).unwrap().contains("'content' wajib"));
+        assert!(validate_args("write_file", &json!({ "path": 1, "content": "x" })).unwrap().contains("harus string"));
+        assert!(validate_args("write_file", &json!({ "path": "a.txt", "content": "x" })).is_none());
+        assert!(validate_args("git_diff", &json!({})).is_none());
+    }
+
+    #[test]
+    fn skema_fc_memuat_argumen_wajib() {
+        let defs = tool_defs_json();
+        let wf = defs.iter().find(|d| d["function"]["name"] == "write_file").unwrap();
+        assert_eq!(wf["function"]["parameters"]["properties"]["path"]["type"], "string");
+        assert_eq!(wf["function"]["parameters"]["required"], json!(["path", "content"]));
     }
 
     #[test]

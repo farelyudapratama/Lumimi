@@ -120,17 +120,39 @@ const CAPTCHA_MARKERS: &[(&str, &str)] = &[
 /// Instruksi untuk agent saat captcha terdeteksi: berhenti & serahkan ke user.
 const CAPTCHA_HINT: &str = "Captcha terdeteksi di halaman ini. JANGAN mencoba menyelesaikannya (klik/otomasi tidak akan lolos dan melanggar aturan situs). Berhenti, beri tahu user untuk menyelesaikan captcha secara manual di jendela browser yang terbuka, lalu tunggu konfirmasi user sebelum melanjutkan.";
 
-/// Deteksi captcha dari teks halaman. Return nama kind (reCAPTCHA/hCaptcha/
-/// Cloudflare/captcha) — None bila tak ada indikasi. Advisory saja.
-pub fn detect_captcha(hay: &str) -> Option<&'static str> {
-    let h = hay.to_lowercase();
-    for (m, kind) in CAPTCHA_MARKERS {
-        if h.contains(m) {
+/// Deteksi captcha dari sinyal halaman yang nyata: URL (host widget/challenge),
+/// judul, dan nama node widget (iframe/checkbox/tombol). Kata "captcha" di
+/// teks biasa (mis. "protected by reCAPTCHA" di footer form login) TIDAK
+/// dihitung. Advisory: hanya jeda untuk user, tidak pernah dipecahkan.
+pub fn detect_captcha(url: &str, title: &str, widgets: &[String]) -> Option<&'static str> {
+    let u = url.to_lowercase();
+    let t = title.to_lowercase();
+    for (m, kind) in [
+        ("google.com/recaptcha", "reCAPTCHA"),
+        ("hcaptcha.com", "hCaptcha"),
+        ("challenges.cloudflare.com", "Cloudflare"),
+    ] {
+        if u.contains(m) {
             return Some(kind);
         }
     }
-    if h.contains("captcha") {
-        return Some("captcha");
+    for (m, kind) in [
+        ("just a moment", "Cloudflare"),
+        ("attention required", "Cloudflare"),
+        ("verify you are human", "Cloudflare"),
+        ("verify you're human", "Cloudflare"),
+    ] {
+        if t.contains(m) {
+            return Some(kind);
+        }
+    }
+    for w in widgets {
+        let w = w.to_lowercase();
+        for (m, kind) in CAPTCHA_MARKERS {
+            if w.contains(m) {
+                return Some(kind);
+            }
+        }
     }
     None
 }
@@ -603,11 +625,16 @@ pub async fn open(root: &Path, raw_url: &str, allow_private: bool) -> Result<Val
         mgr().lock().await.grants.grant(d.origin.as_deref().unwrap());
     }
     let mut m = mgr().lock().await;
-    let decision = m.authorize(raw_url).await?;
-    let url = decision.url.ok_or("URL tidak valid")?;
     if m.require_client().is_err() {
         m.launch(root).await?;
     }
+    // URL kosong = luncurkan browser di halaman kosong bawaan; tujuan tugas
+    // datang lewat browser_navigate, bukan tebakan situs.
+    if raw_url.trim().is_empty() {
+        return Ok(m.status_value());
+    }
+    let decision = m.authorize(raw_url).await?;
+    let url = decision.url.ok_or("URL tidak valid")?;
     m.navigate_authorized(&url).await?;
     Ok(m.status_value())
 }
@@ -670,17 +697,15 @@ pub async fn inspect(cursor: usize, max_chars: usize, snapshot_id: Option<&str>)
     let nodes = result.get("nodes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let snap = normalize_ax_tree(&nodes, &url, &title);
     let sid = snap.snapshot_id.clone();
-    // Deteksi captcha dari url+title+teks AX; hasil disimpan utk status & tool.
-    let hay = {
-        let mut parts = vec![snap.url.clone(), snap.title.clone()];
-        for n in &snap.nodes {
-            parts.push(n.name.clone());
-            if let Some(v) = &n.value { parts.push(v.clone()); }
-            if let Some(d) = &n.description { parts.push(d.clone()); }
-        }
-        parts.join(" ")
-    };
-    let kind = detect_captcha(&hay);
+    // Deteksi captcha dari url, judul, dan nama node widget; hasil disimpan
+    // utk status & tool.
+    let widgets: Vec<String> = snap
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.role.as_str(), "Iframe" | "iframe" | "checkbox"))
+        .flat_map(|n| [n.name.clone(), n.description.clone().unwrap_or_default()])
+        .collect();
+    let kind = detect_captcha(&snap.url, &snap.title, &widgets);
     m.captcha = kind.map(|s| s.to_string());
     let mut out = format_inspect(&snap, cursor, max_chars);
     if let Some(k) = kind {
@@ -843,7 +868,7 @@ pub async fn captcha_note() -> Value {
 }
 
 // ── Jalur tool agent (dipanggil loop assistant) ─────────────────────────────
-const DEFAULT_URL: &str = "https://example.com";
+const DEFAULT_URL: &str = "";
 const MAX_INSPECT_CHARS: usize = 3500;
 
 /// Eksekusi tool browser_* dari loop agent. Return JSON string (atau ERROR: …).
@@ -983,13 +1008,15 @@ mod tests {
     }
 
     #[test]
-    fn deteksi_captcha_dari_teks_halaman() {
-        assert_eq!(detect_captcha("https://x.test halo dunia selamat datang"), None);
-        assert_eq!(detect_captcha("protected by reCAPTCHA Privasi Persyaratan"), Some("reCAPTCHA"));
-        assert_eq!(detect_captcha("Please complete the hCaptcha verification"), Some("hCaptcha"));
-        assert_eq!(detect_captcha("https://challenges.cloudflare.com/turnstile/v0/api.js Just a moment..."), Some("Cloudflare"));
-        assert_eq!(detect_captcha("VERIFY YOU ARE HUMAN to continue"), Some("Cloudflare"));
-        assert_eq!(detect_captcha("silakan isi captcha di bawah ini"), Some("captcha"));
+    fn deteksi_captcha_dari_sinyal_nyata() {
+        let none: Vec<String> = vec![];
+        // Teks biasa yang menyebut captcha di footer TIDAK dihitung.
+        assert_eq!(detect_captcha("https://x.test/login", "Login", &[]), None);
+        assert_eq!(detect_captcha("https://www.google.com/recaptcha/api2/anchor", "x", &none), Some("reCAPTCHA"));
+        assert_eq!(detect_captcha("https://js.hcaptcha.com/1/api.js", "x", &none), Some("hCaptcha"));
+        assert_eq!(detect_captcha("https://site.test/", "Just a moment...", &none), Some("Cloudflare"));
+        assert_eq!(detect_captcha("https://site.test/", "x", &["Verify you are human".into()]), Some("Cloudflare"));
+        assert_eq!(detect_captcha("https://site.test/", "x", &["reCAPTCHA challenge".into()]), Some("reCAPTCHA"));
     }
 
     #[test]

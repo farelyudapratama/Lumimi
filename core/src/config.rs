@@ -10,7 +10,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 /// Role LLM yang dikenal (padanan LLM_ROLES di llm-client.ts).
-const LLM_ROLES: &[&str] = &[
+pub const LLM_ROLES: &[&str] = &[
     "chat",
     "motion",
     "sheet",
@@ -61,12 +61,25 @@ pub fn load(path: &Path) -> Value {
                 }
             }
         }
+        migrate_connections_enabled(&mut merged);
     }
     merged
 }
 
 /// Mask apiKey untuk UI (padanan maskKey): kosong / "MASUKKAN…" → apa adanya;
 /// selain itu 6 char awal + 8 bullet + 4 char akhir. Berbasis char (bukan byte).
+/// Koneksi tanpa field `enabled` diberi `true` supaya tetap aktif setelah
+/// default routing berubah menjadi nonaktif bila tak ditulis.
+pub fn migrate_connections_enabled(cfg: &mut Value) {
+    if let Some(conns) = cfg.get_mut("connections").and_then(|v| v.as_array_mut()) {
+        for c in conns.iter_mut() {
+            if let Some(o) = c.as_object_mut() {
+                o.entry("enabled").or_insert(Value::Bool(true));
+            }
+        }
+    }
+}
+
 pub fn mask_key(k: &str) -> String {
     if k.is_empty() || k.starts_with("MASUKKAN") {
         return k.to_string();
@@ -498,6 +511,25 @@ mod tests {
         assert_eq!(mask_key(""), "");
         assert_eq!(mask_key("MASUKKAN_API_KEY"), "MASUKKAN_API_KEY");
         assert_eq!(mask_key("sk-abcdefghijklmnop"), "sk-abc••••••••mnop");
+    }
+
+    #[test]
+    fn migrate_enabled_isi_hanya_yang_belum_punya() {
+        let mut cfg = json!({
+            "connections": [
+                { "id": "lama" },
+                { "id": "mati", "enabled": false },
+                { "id": "nyala", "enabled": true }
+            ]
+        });
+        migrate_connections_enabled(&mut cfg);
+        let c = cfg["connections"].as_array().unwrap();
+        assert_eq!(c[0]["enabled"], true);
+        assert_eq!(c[1]["enabled"], false);
+        assert_eq!(c[2]["enabled"], true);
+        let before = cfg.clone();
+        migrate_connections_enabled(&mut cfg);
+        assert_eq!(cfg, before);
     }
 
     #[test]

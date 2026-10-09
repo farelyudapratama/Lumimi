@@ -17,6 +17,8 @@ use crate::llm::{self, ChatMessage};
 
 const MAX_ITERATIONS: usize = 25;
 const MAX_HISTORY: usize = 60;
+/// Berapa kali tool yang sama berturut-turut dianggap macet.
+const STUCK_SAME_TOOL_RUN: usize = 6;
 // Kontrak MODES.md: cap 20 FIFO (padanan MAX_UNDO TS yang di-guard).
 const MAX_UNDO: usize = 20;
 const MAX_NOTES: usize = 30;
@@ -66,6 +68,8 @@ pub struct Runtime {
     notes_files: Vec<String>,  // file tersentuh sesi ini (relatif)
     undo: Vec<UndoRec>,        // snapshot mutasi (cap MAX_UNDO)
     cancel: bool,              // cancel kooperatif antar-langkah
+    /// Penghitung panggilan LLM tugas berjalan (orchestrator + subagent).
+    llm_calls: u64,
     active_task: Option<Value>, // {taskId, prompt, status} — untuk status panel
     next_task_seq: u64,        // penomor taskId
     undo_seq: u64,             // penomor id undo (id unik walau ms sama)
@@ -78,10 +82,39 @@ fn rt() -> &'static Mutex<Runtime> {
 
 fn push_msg(r: &mut Runtime, role: &str, content: &str) {
     r.history.push(json!({ "role": role, "content": content }));
-    if r.history.len() > MAX_HISTORY {
-        let drop = r.history.len() - MAX_HISTORY;
-        r.history.drain(0..drop);
+    trim_history(&mut r.history);
+}
+
+/// Pangkas history ke MAX_HISTORY sambil MEMPERTAHANKAN pesan user pertama
+/// (tujuan tugas). Pemotongan dilaporkan ke bus agar tidak terjadi diam-diam.
+fn trim_history(history: &mut Vec<Value>) {
+    if history.len() <= MAX_HISTORY {
+        return;
     }
+    let keep_first = history.first().map(|m| m.get("role").and_then(|x| x.as_str()) == Some("user")).unwrap_or(false);
+    let head = if keep_first { 1 } else { 0 };
+    let drop = history.len() - MAX_HISTORY;
+    history.drain(head..head + drop);
+    bus::emit("context_trimmed", &format!("{drop} pesan lama dibuang (tujuan tugas dipertahankan)"));
+}
+
+/// Anggaran panggilan LLM per tugas (termasuk subagent). Melampaui = tugas
+/// dihentikan dengan pesan jelas, bukan dibiarkan jalan tanpa batas.
+const MAX_LLM_CALLS_PER_TASK: u64 = 60;
+
+/// Permintaan batal untuk tugas berjalan (dibaca subagent di tiap langkah).
+pub(crate) async fn is_cancelled() -> bool {
+    rt().lock().await.cancel
+}
+
+/// Hitung satu panggilan LLM. Return false bila anggaran tugas sudah habis.
+pub(crate) async fn spend_llm_call() -> bool {
+    let mut r = rt().lock().await;
+    if r.llm_calls >= MAX_LLM_CALLS_PER_TASK {
+        return false;
+    }
+    r.llm_calls += 1;
+    true
 }
 
 fn now_ms() -> i64 {
@@ -385,6 +418,8 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
     let (work_dir, model_name) = { let r = rt().lock().await; (r.work_dir.clone(), r.model.clone()) };
     let wd = PathBuf::from(&work_dir);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_tool: Option<String> = None;
+    let mut run: usize = 0;
     let mut final_text = String::new();
     let mut paused = false;
     // Anti "ngaku simpan tapi tak memanggil tool": bila draft sudah divalidasi
@@ -412,6 +447,15 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 bus::emit("error", "dibatalkan: oleh user");
                 return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), paused: false, error: None };
             }
+        }
+        if !spend_llm_call().await {
+            let msg = format!("anggaran tugas habis ({MAX_LLM_CALLS_PER_TASK} panggilan LLM) — tugas dihentikan, coba pecah tugasnya");
+            bus::emit("error", &msg);
+            let mut r = rt().lock().await;
+            push_msg(&mut r, "assistant", &msg);
+            r.busy = false;
+            r.active_task = None;
+            return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
         }
         bus::emit("thinking_start", "");
         // rakit messages dari history (tool → user "[hasil tool] …").
@@ -496,6 +540,22 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         }
         seen.insert(call_key);
 
+        // Macet berbasis pola: tool yang sama dipanggil berulang tanpa henti
+        // (argumen boleh sedikit berbeda) dihentikan sebelum habis 25 langkah.
+        run = if last_tool.as_deref() == Some(name.as_str()) { run + 1 } else { 1 };
+        last_tool = Some(name.clone());
+        if run >= STUCK_SAME_TOOL_RUN {
+            final_text = format!("Aku berhenti: tool {name} dipanggil {run} kali berturut-turut tanpa kemajuan. Coba perjelas instruksinya.");
+            bus::emit("error", "macet: tool sama berulang");
+            break;
+        }
+        if let Some(err) = loop_::validate_args(&name, &args) {
+            let mut r = rt().lock().await;
+            push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+            push_msg(&mut r, "tool", &format!("[{name}] {err}"));
+            continue;
+        }
+
         if level == Some("mutating") && plan_gate_required(&*rt().lock().await) {
             // PLAN APPROVAL GATE (Fase 2) — rencana yang disusun pada tugas
             // ini harus disetujui user SEBELUM mutasi pertama dieksekusi.
@@ -527,6 +587,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             let mut r = rt().lock().await;
             while r.approvals.len() >= 8 {
                 r.approvals.remove(0);
+                bus::emit("error", "approval terlama dibuang: antrean izin penuh");
             }
             r.approvals.push(json!({ "id": id, "tool": name, "args": args, "ts": now_ms() }));
             push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
@@ -623,6 +684,24 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                     record_undo(&mut r, rel, abs, prev);
                 }
             }
+        }
+        // Captcha terdeteksi oleh inspect → jeda untuk user, bukan keputusan model.
+        if loop_::is_browser_tool(&name) {
+            let note = crate::browser::captcha_note().await;
+            if let Some(kind) = note.get("captcha").and_then(|k| k.as_str()) {
+                let id = format!("ap_{}", crate::config::base36_pub(now_ms() as u128));
+                let mut r = rt().lock().await;
+                push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+                push_msg(&mut r, "tool", &format!("[{name}] {result}"));
+                r.approvals.push(json!({ "id": id, "kind": "captcha", "tool": name, "args": { "captcha": kind }, "ts": now_ms() }));
+                bus::emit("permission_request", "captcha");
+                paused = true;
+                final_text = format!("⏳ Captcha ({kind}) terdeteksi di halaman. Selesaikan di jendela browser, lalu tekan lanjut di panel.");
+                break;
+            }
+        }
+        if name == "run_command" && !result.starts_with("ERROR") {
+            bus::emit("undo_unavailable", "run_command tidak bisa di-undo — efeknya permanen");
         }
         push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
         push_msg(&mut r, "tool", &format!("[{name}] {}", clip_tool(&result)));
@@ -766,6 +845,7 @@ pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, s
         r.ask_seq += 1;
         r.plan_ok = false;
         r.mutated = false;
+        r.llm_calls = 0;
         r.active_task = Some(json!({ "taskId": tid, "prompt": t.chars().take(120).collect::<String>(), "status": "running" }));
         push_msg(&mut r, "user", &t);
         // Persist giliran user ke sesi terikat SEBELUM loop (tugas jalan lama
@@ -847,6 +927,22 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
     let args = pending.get("args").cloned().unwrap_or(json!({}));
     let work_dir = { rt().lock().await.work_dir.clone() };
     let wd = PathBuf::from(work_dir);
+
+    // Captcha: bukan eksekusi tool. "Lanjut" = inspect ulang halaman; bila
+    // captcha masih ada, kartu dikembalikan dan loop tidak jalan.
+    if pending.get("kind").and_then(|x| x.as_str()) == Some("captcha") {
+        let result = crate::browser::agent_exec(root, "browser_inspect", &json!({})).await;
+        if crate::browser::captcha_note().await.get("captcha").is_some() {
+            rt().lock().await.approvals.push(pending);
+            return AskResult { ok: false, reply: String::new(), paused: true, error: Some("captcha masih terdeteksi — selesaikan dulu di jendela browser".into()) };
+        }
+        let mut r = rt().lock().await;
+        push_msg(&mut r, "tool", &format!("[browser_inspect] {result}"));
+        push_msg(&mut r, "tool", "User menyelesaikan captcha; halaman sudah diperiksa ulang. Lanjutkan tugas.");
+        drop(r);
+        bus::emit("permission_resolved", "captcha: lanjut");
+        return run_loop(config_path, root, data_dir).await;
+    }
 
     // Plan approval (Fase 2): bukan eksekusi tool — hanya menandai rencana
     // disetujui (approve) atau dilucuti (reject, agar task tidak menggantung)
@@ -1368,6 +1464,28 @@ mod tests {
         stop().await;
         assert_eq!(cancel().await["accepted"], false, "runtime mati → ditolak");
         let _ = std::fs::remove_dir_all(&wd);
+    }
+
+    #[test]
+    fn trim_history_pertahankan_tujuan_awal() {
+        let mut h: Vec<Value> = vec![json!({ "role": "user", "content": "tujuan" })];
+        for i in 0..(MAX_HISTORY + 10) {
+            h.push(json!({ "role": "assistant", "content": format!("langkah {i}") }));
+        }
+        trim_history(&mut h);
+        assert_eq!(h.len(), MAX_HISTORY);
+        assert_eq!(h[0]["content"], "tujuan", "pesan user pertama harus tetap ada");
+        assert_eq!(h[MAX_HISTORY - 1]["content"], format!("langkah {}", MAX_HISTORY + 9));
+    }
+
+    #[tokio::test]
+    async fn budget_llm_per_tugas_habis() {
+        rt().lock().await.llm_calls = 0;
+        for _ in 0..MAX_LLM_CALLS_PER_TASK {
+            assert!(spend_llm_call().await);
+        }
+        assert!(!spend_llm_call().await, "panggilan melewati anggaran harus ditolak");
+        rt().lock().await.llm_calls = 0;
     }
 
     #[test]

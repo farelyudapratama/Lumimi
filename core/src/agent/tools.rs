@@ -35,11 +35,36 @@ fn strip_verbatim(p: PathBuf) -> PathBuf {
     }
 }
 
-/// Path aman di dalam workDir (padanan safePath). Err bila keluar.
+/// Resolusi symlink: canonicalize leluhur terdekat yang sudah ada, lalu
+/// pasang kembali sisa komponen yang belum ada. Symlink di tengah path ikut
+/// terbaca, jadi target yang keluar dari base ketahuan.
+fn resolve_existing(p: &Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(&cur) {
+            let mut out = strip_verbatim(c);
+            for comp in tail.iter().rev() {
+                out.push(comp);
+            }
+            return out;
+        }
+        match cur.file_name() {
+            Some(n) => tail.push(n.to_os_string()),
+            None => return p.to_path_buf(),
+        }
+        if !cur.pop() {
+            return p.to_path_buf();
+        }
+    }
+}
+
+/// Path aman di dalam workDir (padanan safePath). Err bila keluar, baik
+/// secara leksikal (`..`) maupun lewat symlink/junction di dalam workdir.
 pub fn safe_path(work_dir: &Path, p: &str) -> Result<PathBuf, String> {
     // Base dan full dibandingkan pada bentuk yang sama (tanpa prefiks
-    // verbatim). Dulu base di-canonicalize mentah: di Windows base = \\?\F:\…
-    // sedangkan join path absolut = F:\… → starts_with gagal → SEMUA path
+    // verbatim). Dulu base di-canonicalize mentah: di Windows base = \\?\F:\...
+    // sedangkan join path absolut = F:\... → starts_with gagal → SEMUA path
     // absolut ditolak "di luar folder kerja" walau masih di dalam workdir.
     let base = std::fs::canonicalize(work_dir)
         .map(strip_verbatim)
@@ -48,11 +73,24 @@ pub fn safe_path(work_dir: &Path, p: &str) -> Result<PathBuf, String> {
     // Path input sendiri bisa membawa prefiks verbatim (mis. hasil
     // canonicalize yang dikirim ulang model) — samakan sebelum membandingkan.
     let full = strip_verbatim(normalize_lexical(&base.join(rel)));
-    if full == base || full.starts_with(&base) {
-        Ok(full)
-    } else {
-        Err(format!("di luar folder kerja: {p}"))
+    let inside = |x: &Path| x == base || x.starts_with(&base);
+    if !inside(&full) {
+        return Err(format!("di luar folder kerja: {p}"));
     }
+    if !inside(&resolve_existing(&full)) {
+        return Err(format!("di luar folder kerja (lewat symlink): {p}"));
+    }
+    Ok(full)
+}
+
+/// Berkas yang berisi rahasia (kunci API, kredensial, konfigurasi app). Tidak
+/// dibaca tool file maupun ditelusuri search_code, supaya isinya tak ikut
+/// terkirim ke provider LLM.
+pub fn is_sensitive(path: &Path) -> bool {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    name.starts_with(".env")
+        || [".pem", ".key", ".p12", ".pfx", ".kdbx"].iter().any(|e| name.ends_with(e))
+        || matches!(name.as_str(), "id_rsa" | "id_ed25519" | "credentials.json" | "config.json" | ".netrc")
 }
 
 /// Potong hasil panjang (manajemen token). Padanan clip.
@@ -95,6 +133,9 @@ pub fn list_dir(work_dir: &Path, path: &str) -> Result<String, String> {
 
 pub fn read_file(work_dir: &Path, path: &str) -> Result<String, String> {
     let fp = safe_path(work_dir, path)?;
+    if is_sensitive(&fp) {
+        return Err(format!("berkas sensitif tidak boleh dibaca agent: {path}"));
+    }
     let text = std::fs::read_to_string(&fp).map_err(|e| e.to_string())?;
     Ok(clip(&text, 12000))
 }
@@ -164,7 +205,7 @@ fn walk_text(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         if !ext.is_empty() && !TEXT_EXT.contains(&ext.as_str()) {
             continue;
         }
-        if e.metadata().map(|m| m.len()).unwrap_or(0) > 512 * 1024 {
+        if e.metadata().map(|m| m.len()).unwrap_or(0) > 512 * 1024 || is_sensitive(&full) {
             continue;
         }
         out.push(full);
@@ -208,13 +249,45 @@ pub fn search_code(work_dir: &Path, query: &str, path: &str) -> Result<String, S
     Ok(clip(&body, 8000))
 }
 
+/// Pemeriksaan heuristik untuk perintah shell: menolak token yang jelas
+/// mengarah ke luar folder kerja (`..`, path absolut/drive di luar base) dan
+/// ekspansi variabel (`%VAR%`, `$VAR`, `~`) yang bisa menyamarkan path. Ini
+/// BUKAN isolasi proses; batas kerasnya tetap approval user untuk tiap
+/// perintah yang belum di-allowlist.
+pub fn command_escape(work_dir: &Path, command: &str) -> Option<String> {
+    if command.contains('%') || command.contains('$') || command.contains('~') || command.contains('`') {
+        return Some("ekspansi variabel/tilde tidak diizinkan di perintah agent".into());
+    }
+    let base = std::fs::canonicalize(work_dir).map(strip_verbatim).unwrap_or_else(|_| normalize_lexical(work_dir));
+    let tokens = command.split(|c: char| c.is_whitespace() || "&|;<>()\"'=,".contains(c)).filter(|t| !t.is_empty());
+    for tok in tokens {
+        if tok.split(['/', '\\']).any(|seg| seg == "..") {
+            return Some(format!("path dengan '..' keluar dari folder kerja: {tok}"));
+        }
+        let absolute = tok.starts_with('/') || tok.starts_with('\\') || tok.as_bytes().get(1) == Some(&b':');
+        if absolute && !inside_base(&base, tok) {
+            return Some(format!("path absolut di luar folder kerja: {tok}"));
+        }
+    }
+    None
+}
+
+fn inside_base(base: &Path, tok: &str) -> bool {
+    let p = normalize_lexical(Path::new(tok));
+    let full = strip_verbatim(resolve_existing(&p));
+    full == base || full.starts_with(base)
+}
+
 /// run_command {command} — jalankan perintah di workDir (shell), timeout 30s.
-/// Exit non-zero / timeout → string "ERROR: …" (bukan panic) supaya loop LLM
+/// Exit non-zero / timeout → string "ERROR: ..." (bukan panic) supaya loop LLM
 /// bisa lanjut. Padanan toolRunCommand.
 pub fn run_command(work_dir: &Path, command: &str) -> String {
     let cmd = command.trim();
     if cmd.is_empty() {
         return "ERROR: command kosong".into();
+    }
+    if let Some(why) = command_escape(work_dir, cmd) {
+        return format!("ERROR: perintah ditolak — {why}");
     }
     let (sh, flag) = if cfg!(windows) {
         (std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".into()), "/C")
@@ -334,6 +407,54 @@ mod tests {
         assert!(list_dir(&d, ".").unwrap().contains("a/"));
         delete_file(&d, "c.txt").unwrap();
         assert!(read_file(&d, "c.txt").is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn safe_path_tolak_symlink_keluar() {
+        let d = tmp();
+        let outside = tmp();
+        std::fs::write(outside.join("rahasia.txt"), "x").unwrap();
+        let link = d.join("tautan");
+        // Symlink butuh hak khusus di Windows; lewati bila tak tersedia.
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&outside, &link).is_ok();
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+        if made {
+            assert!(safe_path(&d, "tautan/rahasia.txt").is_err(), "symlink keluar harus ditolak");
+            assert!(read_file(&d, "tautan/rahasia.txt").is_err());
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn berkas_sensitif_tak_dibaca_atau_dicari() {
+        let d = tmp();
+        write_file(&d, ".env", "API_KEY=rahasia123").unwrap();
+        write_file(&d, "data/config.json", "{\"apiKey\":\"rahasia123\"}").unwrap();
+        write_file(&d, "src/app.rs", "rahasia123 bukan di sini").unwrap();
+        assert!(read_file(&d, ".env").unwrap_err().contains("sensitif"));
+        assert!(read_file(&d, "data/config.json").is_err());
+        let r = search_code(&d, "rahasia123", ".").unwrap();
+        assert!(r.contains("src/app.rs"));
+        assert!(!r.contains(".env") && !r.contains("config.json"), "{r}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_command_tolak_jalan_keluar() {
+        let d = tmp();
+        assert!(command_escape(&d, "type ..\\..\\secret.txt").is_some());
+        assert!(command_escape(&d, "type ../../secret.txt").is_some());
+        assert!(command_escape(&d, "echo %USERPROFILE%").is_some());
+        assert!(command_escape(&d, "cat $HOME/.ssh/id_rsa").is_some());
+        assert!(command_escape(&d, "cat ~/x").is_some());
+        assert!(run_command(&d, "type ..\\..\\secret.txt").starts_with("ERROR: perintah ditolak"));
+        // Perintah wajar di dalam workdir tetap lolos.
+        assert!(command_escape(&d, "cargo test -p live2d-core").is_none());
+        assert!(command_escape(&d, "dir src").is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 

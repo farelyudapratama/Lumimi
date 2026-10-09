@@ -92,6 +92,7 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/health", get(health))
         .route("/api/version", get(version))
         .route("/api/config", get(get_config).post(post_config))
+        .route("/api/llm/routing", get(get_llm_routing))
         .route("/api/test", axum::routing::post(post_test))
         .route("/api/chat", axum::routing::post(post_chat))
         .route("/api/chat-stream", axum::routing::post(post_chat_stream))
@@ -216,6 +217,19 @@ async fn version(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
 /// GET /api/config — apiKey dimask, roles dinormalisasi (padanan handler TS).
 async fn get_config(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
     Json(config::api_config_response(&paths.data_dir.join("config.json")))
+}
+
+/// GET /api/llm/routing — rencana routing per role (urutan + alasan), untuk UI
+/// API Management. Read-only; sumbernya `llm::routing_plan` (sama dengan runtime).
+async fn get_llm_routing(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
+    let cfg = config::load(&paths.data_dir.join("config.json"));
+    let conns: Vec<serde_json::Value> = cfg.get("connections").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let roles: Vec<serde_json::Value> = config::LLM_ROLES
+        .iter()
+        .map(|r| llm::routing_plan(r, &conns, now))
+        .collect();
+    Json(json!({ "roles": roles }))
 }
 
 /// POST /api/config — action add/update/delete/setActive/saveEvents/saveTTS/
@@ -1918,6 +1932,7 @@ mod tests {
             ("POST", "/api/mode", Some(json!({"mode":"stage"}))),
             ("GET", "/api/pet/state", None),
             ("GET", "/api/browser/status", None),
+            ("GET", "/api/llm/routing", None),
             ("GET", "/api/assistant/status", None),
             ("GET", "/api/assistant/history", None),
             ("GET", "/api/assistant/events?since=0", None),

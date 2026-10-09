@@ -664,7 +664,7 @@ pub fn conn_has_role(conn: &Value, role: &str) -> bool {
 }
 
 fn enabled(conn: &Value) -> bool {
-    conn.get("enabled").and_then(|v| v.as_bool()) != Some(false)
+    conn.get("enabled").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// Urutan kandidat untuk role: eksplisit dulu, lalu wildcard. Kosong = pakai
@@ -687,6 +687,37 @@ pub fn order_for_role(role: &str, conns: &[Value]) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Rencana routing untuk satu role, untuk ditampilkan di UI. Urutan kandidat
+/// SAMA dengan `order_for_role` (sumber kebenaran runtime); alasan dihitung
+/// dari field yang sama dengan yang dicek saat panggilan nyata.
+pub fn routing_plan(role: &str, conns: &[Value], now_ms: u128) -> Value {
+    let order = order_for_role(role, conns);
+    let mut rows: Vec<Value> = Vec::new();
+    for (pos, &i) in order.iter().enumerate() {
+        let c = &conns[i];
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let cooldown = c
+            .get("rateLimitedUntil")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_ms)
+            .filter(|&t| t > now_ms)
+            .map(|_| c.get("rateLimitedUntil").cloned().unwrap_or(Value::Null));
+        let explicit = config::normalize_roles(&c.get("roles").cloned().unwrap_or(Value::Null))
+            .iter()
+            .any(|r| r == role);
+        let status = if cooldown.is_some() { "cooldown" } else { "ready" };
+        rows.push(json!({
+            "id": id,
+            "priority": pos + 1,
+            "match": if explicit { "explicit" } else { "wildcard" },
+            "status": status,
+            "cooldownUntil": cooldown,
+            "lastError": c.get("lastError").cloned().unwrap_or(json!("")),
+        }));
+    }
+    json!({ "role": role, "candidates": rows })
 }
 
 /// True bila ADA koneksi enabled dengan `role` DITANDAI EKSPLISIT (bukan
@@ -758,11 +789,13 @@ pub async fn llm_for_role_tools(
     }
 
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let mut last_err = String::from("Semua connection gagal");
+    let mut reasons: Vec<String> = Vec::new();
     for &i in &order {
+        let conn_id = conns[i].get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         // skip bila masih rate-limited.
         if let Some(until) = conns[i].get("rateLimitedUntil").and_then(|v| v.as_str()) {
             if parse_iso_ms(until).map(|t| t > now_ms).unwrap_or(false) {
+                reasons.push(format!("{conn_id}: dilewati, cooldown sampai {until}"));
                 continue;
             }
         }
@@ -796,7 +829,8 @@ pub async fn llm_for_role_tools(
             }
             Err(e) => {
                 let (fallback, cooldown) = classify_error(e.status, &e.message);
-                last_err = format!("LLM error: {}", e.message);
+                let short: String = e.message.chars().take(200).collect();
+                reasons.push(format!("{conn_id}: {short}"));
                 if let Some(o) = conns[i].as_object_mut() {
                     o.insert("testStatus".into(), json!("error"));
                     o.insert("lastError".into(), json!(e.message));
@@ -811,7 +845,12 @@ pub async fn llm_for_role_tools(
         }
     }
     let _ = config::save_connections(config_path, conns, json!(active_id));
-    Err((502, last_err))
+    let msg = if reasons.is_empty() {
+        "Semua connection gagal".to_string()
+    } else {
+        format!("Semua connection gagal — {}", reasons.join("; "))
+    };
+    Err((502, msg))
 }
 
 /// Panggil LLM dengan gambar (multimodal, role `motion-vision`). HANYA
@@ -891,6 +930,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn order_for_role_lewati_disabled_dan_role_eksplisit_didahulukan() {
+        let conns = vec![
+            json!({ "id": "a", "enabled": true, "roles": [] }),
+            json!({ "id": "b", "enabled": true, "roles": ["motion"] }),
+            json!({ "id": "c", "enabled": false, "roles": ["motion"] }),
+            json!({ "id": "d", "enabled": true }),
+        ];
+        assert_eq!(order_for_role("motion", &conns), vec![1, 0, 3]);
+    }
+
+    #[test]
+    fn order_for_role_enabled_hilang_dihitung_nonaktif() {
+        let conns = vec![json!({ "id": "x", "roles": ["chat"] })];
+        assert!(order_for_role("chat", &conns).is_empty());
+    }
+
+    #[test]
+    fn routing_plan_urutan_sama_dengan_order_for_role() {
+        let conns = vec![
+            json!({ "id": "a", "enabled": true, "roles": [] }),
+            json!({ "id": "b", "enabled": true, "roles": ["chat"], "lastError": "boom" }),
+            json!({ "id": "c", "enabled": true, "roles": ["chat"], "rateLimitedUntil": "2999-01-01T00:00:00.000Z" }),
+            json!({ "id": "d", "enabled": false, "roles": ["chat"] }),
+        ];
+        let plan = routing_plan("chat", &conns, 0);
+        let rows = plan["candidates"].as_array().unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        let runtime: Vec<&str> = order_for_role("chat", &conns).iter().map(|&i| conns[i]["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, runtime);
+        assert_eq!(ids, vec!["b", "c", "a"]);
+        assert_eq!(rows[0]["match"], "explicit");
+        assert_eq!(rows[0]["lastError"], "boom");
+        assert_eq!(rows[1]["status"], "cooldown");
+        assert_eq!(rows[2]["match"], "wildcard");
+        assert_eq!(rows[2]["status"], "ready");
+    }
+
+    #[test]
+    fn order_for_role_tanpa_koneksi_cocok_kosong() {
+        let conns = vec![json!({ "id": "a", "roles": ["sheet"] })];
+        assert!(order_for_role("chat", &conns).is_empty());
+    }
+
+    #[test]
     fn classify_sesuai_rules() {
         assert_eq!(classify_error(429, "").0, true);
         assert_eq!(classify_error(401, "").1, 120_000);
@@ -959,9 +1042,9 @@ mod tests {
     #[test]
     fn role_routing_eksplisit_dulu() {
         let conns = vec![
-            json!({ "id": "a", "roles": [] }),                 // wildcard
-            json!({ "id": "b", "roles": ["chat"] }),           // eksplisit chat
-            json!({ "id": "c", "roles": ["motion"] }),         // bukan chat
+            json!({ "id": "a", "enabled": true, "roles": [] }),                 // wildcard
+            json!({ "id": "b", "enabled": true, "roles": ["chat"] }),           // eksplisit chat
+            json!({ "id": "c", "enabled": true, "roles": ["motion"] }),         // bukan chat
         ];
         let order = order_for_role("chat", &conns);
         // eksplisit (b) dulu, lalu wildcard (a); c tak masuk
@@ -1022,6 +1105,44 @@ mod tests {
         let mut tanpa = vec![json!({ "role": "user", "content": "a" })];
         attach_images(&mut tanpa, &[], "openai");
         assert_eq!(tanpa[0]["content"], json!("a"));
+    }
+
+    #[tokio::test]
+    async fn fallback_lewati_koneksi_gagal_ke_berikutnya() {
+        let dir = std::env::temp_dir().join(format!("l2dllmfb-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        // "mati" menunjuk port tertutup (error koneksi = transient → lanjut);
+        // "m" mock selalu sukses → harus yang dipakai.
+        std::fs::write(
+            &f,
+            r#"{"activeId":"mati","connections":[{"id":"mati","enabled":true,"provider":"openai-compatible","baseUrl":"http://127.0.0.1:9","apiKey":"x","model":"x"},{"id":"m","enabled":true,"provider":"mock"}]}"#,
+        )
+        .unwrap();
+        let ok = llm_for_role_tools(&f, "chat", &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &[]).await.unwrap();
+        assert_eq!(ok.used, "m");
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(cfg["connections"][0]["testStatus"], "error");
+    }
+
+    #[tokio::test]
+    async fn cooldown_rate_limit_membuat_koneksi_dilewati() {
+        let dir = std::env::temp_dir().join(format!("l2dllmcd-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        std::fs::write(
+            &f,
+            r#"{"activeId":"m","connections":[{"id":"m","enabled":true,"provider":"mock"}]}"#,
+        )
+        .unwrap();
+        // Koneksi yang sudah dicooldown sampai masa depan harus dilewati → tak ada kandidat.
+        let mut cfg: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        cfg["connections"][0]["rateLimitedUntil"] = json!("2999-01-01T00:00:00.000Z");
+        std::fs::write(&f, cfg.to_string()).unwrap();
+        let err = llm_for_role_tools(&f, "chat", &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &[]).await.unwrap_err();
+        assert_eq!(err.0, 502);
+        assert!(err.1.starts_with("Semua connection gagal"));
+        assert!(err.1.contains("m: dilewati, cooldown sampai 2999-01-01"));
     }
 
     #[tokio::test]

@@ -106,7 +106,8 @@ ok('tes ekspresi yang belum dikenal model memicu muat ulang lalu status jujur (b
   /if \(!known\) \{[\s\S]{0,400}await loadModel\(state\.modelPath\);/.test(appSrc) &&
   /__t\("sheet\.exprFail"/.test(appSrc));
 ok('hint System Prompt menjelaskan scope koneksi (persona tetap di Catatan Karakter)',
-  /Persona karakter jangan di sini: pakai Catatan Karakter/.test(htmlSrc));
+  /conn\.systemHint/.test(require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'src', 'client', 'shell', 'llm-connection-editor.ts'), 'utf8')) &&
+  /Persona karakter jangan di sini/.test(require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'src', 'client', 'i18n', 'dict-id.ts'), 'utf8')));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
