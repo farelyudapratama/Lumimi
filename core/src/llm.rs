@@ -38,6 +38,8 @@ pub struct LlmImage {
 /// koneksi (wildcard tidak dipakai) agar gambar tidak pernah terkirim ke
 /// model teks. Model di koneksi itu sendiri harus mendukung input gambar.
 pub const ROLE_MOTION_VISION: &str = "motion-vision";
+/// Role moderasi komentar (chat_filter.rs) — juga dipakai jalur SystemOne.
+pub const ROLE_MODERATION: &str = "moderation";
 
 fn default_model(provider: &str) -> &'static str {
     match provider {

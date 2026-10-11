@@ -154,6 +154,21 @@ app utama memutar balasan via `window.__debugSpeak` (kelas speech
 → `overlay:true`); `vtuber.html` (overlay, stack render baru Pixi 8 +
 Cubism 5) memutar sendiri versinya saat on-air.
 
+Filter chat (moderasi komentar, `core/src/chat_filter.rs`): komentar
+audience yang lolos suppression DILEWATI dua lapis sebelum diproses LLM —
+(1) blocklist kata/frasa milik user (section `chatFilter` di
+data/config.json, diedit dari panel **Filter Chat** tab AI; cocok
+case-insensitive sebagai bagian teks), (2) mesin keputusan opsional
+(`useDecision`): koneksi SystemOne (Jev cloud / Laya lokal) dengan role
+`moderation` didahulukan lewat `v1/systemone` (pola sama dengan role
+`behavior`), fallback ke LLM mana pun yang ditandai role `moderation`
+EKSPLISIT (gate `has_explicit_role` — tidak membajak koneksi chat umum).
+Komentar yang ditahan tetap tampil di feed (transparansi) plus event
+system alasannya, tapi tidak dibalas. Aturan tambahan bebas user
+(`extraRules`) ikut jadi instruksi mesin. Fail-open: mesin gagal,
+timeout (10 dtk), atau jawaban tak terbaca → komentar diteruskan dengan
+catatan throttled di feed, blocklist lokal tetap jalan.
+
 ## AI Assistant (`core/src/agent/assistant.rs`)
 
 - Runtime: `{workDir, history (maks 60), approvals Map, activeTask, parkedTasks,

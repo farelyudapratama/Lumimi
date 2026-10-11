@@ -199,6 +199,14 @@ core/                        backend Rust (axum, loopback), SATU-SATUNYA backend
                              lewat tool memory_recall (shared, read-only).
                              Session context (RAM) ada di src/client/agent/
                              companion-memory.ts (lihat MODES.md)
+  chat_filter.rs             filter komentar penonton (moderasi): blocklist
+                             kata milik user (section `chatFilter` config) +
+                             mesin keputusan role "moderation" — SystemOne
+                             (Jev/Laya) didahulukan, fallback LLM yang
+                             DITANDAI eksplisit; dipasang di
+                             vtuber.rs::spawn_run SETELAH gerbang
+                             dedup/cooldown, fail-open saat mesin gagal.
+                             Panel: "Filter Chat" di tab AI (chat-filter.ts)
 static/harness-motion.html   halaman harness render critic visual (juga
 src/client/harness/          entry build ke-4 harness-motion.mjs) — capture
                              sinkron canvas.toDataURL, tanpa rAF/kompositor

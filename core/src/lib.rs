@@ -13,6 +13,7 @@
 pub mod agent;
 pub mod behavior;
 pub mod browser;
+pub mod chat_filter;
 pub mod config;
 pub mod companion_memory;
 pub mod director;

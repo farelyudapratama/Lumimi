@@ -38,6 +38,7 @@ export const ROLE_KEYS: Record<string, string> = {
   "motion-vision": "api.role.motionVision",
   behavior: "api.role.behavior",
   memory: "api.role.memory",
+  moderation: "api.role.moderation",
 };
 
 export function connectionState(conn: Connection, now = Date.now()): ConnectionState {

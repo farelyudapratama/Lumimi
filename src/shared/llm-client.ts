@@ -502,6 +502,8 @@ async function callStreamWithOneRetry(conn: Connection, messages: ChatMessage[],
 // entri di sini + satu checkbox di UI, bukan sistem baru. "memory" = keputusan
 // latar companion (intent chat→agent, kompresi sesi, ekstraksi memori —
 // core/src/companion_memory.rs); fallback koneksi aktif bila tak dibind.
-export const LLM_ROLES = ["chat", "motion", "sheet", "assistant", "motion-vision", "behavior", "memory"];
+// "moderation" = filter komentar penonton (core/src/chat_filter.rs): mesin
+// keputusan menilai komen sebelum diproses — SystemOne (Jev/Laya) didahulukan.
+export const LLM_ROLES = ["chat", "motion", "sheet", "assistant", "motion-vision", "behavior", "memory", "moderation"];
 
 export { classifyError };

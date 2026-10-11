@@ -580,6 +580,30 @@
         <div class="tab-pane" data-pane="ai">
           <section id="conn-list" class="api-management" aria-label="Koneksi AI" data-i18n-aria="cfg.connTitle"></section>
 
+          <!-- Filter Chat (moderasi komentar penonton).
+               Blocklist kata + mesin keputusan (Jev/Laya via role "moderation"
+               atau LLM lain) menahan komentar spam/melanggar sebelum diproses
+               LLM. Logika jalan di core Rust (chat_filter.rs); panel ini hanya
+               menyimpan section chatFilter via action "saveChatFilter". -->
+          <div class="section-title" data-i18n="cf.title">Filter Chat</div>
+          <div class="cfg-box" id="chatfilter-box">
+            <p class="hint" data-i18n="cf.hint">Saring komentar penonton sebelum diproses AI.</p>
+            <div class="cfg-checks">
+              <label class="cfg-check" for="cf-enabled"><input type="checkbox" id="cf-enabled" /> <span data-i18n="cf.enabled">Saring komentar penonton</span></label>
+              <label class="cfg-check" for="cf-useDecision"><input type="checkbox" id="cf-useDecision" /> <span data-i18n="cf.useDecision">Pakai mesin keputusan (Jev/Laya / role Moderasi)</span></label>
+            </div>
+            <label class="cfg-label" for="cf-words" data-i18n="cf.words">Kata/frasa terlarang</label>
+            <textarea id="cf-words" rows="4" data-i18n-ph="cf.wordsPh" placeholder="slot&#10;judol&#10;iklan"></textarea>
+            <p class="hint" data-i18n="cf.wordsHint">Satu kata atau frasa per baris.</p>
+            <label class="cfg-label" for="cf-extraRules" data-i18n="cf.extraRules">Aturan tambahan untuk mesin keputusan</label>
+            <textarea id="cf-extraRules" rows="3" data-i18n-ph="cf.extraPh" placeholder="tahan semua komentar politik"></textarea>
+            <p class="hint" data-i18n="cf.extraHint">Instruksi bebas tentang apa lagi yang tidak boleh diproses.</p>
+            <div class="note-row">
+              <button id="btn-cf-save" class="mini-btn" data-i18n="cf.save">Simpan</button>
+              <span id="cf-save-status" class="note-status" role="status" aria-live="polite"></span>
+            </div>
+          </div>
+
           <!-- Inisiatif (Kelakuan).
                User atur KAPAN karakter mulai proaktif lewat profil (Mati..Hidup)
                atau slider mentah — tanpa menyentuh config.json manual. Aksi

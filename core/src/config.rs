@@ -18,6 +18,7 @@ pub const LLM_ROLES: &[&str] = &[
     "motion-vision",
     "behavior",
     "memory",
+    "moderation",
 ];
 
 /// DEFAULT_CONFIG — cermin `src/shared/config.ts` (untuk backfill section baru).
@@ -44,7 +45,8 @@ pub fn default_config() -> Value {
             "maxMs": 30_000, "device": "",
             "endpoint": "", "apiKey": "", "apiModel": "whisper-1"
         },
-        "browser": { "engine": "auto" }
+        "browser": { "engine": "auto" },
+        "chatFilter": { "enabled": false, "useDecision": false, "words": [], "extraRules": "" }
     })
 }
 
@@ -169,6 +171,7 @@ pub fn api_config_response(path: &Path) -> Value {
         "stt": stt_out,
         "i18n": sect("i18n"),
         "browser": sect("browser"),
+        "chatFilter": sect("chatFilter"),
     })
 }
 
@@ -292,6 +295,44 @@ pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
     let data = merge_obj(&prev, &json!({ "i18n": merged.clone() }));
     crate::sheet::write_json_atomic(path, &data)?;
     Ok(merged)
+}
+
+/// Simpan chatFilter ({...prev.chatFilter, ...filter}; whitelist key +
+/// sanitasi: words bersih/unik/cap 200×100 char, extraRules cap 600 char).
+pub fn save_chat_filter(path: &Path, filter: &Value) -> std::io::Result<Value> {
+    let prev = read_raw(path);
+    let mut next = prev.get("chatFilter").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    if let Some(obj) = filter.as_object() {
+        for k in ["enabled", "useDecision"] {
+            if let Some(b) = obj.get(k).and_then(|v| v.as_bool()) {
+                next.insert(k.into(), json!(b));
+            }
+        }
+        if let Some(words) = obj.get("words").and_then(|v| v.as_array()) {
+            let mut clean: Vec<String> = Vec::new();
+            for w in words {
+                // Truncate dulu, baru dedupe — supaya tidak ada duplikat
+                // tersimpan akibat dua kata panjang yang berbeda memotong
+                // jadi string sama.
+                let s = clean_str(w.as_str().unwrap_or("")).chars().take(100).collect::<String>();
+                if s.is_empty() || clean.iter().any(|c| c.to_lowercase() == s.to_lowercase()) {
+                    continue;
+                }
+                clean.push(s);
+                if clean.len() >= 200 {
+                    break;
+                }
+            }
+            next.insert("words".into(), json!(clean));
+        }
+        if let Some(r) = obj.get("extraRules").and_then(|v| v.as_str()) {
+            next.insert("extraRules".into(), json!(clean_str(r).chars().take(600).collect::<String>()));
+        }
+    }
+    let out = Value::Object(next);
+    let data = merge_obj(&prev, &json!({ "chatFilter": out.clone() }));
+    crate::sheet::write_json_atomic(path, &data)?;
+    Ok(out)
 }
 
 /// Simpan browser ({...prev.browser, ...browser}); hanya engine yang dikenal
@@ -467,6 +508,13 @@ pub fn handle_config_post(path: &Path, body: &Value) -> (u16, String) {
                 Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
             };
         }
+        "saveChatFilter" => {
+            let cf = body.get("chatFilter").cloned().unwrap_or_else(|| json!({}));
+            return match save_chat_filter(path, &cf) {
+                Ok(out) => (200, json!({ "ok": true, "chatFilter": out }).to_string()),
+                Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
+            };
+        }
         "save" => {
             if let Some(arr) = body.get("connections").and_then(|v| v.as_array()) {
                 conns = arr.clone();
@@ -546,6 +594,7 @@ mod tests {
         // klien jatuh ke mesin browser.
         assert_eq!(cfg["tts"]["provider"], "auto");
         assert_eq!(cfg["stt"]["provider"], "auto");
+        assert_eq!(cfg["chatFilter"]["enabled"], false);
         assert_eq!(cfg["activeId"], Value::Null);
     }
 
@@ -620,6 +669,42 @@ mod tests {
         let (st2, _) = handle_config_post(&f, &json!({ "action": "saveBrowser", "browser": { "engine": "firefox" } }));
         assert_eq!(st2, 200);
         assert_eq!(load(&f)["browser"]["engine"], "chrome");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_chat_filter_sanitize_dan_whitelist() {
+        let dir = std::env::temp_dir().join(format!("l2dcfgcf-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        let (st, body) = handle_config_post(&f, &json!({
+            "action": "saveChatFilter",
+            "chatFilter": {
+                "enabled": true,
+                "useDecision": true,
+                "words": [" Slot ", "", "slot", "judol", "x".repeat(150)],
+                "extraRules": "no politics\u{200B}",
+                "kunciAsing": "dibuang"
+            }
+        }));
+        assert_eq!(st, 200);
+        let r: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(r["chatFilter"]["enabled"], true);
+        // Dedupe case-insensitive (pertama menang), kosong dibuang, cap 100 char.
+        let words = r["chatFilter"]["words"].as_array().unwrap();
+        let got: Vec<&str> = words.iter().map(|w| w.as_str().unwrap()).collect();
+        assert_eq!(&got[..2], &["Slot", "judol"]);
+        assert_eq!(got.len(), 3);
+        assert_eq!(words[2].as_str().unwrap().chars().count(), 100);
+        // Zero-width dibuang clean_str; key asing tak masuk.
+        assert_eq!(r["chatFilter"]["extraRules"], "no politics");
+        assert!(r["chatFilter"].get("kunciAsing").is_none());
+        // File benar-benar menyimpan.
+        let cfg = load(&f);
+        assert_eq!(cfg["chatFilter"]["enabled"], true);
+        assert_eq!(cfg["chatFilter"]["words"].as_array().unwrap().len(), 3);
+        // GET /api/config menyertakan section (whitelist response).
+        assert_eq!(api_config_response(&f)["chatFilter"]["useDecision"], true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

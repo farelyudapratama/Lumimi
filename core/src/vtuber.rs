@@ -16,6 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::chat_filter;
 use crate::llm::{self, ChatMessage};
 use crate::vtuber_scheduler::{
     speak_ms, ConfigPatch, QueueItem, Scheduler, SchedulerClass, SchedulerEvent,
@@ -120,6 +121,22 @@ fn ingest_feed(rt: &mut VtRuntime, kind: &str, user: &str, text: &str, amount: O
     (out, run_now)
 }
 
+/// Catatan sistem ke feed dengan jeda minimal (anti-spam feed saat error
+/// berkala — mis. mesin keputusan mati dan tiap komen memicu error sama).
+fn feed_note_throttled(epoch: u64, text: &str) {
+    static LAST: OnceLock<Mutex<i64>> = OnceLock::new();
+    let last = LAST.get_or_init(|| Mutex::new(0));
+    let now = now_ms();
+    {
+        let mut g = last.lock().unwrap();
+        if now - *g < 30_000 {
+            return;
+        }
+        *g = now;
+    }
+    feed_system(epoch, text);
+}
+
 /// Jalankan satu item (LLM role "chat") lalu tahan slot selama estimasi bicara,
 /// finish, dan tarik item berikut dari antrean (drain). Berhenti sendiri bila
 /// runtime sudah diganti (epoch beda) atau dihentikan.
@@ -136,6 +153,52 @@ fn spawn_run(epoch: u64, item: QueueItem) {
             }
         };
         let Some((prompt, system, config_path)) = prepared else { return };
+
+        // Gerbang moderasi (khusus audience) — SETELAH gerbang mekanis
+        // scheduler (dedup/cooldown/slot), jadi biaya keputusan hanya dibayar
+        // untuk komentar yang memang akan dibalas. Komentar yang ditahan
+        // lepas slot tanpa balasan; catatan: cooldown sudah tercatat di
+        // ingest, jadi komentar berikut tetap menghormati jeda itu.
+        if item.class == SchedulerClass::Audience {
+            let filter = chat_filter::ChatFilter::load(&config_path);
+            if filter.enabled {
+                let mut blocked = filter.match_word(&item.text).map(|w| format!("kata terlarang \"{w}\""));
+                if blocked.is_none() && filter.use_decision {
+                    if chat_filter::decision_available(&config_path) {
+                        let d = chat_filter::decide(&config_path, &item.user, &item.text, &filter.extra_rules).await;
+                        if d.reject {
+                            blocked = Some(if d.reason.is_empty() { "melanggar filter".into() } else { d.reason });
+                        } else if let Some(err) = d.error {
+                            // Fail-open: komen diteruskan tanpa keputusan mesin.
+                            feed_note_throttled(epoch, &format!("Filter chat: {err} — komen diproses tanpa keputusan mesin."));
+                        }
+                    } else {
+                        feed_note_throttled(
+                            epoch,
+                            "Filter chat: mesin keputusan tidak tersedia (tandai koneksi dengan role \"moderation\") — hanya blocklist yang aktif.",
+                        );
+                    }
+                }
+                if let Some(reason) = blocked {
+                    let next = {
+                        let mut g = rt().lock().unwrap();
+                        match g.as_mut() {
+                            Some(r) if r.epoch == epoch && !r.scheduler.is_stopped() => {
+                                let user: String = item.user.chars().take(60).collect();
+                                push_feed(r, "system", "system", &format!("Komen dari {user} ditahan filter ({reason})."), None);
+                                r.scheduler.finish();
+                                r.scheduler.try_start()
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(n) = next {
+                        spawn_run(epoch, n);
+                    }
+                    return;
+                }
+            }
+        }
 
         let messages = [ChatMessage { role: "user".into(), content: prompt }];
         let result = llm::llm_for_role(&config_path, "chat", &messages, &system).await;
@@ -743,6 +806,14 @@ pub fn overlay_active() -> bool {
 mod tests {
     use super::*;
 
+    /// Test yang menyentuh runtime GLOBAL (rt()) berjalan serial — cargo
+    /// menjalankan test paralel, dan start()/stop() membanting runtime bersama.
+    static RT_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_rt() -> std::sync::MutexGuard<'static, ()> {
+        RT_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn fresh_config(dir: &std::path::Path) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let f = dir.join("config.json");
@@ -752,6 +823,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn start_stop_mock_status() {
+        let _g = lock_rt();
         let dir = std::env::temp_dir().join(format!("l2dvt-{}-{}", std::process::id(), now_ms()));
         let cfg_path = fresh_config(&dir);
         // validasi param wajib per provider (tanpa menyalakan koneksi nyata)
@@ -781,6 +853,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn inject_dan_agent_say() {
+        let _g = lock_rt();
         let dir = std::env::temp_dir().join(format!("l2dvt2-{}-{}", std::process::id(), now_ms()));
         let cfg_path = fresh_config(&dir);
         start(json!({ "provider": "mock", "mockIntervalMs": 60000 }), cfg_path);
@@ -805,5 +878,48 @@ mod tests {
         assert!(!overlay_active() || overlay_active()); // no panic
         overlay_ping();
         assert!(overlay_active());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn filter_chat_blocklist_dan_keputusan_fail_open() {
+        let _g = lock_rt();
+        let dir = std::env::temp_dir().join(format!("l2dvt3-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+
+        // ── Skenario 1: blocklist menahan komen sebelum LLM, tanpa balasan agent.
+        std::fs::write(
+            &f,
+            r#"{"activeId":"m","connections":[{"id":"m","provider":"mock","enabled":true,"roles":["chat","moderation"]}],"chatFilter":{"enabled":true,"useDecision":true,"words":["slot","judol"]}}"#,
+        )
+        .unwrap();
+        start(json!({ "provider": "mock", "mockIntervalMs": 60000 }), f.clone());
+        set_config(&json!({ "respondChat": true }));
+        inject_event(&json!({ "type": "chat", "user": "Rian", "text": "ayo main slot gacor" }));
+        sleep_ms(400).await;
+        let evs = events(0)["events"].as_array().unwrap().clone();
+        assert!(
+            evs.iter().any(|e| e["type"] == "system" && e["text"].as_str().unwrap_or("").contains("ditahan filter")),
+            "harus ada catatan penahanan di feed"
+        );
+        assert!(!evs.iter().any(|e| e["type"] == "agent"), "komen terlarang tak boleh dibalas");
+        stop();
+
+        // ── Skenario 2: mesin keputusan (mock meng-echo prompt "IZINKAN atau
+        // TOLAK") → jawaban tak terbaca → fail-open → komen tetap dibalas.
+        std::fs::write(
+            &f,
+            r#"{"activeId":"m","connections":[{"id":"m","provider":"mock","enabled":true,"roles":["chat","moderation"]}],"chatFilter":{"enabled":true,"useDecision":true,"words":[]}}"#,
+        )
+        .unwrap();
+        start(json!({ "provider": "mock", "mockIntervalMs": 60000 }), f);
+        set_config(&json!({ "respondChat": true }));
+        inject_event(&json!({ "type": "chat", "user": "Sinta", "text": "halo semua" }));
+        // Dua panggilan mock (moderasi + balasan chat) @300ms + jeda scheduler.
+        sleep_ms(2500).await;
+        let evs = events(0)["events"].as_array().unwrap().clone();
+        assert!(evs.iter().any(|e| e["type"] == "agent"), "komen baik harus dibalas (fail-open)");
+        stop();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
