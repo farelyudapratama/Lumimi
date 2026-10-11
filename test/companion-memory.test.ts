@@ -37,6 +37,22 @@ import {
 } from "../src/client/agent/companion-memory";
 import { AgentBrain } from "../src/client/agent/brain";
 
+/** Mock Response SSE untuk /api/chat-stream: satu delta lalu done. */
+function sseResponse(reply: string): any {
+  const enc = new TextEncoder();
+  const frames = [
+    `data: ${JSON.stringify({ type: "delta", text: reply })}\n\n`,
+    `data: ${JSON.stringify({ type: "done", ok: true, reply })}\n\n`,
+  ];
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const f of frames) c.enqueue(enc.encode(f));
+      c.close();
+    },
+  });
+  return { ok: true, status: 200, body, json: async () => ({ reply }) };
+}
+
 const g = globalThis as any;
 const ORIG = { window: g.window, document: g.document, fetch: g.fetch };
 afterAll(() => {
@@ -322,7 +338,7 @@ function makeHarness(opts: {
     resolveChat: (reply: string) => {
       const r = chatDs.shift();
       if (!r) throw new Error("tidak ada deferred /api/chat");
-      r({ ok: true, json: async () => ({ reply }) });
+      r(sseResponse(reply));
     },
     until: async (fn: () => boolean, ms = 2000) => {
       const t0 = Date.now();
@@ -400,19 +416,17 @@ describe("brain × memory/routing", () => {
     expect(h.speakLog.some((s) => s.text.includes("belum beres"))).toBe(true);
   });
 
-  test("intent menggantung → timeout think() melepas slot tanpa hand-off", async () => {
-    // Dulu fetch intent TANPA timeout: model role memory lambat/gantung =
-    // slot "thinking" menggantung >90 dtk (ditemukan QA live, 141+ dtk).
-    const prevTimeout = AgentBrain.REQUEST_TIMEOUT_MS;
-    AgentBrain.REQUEST_TIMEOUT_MS = 300;
+  test("intent menggantung → tidak diputus timer; stop() melepas slot tanpa hand-off", async () => {
     AgentBrain.HOUSEKEEPING_DELAY_MS = 60_000;
     const h = makeHarness({ intentHang: true });
     const p = h.brain.think("tolong kerjakan sesuatu yang makan waktu lama");
-    await h.until(() => h.speakLog.some((s) => s.text.includes("gak bisa mikir")));
+    await h.tick(30);
+    expect((h.brain as any).busy).toBe(true);
+    h.brain.stop();
     await p;
-    // Tugas TIDAK pernah diadukan ke agent — gagal-soft jadi pesan error chat.
+    // Tugas TIDAK pernah diadukan ke agent.
     expect(call(h, "/api/assistant/ask").length).toBe(0);
-    AgentBrain.REQUEST_TIMEOUT_MS = prevTimeout;
+    expect((h.brain as any).busy).toBe(false);
     await h.tick(30);
   });
 

@@ -156,6 +156,7 @@ export type ApprovalView = {
   args: any;
   plan: boolean;
   captcha?: boolean;
+  login?: boolean;
 };
 
 export type ReviewEntryView = { path: string; kind: string; added: number; removed: number; measured: boolean };
@@ -840,6 +841,12 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
         { label: t("as.deny"), sub: "", ok: false, always: false },
       ];
     }
+    if (ap.login) {
+      return [
+        { label: t("wb.appr.loginResume"), sub: "", ok: true, always: false },
+        { label: t("as.deny"), sub: "", ok: false, always: false },
+      ];
+    }
     if (ap.plan) {
       return [
         { label: t("wb.appr.approvePlan"), sub: "", ok: true, always: false },
@@ -866,8 +873,8 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     const card = el("div", "wb-appr");
     card.dataset.apid = ap.apId;
     const titleRow = el("div", "wb-appr-title");
-    const titleText = ap.captcha ? t("wb.appr.captchaTitle") : ap.plan ? t("as.approve.planTitle") : t("as.approve.title");
-    const pillText = ap.captcha ? t("wb.appr.captchaTag") : ap.plan ? t("wb.appr.planTag") : ap.tool;
+    const titleText = ap.captcha ? t("wb.appr.captchaTitle") : ap.login ? t("wb.appr.loginTitle") : ap.plan ? t("as.approve.planTitle") : t("as.approve.title");
+    const pillText = ap.captcha ? t("wb.appr.captchaTag") : ap.login ? t("wb.appr.loginTag") : ap.plan ? t("wb.appr.planTag") : ap.tool;
     titleRow.appendChild(el("span", "", titleText));
     titleRow.appendChild(el("span", "wb-trow-pill", pillText));
     card.appendChild(titleRow);
@@ -875,12 +882,12 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     const toolCard = el("div", "wb-appr-tool");
     const toolHeadEl = el("div", "wb-appr-tool-head");
     const ico = el("span", "wb-trow-ico");
-    ico.appendChild(icon(ap.captcha ? "shield" : ap.plan ? "listtodo" : toolIcon(ap.tool)));
+    ico.appendChild(icon(ap.captcha || ap.login ? "shield" : ap.plan ? "listtodo" : toolIcon(ap.tool)));
     toolHeadEl.appendChild(ico);
-    const kindLabel = ap.captcha ? t("wb.appr.captchaTag") : ap.plan ? t("wb.appr.planTag") : toolKindLabel(ap.tool, false);
+    const kindLabel = ap.captcha ? t("wb.appr.captchaTag") : ap.login ? t("wb.appr.loginTag") : ap.plan ? t("wb.appr.planTag") : toolKindLabel(ap.tool, false);
     toolHeadEl.appendChild(el("span", "wb-trow-kind", kindLabel));
     const args = ap.args || {};
-    const primary = ap.plan || ap.captcha ? "" : (String(args.command ?? args.path ?? args.query ?? args.key ?? "").trim());
+    const primary = ap.plan || ap.captcha || ap.login ? "" : (String(args.command ?? args.path ?? args.query ?? args.key ?? "").trim());
     if (primary) {
       const s = el("span", "wb-trow-sum");
       s.textContent = primary;
@@ -897,6 +904,8 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
       }
     } else if (ap.captcha) {
       toolCard.appendChild(el("div", "wb-appr-tool-note", t("wb.appr.captchaHint")));
+    } else if (ap.login) {
+      toolCard.appendChild(el("div", "wb-appr-tool-note", t("wb.appr.loginHint")));
     } else if (!ap.plan) {
       const pre = el("pre");
       try { pre.textContent = JSON.stringify(args, null, 2); } catch { pre.textContent = String(args); }

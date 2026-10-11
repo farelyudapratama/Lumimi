@@ -12,6 +12,22 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { AgentBrain } from "../src/client/agent/brain";
 
+/** Mock Response SSE untuk /api/chat-stream: satu delta lalu done. */
+function sseResponse(reply: string): any {
+  const enc = new TextEncoder();
+  const frames = [
+    `data: ${JSON.stringify({ type: "delta", text: reply })}\n\n`,
+    `data: ${JSON.stringify({ type: "done", ok: true, reply })}\n\n`,
+  ];
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const f of frames) c.enqueue(enc.encode(f));
+      c.close();
+    },
+  });
+  return { ok: true, status: 200, body, json: async () => ({ reply }) };
+}
+
 type Deferred = {
   promise: Promise<any>;
   resolve: (v: any) => void;
@@ -29,12 +45,10 @@ const defer = (): Deferred => {
 
 const g = globalThis as any;
 const ORIG = { window: g.window, document: g.document, fetch: g.fetch };
-const ORIG_TIMEOUT = AgentBrain.REQUEST_TIMEOUT_MS;
 afterAll(() => {
   g.window = ORIG.window;
   g.document = ORIG.document;
   g.fetch = ORIG.fetch;
-  AgentBrain.REQUEST_TIMEOUT_MS = ORIG_TIMEOUT;
 });
 
 const PROFILE = {
@@ -154,7 +168,7 @@ function makeHarness(
     },
     chatCalls: () => calls.filter((c) => c.url.includes("/api/chat")),
     resolveChat: (i: number, reply: string) =>
-      calls[i].d.resolve({ ok: true, json: async () => ({ reply }) }),
+      calls[i].d.resolve(sseResponse(reply)),
     tick: (ms = 0) => new Promise((r) => setTimeout(r, ms)),
   };
 }
@@ -264,16 +278,26 @@ describe("§18 precedence — proactive tunduk pada input user", () => {
   });
 });
 
-describe("§32 timeout — request menggantung tidak membekukan brain", () => {
-  test("lewat batas waktu → fallback diucapkan, busy lepas", async () => {
-    AgentBrain.REQUEST_TIMEOUT_MS = 15; // dipulihkan afterAll
+describe("§32 stop — request menggantung tidak membekukan brain", () => {
+  test("tidak ada timer total: request menggantung tetap menunggu sampai di-stop", async () => {
     const h = makeHarness({ rejectOnAbort: true });
     const b = h.brain as any;
     b.think("Pertanyaan yang menjemput");
-    await h.tick(60); // biarkan timeout meledak
-    expect(h.chatLog.some((c) => c.text.includes("Maaf, aku"))).toBe(true);
+    await h.tick(60);
+    expect(b.busy).toBe(true);
+    expect(h.calls[0].init.signal.aborted).toBe(false);
+  });
+
+  test("stop() membatalkan giliran → busy lepas, tidak ada pesan error palsu", async () => {
+    const h = makeHarness({ rejectOnAbort: true });
+    const b = h.brain as any;
+    b.think("Pertanyaan yang menjemput");
+    await h.tick(10);
+    b.stop();
+    await h.tick(20);
+    expect(h.calls[0].init.signal.aborted).toBe(true);
     expect(b.busy).toBe(false);
-    expect(h.speakLog.some((s) => s.opts?.cls === "companion")).toBe(true);
+    expect(h.chatLog.some((c) => c.text.includes("Maaf, aku"))).toBe(false);
   });
 });
 
@@ -301,6 +325,18 @@ describe("§34 epoch — profil model lama tidak menimpa model baru", () => {
 });
 
 describe("§17–18 policy gate proactive", () => {
+  test("balasan proaktif streaming (SSE) → diputar sebagai speech proactive", async () => {
+    const h = makeHarness();
+    const p = h.brain.reactEvent("idle");
+    await h.tick(10);
+    h.resolveChat(0, "Hai, masih di sana?");
+    await p;
+    await settle();
+    expect(h.chatCalls().length).toBe(1);
+    expect(h.speakLog.some((s) => s.text.includes("Hai, masih di sana?"))).toBe(true);
+    expect((h.brain as any).busy).toBe(false);
+  });
+
   test("mode aktif vtuber → event idle ditekan, tanpa LLM/speech, busy lepas", async () => {
     const h = makeHarness({ mode: { active: "vtuber", assistant: { busy: false } } });
     await h.brain.reactEvent("idle");

@@ -27,6 +27,7 @@ import {
   deriveReplyActions,
 } from "./directive-parser";
 import { httpBase, transport } from "../transport";
+import { readSseStream } from "./panel/stream";
 import { dropApertureParamCtx, directorToIntents } from "../character/adapters";
 import { estimateSpeechMs as estimateSpeechMsShared } from "../../shared/speech-timing";
 import {
@@ -117,6 +118,15 @@ function addChat(role: "user" | "agent", text: string): void {
     (window as any).__addChat?.(role, text);
   } catch {}
 }
+/** Bubble streaming: dibuat sekali, lalu diisi per delta. Mengembalikan
+ *  pengendali; tanpa dukungan UI (test/headless) → no-op. */
+function openStreamingChat(role: "agent"): { update(text: string): void; finish(text: string): void } {
+  try {
+    const h = (window as any).__openStreamChat?.(role);
+    if (h) return h;
+  } catch {}
+  return { update() {}, finish() {} };
+}
 function thinkingBase(el: HTMLElement): string {
   try {
     const i18n = (window as any).__i18n;
@@ -136,6 +146,9 @@ function thinkingBase(el: HTMLElement): string {
   return raw.replace(/(\s+\d+s)+\s*$/, "").trim() || "Mikir...";
 }
 function setThinking(on: boolean): void {
+  try {
+    (window as any).__setChatBusy?.(on);
+  } catch {}
   const el = document.getElementById("thinking");
   if (!el) return;
   if (thinkingTick) {
@@ -200,8 +213,6 @@ export class AgentBrain {
   // Epoch model (§34): dinaikkan invalidateCapabilityProfile() — loadProfile
   // yang sedang menunggu untuk model lama membuang hasilnya sendiri.
   private modelEpoch = 0;
-  // Batas tunggu /api/chat (§32) — statis supaya test bisa memperpendek.
-  static REQUEST_TIMEOUT_MS = 90_000;
   // Jeda debounce kompresi/ekstraksi post-reply — statis supaya test bisa
   // mempercepat (housekeeping tidak pernah menunda bicara).
   static HOUSEKEEPING_DELAY_MS = 1500;
@@ -459,7 +470,6 @@ bila memang pas.
     l2d()?.setGazeIntent?.("think", { hold: 7000 });
     const ctrl = (this.ctrl = new AbortController());
     // §32: satu mekanisme untuk cancellation (merge) + timeout.
-    const to = setTimeout(() => ctrl.abort(), AgentBrain.REQUEST_TIMEOUT_MS);
     try {
       // Loading the character sheet must never be able to abort the chat.
       if (!this.capProfile)
@@ -496,19 +506,43 @@ bila memang pas.
         sessionSummaryBlock(this.ctx.summary, olderUsed) +
         memoryBlock(mem) +
         this.moodSuffix();
-      const resp = await fetch(httpBase() + "/api/chat", {
+      // Streaming SSE: teks tampil per delta. Tanpa timer total — stream
+      // dibatalkan hanya oleh merge (ctrl.abort) atau tombol Stop.
+      const resp = await fetch(httpBase() + "/api/chat-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages, system }),
         signal: ctrl.signal,
       });
-      if (!resp.ok) {
-        const e = await resp.json().catch(() => ({}));
-        throw new Error(e.error || "HTTP " + resp.status);
+      let streamed = "";
+      let finalReply = "";
+      let finalError = "";
+      let bubble = null as ReturnType<typeof openStreamingChat> | null;
+      try {
+        await readSseStream(
+          resp,
+          (ev) => {
+            if (this.gen !== myGen) return;
+            if (ev.type === "delta") {
+              streamed += ev.text;
+              bubble ??= openStreamingChat("agent");
+              bubble.update(stripDirectives(streamed));
+            } else if (ev.type === "done") {
+            finalReply = typeof (ev as any).reply === "string" ? (ev as any).reply : "";
+            finalError = typeof (ev as any).error === "string" ? (ev as any).error : "";
+          }
+        },
+          ctrl.signal,
+        );
+      } finally {
+        // Bubble SELALU ditutup: selesai, error, atau di-Stop — teks yang
+        // sudah masuk tetap terlihat, tidak tertinggal setengah jadi.
+        const partial = stripDirectives((finalReply || streamed).trim());
+        if (bubble) bubble.finish(partial);
       }
-      const data = await resp.json();
-      if (this.gen !== myGen) return; // reply telat generasi lama → buang (§33)
-      const reply = (data.reply || "").trim();
+      if (finalError) throw new Error(finalError);
+      if (this.gen !== myGen || ctrl.signal.aborted) return; // reply telat / di-Stop → buang (§33)
+      const reply = (finalReply || streamed).trim();
       if (reply) {
         const clean = stripDirectives(reply);
         // Giliran assistant ikut context sesi — dulu balasan TIDAK pernah
@@ -523,7 +557,7 @@ bila memang pas.
         if (this.gen !== myGen) return; // digulingkan saat director pass
         // Chat: respons PENUH masuk log sekali di depan — bukan per-segmen
         // saat TTS-nya mulai (dulu: TTS berhenti di tengah → chat kepotong).
-        addChat("agent", clean);
+        if (!bubble) addChat("agent", clean);
         console.log("[agent] speaking reply with", segments.length, "animation segments");
         this.playSegments(segments, "companion", { chatFull: true });
         this.afterReplyHousekeeping();
@@ -534,7 +568,7 @@ bila memang pas.
         addChat("agent", msg);
       }
     } catch (err: any) {
-      if (this.gen !== myGen) return; // abort karena merge = senyap, bukan error
+      if (this.gen !== myGen || ctrl.signal.aborted) return; // merge/Stop = senyap, bukan error
       console.error("[agent]", err);
       const msg =
         "Maaf, aku lagi gak bisa mikir sekarang. Cek koneksi atau api key ya.";
@@ -542,7 +576,6 @@ bila memang pas.
       l2d()?.speak?.(msg, undefined, { cls: "companion" });
       addChat("agent", msg);
     } finally {
-      clearTimeout(to);
       if (this.gen === myGen) {
         // Hanya generasi TERBARU yang boleh me-reset state — finally flow
         // lama (sudah digulingkan) jadi no-op total.
@@ -764,6 +797,17 @@ bila memang pas.
     }
   }
 
+  /** Hentikan giliran yang sedang berjalan (tombol Stop). Membatalkan
+   *  request aktif; catch/finally di think() yang melepas slot. */
+  stop(): void {
+    if (!this.busy) return;
+    this.ctrl?.abort();
+  }
+
+  isBusy(): boolean {
+    return this.busy;
+  }
+
   /** Reset sesi percakapan (tombol clear chat). Long-term memory TIDAK
    *  ikut terhapus — itu memori lintas sesi, bukan transcript. */
   clearSession(): void {
@@ -789,7 +833,6 @@ bila memang pas.
     // menunggu tetap menang lewat gen-guard (bukan merebut slot).
     this.busy = true;
     const ctrl = (this.ctrl = new AbortController());
-    const to = setTimeout(() => ctrl.abort(), AgentBrain.REQUEST_TIMEOUT_MS);
     try {
       // §17: policy gate SEBELUM LLM/director/speech/side-effect. Semua event
       // proaktif (idle/user_left/user_returned/mood:*) bermuara di sini —
@@ -818,20 +861,32 @@ bila memang pas.
       const messages = this.history
         .slice(-6)
         .concat([{ role: "user", content: synthetic }]);
-      const resp = await fetch(httpBase() + "/api/chat", {
+      // Streaming SSE tanpa bubble: proaktif tidak tampil di chat, jadi cukup
+      // kumpulkan delta lalu pakai reply final dari event done.
+      const resp = await fetch(httpBase() + "/api/chat-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages, system }),
         signal: ctrl.signal,
       });
-      if (!resp.ok) {
-        const e = await resp.json().catch(() => ({}));
-        throw new Error(e.error || "HTTP " + resp.status);
-      }
-      if (this.gen !== myGen) return; // digulingkan think() — senyap
-      const data = await resp.json();
-      if (this.gen !== myGen) return;
-      const reply = (data.reply || "").trim();
+      let streamed = "";
+      let finalReply = "";
+      let finalError = "";
+      await readSseStream(
+        resp,
+        (ev) => {
+          if (ev.type === "delta") {
+            streamed += ev.text;
+          } else if (ev.type === "done") {
+            finalReply = typeof (ev as any).reply === "string" ? (ev as any).reply : "";
+            finalError = typeof (ev as any).error === "string" ? (ev as any).error : "";
+          }
+        },
+        ctrl.signal,
+      );
+      if (finalError) throw new Error(finalError);
+      if (this.gen !== myGen || ctrl.signal.aborted) return; // digulingkan think() / Stop — senyap
+      const reply = (finalReply || streamed).trim();
       if (reply) {
         const clean = stripDirectives(reply);
         // Sama seperti think(): director pemilik ekspresi tunggal (lihat catatan
@@ -846,7 +901,6 @@ bila memang pas.
       if (this.gen !== myGen) return; // abort karena digulingkan = senyap
       console.error("[agent] reactEvent", type, err);
     } finally {
-      clearTimeout(to);
       if (this.gen === myGen) {
         setThinking(false);
         this.busy = false;
@@ -1580,6 +1634,9 @@ if (typeof window !== "undefined") {
     expressReply: (t: string) => brain.expressReply(t),
     // Reset sesi percakapan (clear chat) — long-term memory tetap ada.
     clearSession: () => brain.clearSession(),
+    // Tombol Stop: batalkan giliran aktif (stream/request), slot dilepas.
+    stop: () => brain.stop(),
+    isBusy: () => brain.isBusy(),
     // Array HIDUP — app.js mengonsumsi referensi yang sama, bukan snapshot kosong.
     history: brain.history,
     guessEmotion,

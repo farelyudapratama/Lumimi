@@ -622,7 +622,7 @@ export function startWorkbench(): () => void {
     if (!st.busy) busySinceMs = 0;
     lastSv = deriveAgentState(st, busySinceMs, Date.now());
     pendingApprovalViews = (st.pendingApprovals || []).map((a) => ({
-      apId: a.id, tool: a.tool, args: a.args, plan: a.kind === "plan", captcha: a.kind === "captcha",
+      apId: a.id, tool: a.tool, args: a.args, plan: a.kind === "plan", captcha: a.kind === "captcha", login: a.kind === "login",
     }));
     currentPlan = st.plan || [];
     // Plan yang dimuat dari sesi sebelumnya = basi: snapshot saat fetch status
@@ -643,7 +643,7 @@ export function startWorkbench(): () => void {
     const pendingIds = (st.pendingApprovals || []).map((a) => a.id);
     for (const ap of st.pendingApprovals || []) {
       if (localApprovals.has(ap.id)) continue;
-      transcript.ensureApproval(ap.id, ap.tool, ap.args, ap.kind === "plan", ap.kind === "captcha");
+      transcript.ensureApproval(ap.id, ap.tool, ap.args, ap.kind === "plan", ap.kind === "captcha", ap.kind === "login");
     }
     const current = transcript.blocks
       .filter((b: Block): b is Extract<Block, { kind: "approval" }> => b.kind === "approval")

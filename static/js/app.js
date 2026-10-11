@@ -3660,6 +3660,34 @@
     }
 
     window.__addChat = addChat;
+    // Bubble streaming: dibuka sekali di delta pertama, teksnya diganti per
+    // delta. finish() menutupnya (selesai, error, atau di-Stop).
+    window.__openStreamChat = function openStreamChat(role) {
+      const log = $("#chat-log");
+      if (!log) return null;
+      const msg = document.createElement("div");
+      msg.className = "msg " + role;
+      const av = document.createElement("div");
+      av.className = "msg-avatar";
+      av.textContent = characterInitial();
+      paintAvatarEl(av, characterInitial());
+      const bb = document.createElement("div");
+      bb.className = "msg-bubble";
+      msg.appendChild(av);
+      msg.appendChild(bb);
+      log.appendChild(msg);
+      log.scrollTop = log.scrollHeight;
+      return {
+        update(text) {
+          bb.textContent = text;
+          log.scrollTop = log.scrollHeight;
+        },
+        finish(text) {
+          if (text) bb.textContent = text;
+          else msg.remove();
+        },
+      };
+    };
     // Hook lintas-scope: loadModel (scope luar) memicu gambar-ulang daftar
     // model di drawer setelah state.modelPath berubah (penanda "aktif").
     window.__refreshModels = refreshModels;
@@ -3716,6 +3744,18 @@
     $("#bubble-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter") sendBubble();
     });
+    // Tombol Stop: hanya tampil selama brain sibuk; Esc juga menghentikan.
+    const stopBtn = $("#btn-chat-stop");
+    const stopReply = () => window.__agent?.stop?.();
+    stopBtn.addEventListener("click", stopReply);
+    $("#bubble-input").addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && window.__agent?.isBusy?.()) stopReply();
+    });
+    const sendBtn = $("#btn-bubble");
+    window.__setChatBusy = (on) => {
+      stopBtn.classList.toggle("hidden", !on);
+      sendBtn.classList.toggle("hidden", on);
+    };
 
     $$(".phrase-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
