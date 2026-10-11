@@ -12,13 +12,21 @@ use std::sync::OnceLock;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::agent::{bus, loop_, memory, plan, sessions, tools};
+use crate::agent::{bus, loop_, memory, plan, sessions, store, tools};
 use crate::llm::{self, ChatMessage};
 
 const MAX_ITERATIONS: usize = 25;
+/// Batas durasi keseluruhan satu tugas agent (ms). Dicek di awal tiap langkah.
+const TASK_MAX_DURATION_MS: u64 = 15 * 60 * 1000;
 const MAX_HISTORY: usize = 60;
 /// Berapa kali tool yang sama berturut-turut dianggap macet.
 const STUCK_SAME_TOOL_RUN: usize = 6;
+/// Panggilan tool+argumen IDENTIK ke-N: ke-2 tetap dijalankan + peringatan,
+/// ke-3 menghentikan tugas (loop sungguhan). Lihat kebijakan panggilan-ulang.
+const REPEAT_CALL_STOP: usize = 3;
+/// Berapa kali berturut-turut balasan boleh gagal diparse sebagai tool call
+/// sebelum tugas dihentikan (format rusak berulang = model tidak sanggup).
+const PARSE_FAIL_STOP: usize = 3;
 // Kontrak MODES.md: cap 20 FIFO (padanan MAX_UNDO TS yang di-guard).
 const MAX_UNDO: usize = 20;
 const MAX_NOTES: usize = 30;
@@ -35,7 +43,6 @@ struct UndoRec {
     reverted: bool,
 }
 
-#[derive(Default)]
 pub struct Runtime {
     pub running: bool,
     pub busy: bool,
@@ -67,12 +74,65 @@ pub struct Runtime {
     plan: Vec<Value>,          // update_plan items
     notes_files: Vec<String>,  // file tersentuh sesi ini (relatif)
     undo: Vec<UndoRec>,        // snapshot mutasi (cap MAX_UNDO)
-    cancel: bool,              // cancel kooperatif antar-langkah
+    /// Permintaan batal (watch channel). Watch, bukan bool polos: pemegang
+    /// Receiver (panggilan LLM, run_command) bisa MENUNGGU pembatalan secara
+    /// real-time — dulu flag bool cuma terbaca antar-langkah, jadi LLM atau
+    /// perintah yang menggantung tetap jalan sampai selesai walau user
+    /// menekan Stop.
+    cancel_tx: tokio::sync::watch::Sender<bool>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    /// True saat run_loop berhenti dalam keadaan paused (menunggu keputusan
+    /// approval; busy tetap true). Loop SUDAH exit pada keadaan ini, jadi
+    /// cancel/modify yang menggantung tak akan pernah dikonsumsi loop lama —
+    /// keduanya wajib membersihkan sendiri approval + slot.
+    paused: bool,
+    /// Lokasi store sesi (dipakai cancel() yang tak punya akses parameter
+    /// data_dir untuk mempersist catatan pembatalan ke sesi terikat).
+    data_dir: Option<PathBuf>,
+    /// Run observability aktif di store (data/agent-store.db). None = store
+    /// tidak aktif (gagal buka / test tanpa init) — semua operasi fail-soft.
+    run_id: Option<i64>,
+    /// Penomor urutan eksekusi tool dalam run.
+    run_seq: u64,
     /// Penghitung panggilan LLM tugas berjalan (orchestrator + subagent).
     llm_calls: u64,
     active_task: Option<Value>, // {taskId, prompt, status} — untuk status panel
     next_task_seq: u64,        // penomor taskId
     undo_seq: u64,             // penomor id undo (id unik walau ms sama)
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        Self {
+            running: false,
+            busy: false,
+            work_dir: String::new(),
+            session_id: String::new(),
+            model: String::new(),
+            role_map: Value::Null,
+            history: Vec::new(),
+            approvals: Vec::new(),
+            allowed: Default::default(),
+            ask_seq: 0,
+            plan_seq: 0,
+            plan_ok: false,
+            mutated: false,
+            plan: Vec::new(),
+            notes_files: Vec::new(),
+            undo: Vec::new(),
+            cancel_tx,
+            cancel_rx,
+            paused: false,
+            data_dir: None,
+            run_id: None,
+            run_seq: 0,
+            llm_calls: 0,
+            active_task: None,
+            next_task_seq: 0,
+            undo_seq: 0,
+        }
+    }
 }
 
 fn rt() -> &'static Mutex<Runtime> {
@@ -85,17 +145,39 @@ fn push_msg(r: &mut Runtime, role: &str, content: &str) {
     trim_history(&mut r.history);
 }
 
-/// Pangkas history ke MAX_HISTORY sambil MEMPERTAHANKAN pesan user pertama
-/// (tujuan tugas). Pemotongan dilaporkan ke bus agar tidak terjadi diam-diam.
+/// Batas konten history dalam CHAR (approximation token ~1:4). Batas jumlah
+/// pesan saja tak cukup: hasil tool (maks 4.000 char/pesan) bisa menumpuk
+/// hingga ratusan ribu char dan meledakkan konteks model kecil — provider
+/// akan menolak dengan 400 dan tugas gagal keras. Pangkas dari pesan tua.
+const MAX_HISTORY_CHARS: usize = 120_000;
+
+/// Pangkas history ke MAX_HISTORY + anggaran MAX_HISTORY_CHARS sambil
+/// MEMPERTAHANKAN pesan user pertama (tujuan tugas). Pemotongan dilaporkan
+/// ke bus agar tidak terjadi diam-diam.
 fn trim_history(history: &mut Vec<Value>) {
-    if history.len() <= MAX_HISTORY {
-        return;
+    if history.len() > MAX_HISTORY {
+        let keep_first = history.first().map(|m| m.get("role").and_then(|x| x.as_str()) == Some("user")).unwrap_or(false);
+        let head = if keep_first { 1 } else { 0 };
+        let drop = history.len() - MAX_HISTORY;
+        history.drain(head..head + drop);
+        bus::emit("context_trimmed", &format!("{drop} pesan lama dibuang (tujuan tugas dipertahankan)"));
     }
-    let keep_first = history.first().map(|m| m.get("role").and_then(|x| x.as_str()) == Some("user")).unwrap_or(false);
-    let head = if keep_first { 1 } else { 0 };
-    let drop = history.len() - MAX_HISTORY;
-    history.drain(head..head + drop);
-    bus::emit("context_trimmed", &format!("{drop} pesan lama dibuang (tujuan tugas dipertahankan)"));
+    let size = |m: &Value| m.get("content").and_then(|c| c.as_str()).map(|s| s.len()).unwrap_or(0);
+    let mut total: usize = history.iter().map(|m| size(m)).sum();
+    if total > MAX_HISTORY_CHARS {
+        let keep_first = history.first().map(|m| m.get("role").and_then(|x| x.as_str()) == Some("user")).unwrap_or(false);
+        let head = if keep_first { 1 } else { 0 };
+        let mut dropped = 0usize;
+        // Selalu sisakan pesan pertama (tujuan) + satu pesan terbaru.
+        while history.len() > head + 1 && total > MAX_HISTORY_CHARS {
+            total -= size(&history[head]);
+            history.remove(head);
+            dropped += 1;
+        }
+        if dropped > 0 {
+            bus::emit("context_trimmed", &format!("{dropped} pesan lama dibuang (anggaran konten {MAX_HISTORY_CHARS} char; tujuan tugas dipertahankan)"));
+        }
+    }
 }
 
 /// Anggaran panggilan LLM per tugas (termasuk subagent). Melampaui = tugas
@@ -104,7 +186,15 @@ const MAX_LLM_CALLS_PER_TASK: u64 = 60;
 
 /// Permintaan batal untuk tugas berjalan (dibaca subagent di tiap langkah).
 pub(crate) async fn is_cancelled() -> bool {
-    rt().lock().await.cancel
+    let r = rt().lock().await;
+    let c = *r.cancel_rx.borrow();
+    c
+}
+
+/// Clone sinyal batal untuk diteruskan ke panggilan LLM / run_command agar
+/// pembatalan terasa real-time (bukan hanya antar-langkah loop).
+pub(crate) async fn cancel_receiver() -> tokio::sync::watch::Receiver<bool> {
+    rt().lock().await.cancel_rx.clone()
 }
 
 /// Hitung satu panggilan LLM. Return false bila anggaran tugas sudah habis.
@@ -119,6 +209,22 @@ pub(crate) async fn spend_llm_call() -> bool {
 
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+// ── Observability store (fail-soft: tak perna menggagalkan tugas) ───────────
+
+/// Tutup run di store dengan status final. run_id dibersihkan.
+fn finish_run(r: &mut Runtime, status: &str, error: Option<&str>) {
+    if let Some(rid) = r.run_id.take() {
+        store::end_run(rid, status, error, r.llm_calls);
+    }
+}
+
+/// Tandai run paused (tunggu keputusan approval) — run tetap terbuka.
+fn pause_run(r: &Runtime) {
+    if let Some(rid) = r.run_id {
+        store::set_run_status(rid, "paused");
+    }
 }
 
 /// Kunci allowlist sesi: per-tool, KECUALI run_command yang dikelompokkan
@@ -213,7 +319,7 @@ pub async fn start(work_dir: &str, model: &str, role_map: Value) -> Value {
     let mut r = rt().lock().await;
     r.running = true;
     r.busy = false;
-    r.cancel = false;
+    let _ = r.cancel_tx.send(false);
     if !work_dir.is_empty() {
         r.work_dir = work_dir.to_string();
     }
@@ -270,7 +376,8 @@ pub async fn stop() -> Value {
     let mut r = rt().lock().await;
     r.running = false;
     r.busy = false;
-    r.cancel = false;
+    r.paused = false;
+    let _ = r.cancel_tx.send(false);
     r.history.clear();
     r.approvals.clear();
     r.allowed.clear();
@@ -285,6 +392,7 @@ pub async fn stop() -> Value {
     r.notes_files.clear();
     r.undo.clear();
     r.active_task = None;
+    finish_run(&mut r, "cancelled", Some("runtime dihentikan (stop)"));
     json!({ "ok": true })
 }
 
@@ -331,15 +439,38 @@ pub async fn reset() -> Value {
     json!({ "ok": true })
 }
 
-/// POST /api/assistant/cancel — minta batal kooperatif (dicek antar-langkah).
-/// Model core sinkron: tanpa task-identity, cancel menyetel flag yang dibaca
-/// run_loop di awal tiap turn.
+/// POST /api/assistant/cancel — minta batal kooperatif. Dua keadaan:
+/// - tugas BERJALAN → set sinyal batal; dibaca loop antar-langkah, panggilan
+///   LLM, dan run_command (watch channel).
+/// - tugas MENUNGGU keputusan (paused: loop sudah exit) → bersihkan approval
+///   menggantung + lepas slot langsung; tak ada lagi yang mengonsumsi sinyal,
+///   dulu flag ini menggantung sampai user memaksa approve/reject.
 pub async fn cancel() -> Value {
     let mut r = rt().lock().await;
-    if !r.running || (!r.busy && r.approvals.is_empty()) {
+    if !r.running {
         return json!({ "ok": true, "accepted": false });
     }
-    r.cancel = true;
+    if r.paused {
+        r.approvals.clear();
+        r.busy = false;
+        r.paused = false;
+        r.active_task = None;
+        finish_run(&mut r, "cancelled", None);
+        let _ = r.cancel_tx.send(false); // dikonsumsi langsung, jangan bocor ke tugas berikut
+        push_msg(&mut r, "assistant", "Dibatalkan oleh user.");
+        let sid = r.session_id.clone();
+        let dir = r.data_dir.clone();
+        drop(r);
+        bus::emit("error", "dibatalkan: oleh user");
+        if let (true, Some(dir)) = (!sid.is_empty(), dir) {
+            sessions::append(&dir, &sid, &[json!({"role":"assistant","content":"Dibatalkan oleh user."})]);
+        }
+        return json!({ "ok": true, "accepted": true });
+    }
+    if !r.busy && r.approvals.is_empty() {
+        return json!({ "ok": true, "accepted": false });
+    }
+    let _ = r.cancel_tx.send(true);
     json!({ "ok": true, "accepted": true })
 }
 
@@ -417,7 +548,8 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
     let lang = lang_of(config_path);
     let (work_dir, model_name) = { let r = rt().lock().await; (r.work_dir.clone(), r.model.clone()) };
     let wd = PathBuf::from(&work_dir);
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut cancel_rx = cancel_receiver().await;
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut last_tool: Option<String> = None;
     let mut run: usize = 0;
     let mut final_text = String::new();
@@ -428,15 +560,32 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
     // mengeluarkan ulang JSON besar.
     let mut motion_validated = false;
     let mut last_validated_draft: Option<Value> = None;
+    // Penghitung pemulihan: format panggilan rusak & balasan kosong berturut-
+    // turut (di-reset tiap kali model menghasilkan panggilan yang bisa dibaca).
+    let mut parse_fails = 0usize;
+    let mut empty_replies = 0usize;
+    // Guard jawaban-final dipakai SEKALI per tugas (rencana belum beres).
+    let mut plan_guard_used = false;
+    // Status run store: "done" default; "stopped" bila berhenti tanpa jawaban
+    // bermakna (macet/timeout/iterasi habis).
+    let mut run_status = "done";
 
+    // Batas durasi keseluruhan tugas (di luar batas langkah).
+    let task_deadline = std::time::Instant::now() + std::time::Duration::from_millis(TASK_MAX_DURATION_MS);
+    let mut timed_out = false;
     for _turn in 0..MAX_ITERATIONS {
+        if std::time::Instant::now() >= task_deadline {
+            timed_out = true;
+            break;
+        }
         // Cancel kooperatif: dicek di awal tiap turn (loop lepas lock saat await
-        // LLM, jadi /cancel dari request lain bisa menyetel flag ini).
+        // LLM, jadi /cancel dari request lain bisa menyetel sinyal ini).
         {
             let mut r = rt().lock().await;
-            if r.cancel {
-                r.cancel = false;
+            if *r.cancel_rx.borrow() {
+                let _ = r.cancel_tx.send(false);
                 push_msg(&mut r, "assistant", "Dibatalkan oleh user.");
+                finish_run(&mut r, "cancelled", None);
                 r.busy = false;
                 r.active_task = None;
                 let sid = r.session_id.clone();
@@ -453,6 +602,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             bus::emit("error", &msg);
             let mut r = rt().lock().await;
             push_msg(&mut r, "assistant", &msg);
+            finish_run(&mut r, "stopped", Some(&msg));
             r.busy = false;
             r.active_task = None;
             return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
@@ -473,8 +623,27 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         };
         let system = format!("{}{}", loop_::build_system(&lang, &work_dir, &model_name), memory::memory_prompt_block(root));
 
-        let reply = match llm::llm_for_role_tools(config_path, "assistant", &messages, &system, &loop_::tool_defs_json()).await {
+        // Panggilan LLM cancel-aware: /cancel menghentikan request yang
+        // menggantung secara real-time (dulu loop cuma membaca flag antar-
+        // langkah — LLM yang nge-hang tetap jalan sampai selesai).
+        let reply = match llm::llm_for_role_cancelable(config_path, "assistant", &messages, &system, &loop_::tool_defs_json(), &mut cancel_rx).await {
             Ok(ok) => ok.reply,
+            Err((499, _)) => {
+                // Dibatalkan saat menunggu LLM — bukan error provider.
+                let mut r = rt().lock().await;
+                let _ = r.cancel_tx.send(false);
+                push_msg(&mut r, "assistant", "Dibatalkan oleh user.");
+                finish_run(&mut r, "cancelled", None);
+                r.busy = false;
+                r.active_task = None;
+                let sid = r.session_id.clone();
+                drop(r);
+                if !sid.is_empty() {
+                    sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":"Dibatalkan oleh user."})]);
+                }
+                bus::emit("error", "dibatalkan: oleh user");
+                return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), paused: false, error: None };
+            }
             Err((_, msg)) => {
                 bus::emit("error", &msg);
                 let mut r = rt().lock().await;
@@ -482,6 +651,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 // Tugas GAGAL = slot lepas — dulu busy & active_task dibiarkan
                 // tergantung sehingga agent "brick" (composer mati, ask berikut
                 // ditolak, cancel tak pernah dikonsumsi karena loop sudah exit).
+                finish_run(&mut r, "failed", Some(&msg));
                 r.busy = false;
                 r.active_task = None;
                 return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
@@ -508,14 +678,86 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                     r.approvals.push(json!({ "id": id, "tool": "motion_save", "args": save_args, "ts": now_ms() }));
                     push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
                     push_msg(&mut r, "tool", &format!("MENUNGGU PERSETUJUAN: motion_save {} (id {id})", serde_json::to_string(&pub_args).unwrap_or_default().chars().take(300).collect::<String>()));
+                    pause_run(&mut r);
                     paused = true;
                     final_text = "Draft sudah divalidasi — aku ajukan simpan ke library. Setujui di panel Assistant untuk menyimpannya.".to_string();
                     break;
                 }
-                final_text = if reply.trim().is_empty() { "(kosong)".into() } else { reply };
+                // Upaya tool RUSAK (ada direktif tapi tak bisa diparse) →
+                // umpan-balik perbaikan format, BUKAN akhir senyap. Dulu balasan
+                // sampah ini jadi "jawaban final" — model lemah yang salah
+                // format terlihat berhenti mendadak tanpa kesempatan memperbaiki.
+                if loop_::count_tool_directives(&reply) > 0 {
+                    parse_fails += 1;
+                    empty_replies = 0;
+                    if parse_fails >= PARSE_FAIL_STOP {
+                        final_text = "Aku berhenti: panggilan tool berkali-kali tidak bisa dibaca karena formatnya rusak. Coba perjelas instruksinya atau pecah tugasnya.".into();
+                        bus::emit("error", "macet: format panggilan tool rusak berulang");
+                        run_status = "stopped";
+                        break;
+                    }
+                    let names = loop_::TOOLS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
+                    let mut r = rt().lock().await;
+                    push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+                    push_msg(&mut r, "tool", &format!(
+                        "ERROR: FORMAT PANGGILAN TOOL RUSAK — aku tidak bisa membaca panggilanmu. Ulangi dengan PERSIS satu baris (JSON valid, tanpa markdown, tanpa pindah baris di dalam JSON):\nTOOL: <nama> {{json}}\nTool yang tersedia: {names}. Kalau tugas sudah selesai, berikan jawaban final TANPA directive TOOL."
+                    ));
+                    continue;
+                }
+                // Balasan KOSONG (budget reasoning habis / stream putus) →
+                // minta jawab langsung, maks 2x, baru menyerah dengan jujur.
+                if reply.trim().is_empty() {
+                    empty_replies += 1;
+                    parse_fails = 0;
+                    if empty_replies <= 2 {
+                        let mut r = rt().lock().await;
+                        push_msg(&mut r, "tool", "Balasanmu KOSONG (budget output kemungkinan habis untuk reasoning sebelum jawaban terbentuk). Jawab LANGSUNG sekarang: hasil akhir singkat, atau SATU baris 'TOOL: <nama> {json}' — tanpa reasoning panjang.");
+                        continue;
+                    }
+                    final_text = "(kosong)".into();
+                    break;
+                }
+                // Guard jawaban-final: rencana TUGAS INI masih punya langkah
+                // belum beres → sekali feed-balik (tuntaskan / tandai failed
+                // dgn alasan), jangan biarkan kabur setengah jalan. Kedua kalinya
+                // final tetap diterima — model bisa punya alasan sah berhenti.
+                {
+                    let r = rt().lock().await;
+                    let plan_aktif = r.plan_seq == r.ask_seq && !r.plan.is_empty();
+                    let sisa: Vec<String> = if plan_aktif {
+                        r.plan.iter().filter(|p| {
+                            let st = p.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
+                            st == "pending" || st == "in_progress"
+                        }).map(|p| p.get("task").and_then(|t| t.as_str()).unwrap_or("?").to_string()).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    drop(r);
+                    if !sisa.is_empty() && !plan_guard_used {
+                        plan_guard_used = true;
+                        let mut r = rt().lock().await;
+                        push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+                        push_msg(&mut r, "tool", &format!(
+                            "Tugas BELUM BOLEH diakhiri: rencana masih punya {} langkah belum selesai: {}. Tuntaskan langkahnya (atau tandai failed dengan alasan lewat update_plan), lalu beri jawaban final.",
+                            sisa.len(),
+                            sisa.join("; ")
+                        ));
+                        continue;
+                    }
+                }
+                final_text = reply;
                 break;
             }
             Some(d) => d,
+        };
+        parse_fails = 0;
+        empty_replies = 0;
+        // Catatan bila balasan memuat lebih dari satu panggilan tool: hanya
+        // yang pertama dieksekusi — model harus tahu sisanya TIDAK terjadi.
+        let multi_note = if loop_::count_tool_directives(&reply) > 1 {
+            Some(format!("\n(catatan sistem: balasanmu memuat lebih dari satu panggilan tool — hanya '{name}' yang dijalankan; satu tool per giliran, ulangi sisanya di giliran berikutnya)"))
+        } else {
+            None
         };
         let call_key = format!("{name} {}", serde_json::to_string(&args).unwrap_or_default());
         let level = loop_::tool_level(&name);
@@ -525,9 +767,13 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             push_msg(&mut r, "tool", &format!("ERROR: tool tidak dikenal: {name}"));
             continue;
         }
-        if seen.contains(&call_key) {
-            // Model mengulang panggilan tool yang sama — hentikan dengan bahasa
-            // user, bukan label internal loop.
+        // Kebijakan panggilan-ulang: panggilan tool+argumen IDENTIK.
+        // Ke-2 tetap dijalankan (keadaan bisa berubah) + peringatan ke model;
+        // ke-3 = loop sungguhan → hentikan dengan bahasa user, bukan label
+        // internal loop. Dulu SATU pengulangan pun langsung menghentikan
+        // tugas — terlalu keras untuk tugas panjang (mis. re-read setelah edit).
+        let rep = seen.get(&call_key).copied().unwrap_or(0) + 1;
+        if rep >= REPEAT_CALL_STOP {
             final_text = {
                 let s = strip_tool_directive(&reply);
                 if s.is_empty() {
@@ -536,9 +782,23 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                     s
                 }
             };
+            bus::emit("error", "macet: panggilan identik berulang");
+            run_status = "stopped";
             break;
         }
-        seen.insert(call_key);
+        seen.insert(call_key, rep);
+        let repeat_note = if rep == REPEAT_CALL_STOP - 1 {
+            Some(format!("\n(peringatan: panggilan {name} dengan argumen IDENTIK ini sudah pernah dijalankan di tugas ini — hasilnya ada di atas. Bila keadaan berubah boleh saja; kalau tidak, ubah pendekatan, jangan ulangi.)"))
+        } else {
+            None
+        };
+        // Sufiks yang menempel di hasil tool (catatan multi-call + peringatan
+        // pengulangan) supaya model membacanya bersama hasilnya.
+        let result_suffix = format!(
+            "{}{}",
+            multi_note.as_deref().unwrap_or(""),
+            repeat_note.as_deref().unwrap_or("")
+        );
 
         // Macet berbasis pola: tool yang sama dipanggil berulang tanpa henti
         // (argumen boleh sedikit berbeda) dihentikan sebelum habis 25 langkah.
@@ -547,6 +807,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         if run >= STUCK_SAME_TOOL_RUN {
             final_text = format!("Aku berhenti: tool {name} dipanggil {run} kali berturut-turut tanpa kemajuan. Coba perjelas instruksinya.");
             bus::emit("error", "macet: tool sama berulang");
+            run_status = "stopped";
             break;
         }
         if let Some(err) = loop_::validate_args(&name, &args) {
@@ -573,6 +834,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             r.approvals.push(json!({ "id": id, "kind": "plan", "tool": "update_plan", "args": { "todos": plan_snapshot }, "ts": now_ms() }));
             push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
             push_msg(&mut r, "tool", &format!("MENUNGGU PERSETUJUAN RENCANA (id {id}) — eksekusi dijeda sebelum mutasi pertama."));
+            pause_run(&mut r);
             paused = true;
             final_text = format!("{}\n\n⏳ Rencana kerja menunggu setujumu di panel — aku jeda sebelum mengubah apa pun.", strip_tool_directive(&reply));
             break;
@@ -592,6 +854,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             r.approvals.push(json!({ "id": id, "tool": name, "args": args, "ts": now_ms() }));
             push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
             push_msg(&mut r, "tool", &format!("MENUNGGU PERSETUJUAN: {name} {} (id {id})", serde_json::to_string(&pub_args).unwrap_or_default().chars().take(300).collect::<String>()));
+            pause_run(&mut r);
             paused = true;
             final_text = format!("{}\n\n⏳ Aku butuh izinmu untuk {name} — cek panel Assistant.", strip_tool_directive(&reply));
             break;
@@ -605,13 +868,17 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 "ERROR: task kosong — kirim {tasks:[{task:'...'}]} atau {task:'...'}".to_string()
             } else {
                 bus::emit("tool_call_start", "spawn_subagent");
-                let out = crate::agent::subagent::run_batch(config_path, root, &work_dir, tasks).await;
+                let out = crate::agent::subagent::run_batch(config_path, root, &work_dir, tasks, cancel_rx.clone()).await;
                 bus::emit("tool_call_end", "spawn_subagent");
                 out
             };
             let mut r = rt().lock().await;
+            r.run_seq += 1;
+            if let Some(rid) = r.run_id {
+                store::log_tool(rid, r.run_seq, "spawn_subagent", "safe", &loop_::public_tool_args("spawn_subagent", &args), &result, 0);
+            }
             push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
-            push_msg(&mut r, "tool", &format!("[spawn_subagent] {}", clip_tool(&result)));
+            push_msg(&mut r, "tool", &format!("[spawn_subagent] {}{result_suffix}", clip_tool(&result)));
             continue;
         }
 
@@ -627,15 +894,25 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                         // Rencana disusun pada tugas ini → plan-approval
                         // ter-armed (kontrak plan_gate_required).
                         r.plan_seq = r.ask_seq;
-                        format!("Rencana diperbarui: {}", plan::plan_label(&r.plan))
+                        if let Some(rid) = r.run_id {
+                            store::set_plan(rid, &r.plan);
+                        }
+                        // Kontrak verifikasi: langkah done tanpa note bukti
+                        // diperingatkan langsung di hasil tool (aturan 13).
+                        let warning = plan::unverified_done_warning(&r.plan);
+                        format!("Rencana diperbarui: {}{}", plan::plan_label(&r.plan), warning)
                     } else {
                         format!("ERROR: {}", why.unwrap_or_default())
                     }
                 }
             };
             let mut r = rt().lock().await;
+            r.run_seq += 1;
+            if let Some(rid) = r.run_id {
+                store::log_tool(rid, r.run_seq, "update_plan", "safe", &loop_::public_tool_args("update_plan", &args), &result, 0);
+            }
             push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
-            push_msg(&mut r, "tool", &format!("[update_plan] {result}"));
+            push_msg(&mut r, "tool", &format!("[update_plan] {result}{result_suffix}"));
             continue;
         }
 
@@ -645,6 +922,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         // undo wajib sama seperti jalur approve().
         let is_mutating = level == Some("mutating");
         let snap = if is_mutating { snapshot_before(&wd, &name, &args) } else { None };
+        let tool_started = std::time::Instant::now();
         // Label bus mengikuti kontrak panel (transcript.applyBus):
         //   tool_call_start → "name {json args…}"
         //   tool_call_end   → "name → hasil"
@@ -659,9 +937,10 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             };
             crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map).await
         } else {
-            loop_::exec_tool(root, &wd, &name, &args)
+            loop_::exec_tool(root, &wd, &name, &args, &mut cancel_rx).await
         };
         bus::emit("tool_call_end", &format!("{name} → {}", first_line(&result, 160)));
+        let duration_ms = tool_started.elapsed().as_millis() as u64;
         // Tandai + tangkap draft bila validasi lolos (report validator, bukan
         // ERROR) — dipakai untuk mengajukan motion_save bila model berhenti di
         // narasi. Hanya draft dengan tracks yang layak disimpan.
@@ -675,6 +954,14 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             }
         }
         let mut r = rt().lock().await;
+        // Observability: catat eksekusi tool ke store (fail-soft) — argumen
+        // lewat public_tool_args, isi file direraksi store::redact_args.
+        {
+            r.run_seq += 1;
+            if let Some(rid) = r.run_id {
+                store::log_tool(rid, r.run_seq, &name, level.unwrap_or("safe"), &loop_::public_tool_args(&name, &args), &result, duration_ms);
+            }
+        }
         if is_mutating {
             // Mutasi tereksekusi pada tugas ini → plan-approval dilucuti
             // (kontrak: gate hanya SEBELUM mutasi pertama).
@@ -692,11 +979,29 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 let id = format!("ap_{}", crate::config::base36_pub(now_ms() as u128));
                 let mut r = rt().lock().await;
                 push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
-                push_msg(&mut r, "tool", &format!("[{name}] {result}"));
+                push_msg(&mut r, "tool", &format!("[{name}] {result}{result_suffix}"));
                 r.approvals.push(json!({ "id": id, "kind": "captcha", "tool": name, "args": { "captcha": kind }, "ts": now_ms() }));
                 bus::emit("permission_request", "captcha");
+                pause_run(&mut r);
                 paused = true;
                 final_text = format!("⏳ Captcha ({kind}) terdeteksi di halaman. Selesaikan di jendela browser, lalu tekan lanjut di panel.");
+                break;
+            }
+            // Halaman login/MFA → jeda yang sama: kredensial HANYA boleh diisi
+            // user langsung di jendela browser (tool type menolak field
+            // rahasia). Setelah user login & menekan lanjut, loop memeriksa
+            // ulang halaman dan tugas berlanjut dari state yang sama.
+            let lnote = crate::browser::login_note().await;
+            if let Some(hint) = lnote.get("login").and_then(|k| k.as_str()) {
+                let id = format!("ap_{}", crate::config::base36_pub(now_ms() as u128));
+                let mut r = rt().lock().await;
+                push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
+                push_msg(&mut r, "tool", &format!("[{name}] {result}{result_suffix}\n{hint}"));
+                r.approvals.push(json!({ "id": id, "kind": "login", "tool": name, "args": {}, "ts": now_ms() }));
+                bus::emit("permission_request", "login");
+                pause_run(&mut r);
+                paused = true;
+                final_text = "⏳ Halaman login terdeteksi — aku jeda di sini. Isi kredensial LANGSUNG di jendela browser (password/OTP hanya boleh kamu isi sendiri), lalu tekan lanjut di panel Assistant.".to_string();
                 break;
             }
         }
@@ -704,19 +1009,32 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             bus::emit("undo_unavailable", "run_command tidak bisa di-undo — efeknya permanen");
         }
         push_msg(&mut r, "assistant", &strip_tool_directive(&reply));
-        push_msg(&mut r, "tool", &format!("[{name}] {}", clip_tool(&result)));
+        push_msg(&mut r, "tool", &format!("[{name}] {}{result_suffix}", clip_tool(&result)));
     }
 
     if final_text.is_empty() {
-        final_text = format!("(berhenti tanpa jawaban setelah {MAX_ITERATIONS} langkah — coba pecah tugasnya)");
+        run_status = "stopped";
+        final_text = if timed_out {
+            format!("(berhenti: batas waktu tugas {} menit tercapai — coba pecah tugasnya)", TASK_MAX_DURATION_MS / 60_000)
+        } else {
+            format!("(berhenti tanpa jawaban setelah {MAX_ITERATIONS} langkah — coba pecah tugasnya)")
+        };
     }
     let final_clean = strip_tool_directive(&final_text);
     if !paused {
         bus::emit("final_answer", "");
+        // Run selesai untuk semua jalur non-pause (final normal, macet,
+        // timeout, iterasi habis) — status "stopped" bila tanpa jawaban.
+        let mut r = rt().lock().await;
+        finish_run(&mut r, run_status, if run_status == "stopped" { Some(final_clean.as_str()) } else { None });
     }
     {
         let mut r = rt().lock().await;
         push_msg(&mut r, "assistant", &final_clean);
+        // paused = loop exit sambil menunggu keputusan approval: slot TIDAK
+        // dilepas (busy tetap true) tapi runtime mencatat keadaannya supaya
+        // cancel()/modify() tahu harus membersihkan sendiri (loop sudah exit).
+        r.paused = paused;
         if !paused {
             r.busy = false;
             r.active_task = None;
@@ -829,14 +1147,27 @@ pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, s
         // menyisipkan pesan di history dan approval lama jadi bermakna ganda.
         // Sekarang ditolak dengan pesan jelas (panel menampilkannya apa adanya).
         if r.busy {
-            return AskResult { ok: false, reply: String::new(), paused: false, error: Some("masih ada tugas yang sedang berjalan — tunggu selesai atau batalkan dulu".into()) };
+            let msg = if r.paused {
+                "agent sedang menunggu keputusanmu di panel — setujui, tolak, atau batalkan dulu".to_string()
+            } else {
+                "masih ada tugas yang sedang berjalan — tunggu selesai atau batalkan dulu".to_string()
+            };
+            return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
         }
         if !r.approvals.is_empty() {
             return AskResult { ok: false, reply: String::new(), paused: false, error: Some("agent sedang menunggu keputusanmu di panel — setujui atau tolak dulu".into()) };
         }
         r.running = true;
         r.busy = true;
-        r.cancel = false;
+        r.paused = false;
+        let _ = r.cancel_tx.send(false); // sinyal sisa tugas lampau dibuang
+        r.data_dir = Some(data_dir.to_path_buf());
+        // Store observability: buka (idempoten) lalu catat run baru. Fail-soft —
+        // kegagalan disk tidak boleh menggagalkan tugas.
+        store::init(root);
+        let sid = r.session_id.clone();
+        r.run_id = None;
+        r.run_seq = 0;
         let t: String = text.chars().take(4000).collect();
         let tid = format!("t_{}", r.next_task_seq);
         r.next_task_seq += 1;
@@ -848,6 +1179,12 @@ pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, s
         r.llm_calls = 0;
         r.active_task = Some(json!({ "taskId": tid, "prompt": t.chars().take(120).collect::<String>(), "status": "running" }));
         push_msg(&mut r, "user", &t);
+        // Run observability dimulai SETELAH tugas dikenal — catat teks tugas
+        // agar run_history bisa menemukannya. Fail-soft.
+        {
+            let model_now = r.model.clone();
+            r.run_id = store::begin_run(&sid, &t, &model_now);
+        }
         // Persist giliran user ke sesi terikat SEBELUM loop (tugas jalan lama
         // pun sudah tercatat; approval resume menambah giliran final nanti).
         let sid = r.session_id.clone();
@@ -875,10 +1212,23 @@ pub async fn modify(config_path: &Path, root: &Path, data_dir: &Path, _task_id: 
         return json!({ "ok": false, "error": "assistant mode tidak aktif" });
     }
     if busy {
-        // Batalkan tugas aktif; pengganti dijalankan di background begitu slot bebas.
+        // Pengganti dijalankan di background begitu slot bebas. Dua keadaan:
+        // - paused (menunggu approval; loop sudah exit): buang kartu menggantung
+        //   + lepas slot LANGSUNG — dulu modify di keadaan ini hanya menyetel
+        //   flag batal yang tak pernah dikonsumsi, tugas pengganti menunggu 60
+        //   detik lalu gagal senyap.
+        // - berjalan: set sinyal batal (dibaca loop/LLM/run_command real-time).
         {
             let mut r = rt().lock().await;
-            r.cancel = true;
+            if r.paused {
+                r.approvals.clear();
+                r.busy = false;
+                r.paused = false;
+                r.active_task = None;
+                bus::emit("error", "approval menggantung dibuang: tugas diganti user");
+            } else {
+                let _ = r.cancel_tx.send(true);
+            }
             push_msg(&mut r, "assistant", "(tugas diganti user)");
         }
         let cp = config_path.to_path_buf();
@@ -923,24 +1273,32 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
         Some(p) => p,
         None => return AskResult { ok: false, reply: String::new(), paused: false, error: Some(format!("approval tidak dikenal: {id}")) },
     };
+    // Loop akan dilanjutkan di bawah — keadaan pause berakhir di sini.
+    rt().lock().await.paused = false;
+    let mut cancel_rx = cancel_receiver().await;
     let name = pending.get("tool").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let args = pending.get("args").cloned().unwrap_or(json!({}));
     let work_dir = { rt().lock().await.work_dir.clone() };
     let wd = PathBuf::from(work_dir);
 
-    // Captcha: bukan eksekusi tool. "Lanjut" = inspect ulang halaman; bila
-    // captcha masih ada, kartu dikembalikan dan loop tidak jalan.
-    if pending.get("kind").and_then(|x| x.as_str()) == Some("captcha") {
+    // Captcha & login: bukan eksekusi tool. "Lanjut" = inspect ulang halaman;
+    // bila captcha/login masih ada, kartu dikembalikan dan loop tidak jalan.
+    let kind = pending.get("kind").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    if kind == "captcha" || kind == "login" {
         let result = crate::browser::agent_exec(root, "browser_inspect", &json!({})).await;
         if crate::browser::captcha_note().await.get("captcha").is_some() {
             rt().lock().await.approvals.push(pending);
             return AskResult { ok: false, reply: String::new(), paused: true, error: Some("captcha masih terdeteksi — selesaikan dulu di jendela browser".into()) };
         }
+        if crate::browser::login_note().await.get("login").is_some() {
+            rt().lock().await.approvals.push(pending);
+            return AskResult { ok: false, reply: String::new(), paused: true, error: Some("masih di halaman login — selesaikan login dulu di jendela browser (password/OTP diisi kamu sendiri), lalu tekan lanjut".into()) };
+        }
         let mut r = rt().lock().await;
         push_msg(&mut r, "tool", &format!("[browser_inspect] {result}"));
-        push_msg(&mut r, "tool", "User menyelesaikan captcha; halaman sudah diperiksa ulang. Lanjutkan tugas.");
+        push_msg(&mut r, "tool", &format!("User menyelesaikan {kind}; halaman sudah diperiksa ulang. Lanjutkan tugas dari state halaman sekarang."));
         drop(r);
-        bus::emit("permission_resolved", "captcha: lanjut");
+        bus::emit("permission_resolved", &format!("{kind}: lanjut"));
         return run_loop(config_path, root, data_dir).await;
     }
 
@@ -971,6 +1329,7 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
         // Snapshot undo SEBELUM tool mutasi file (write/edit/delete) dieksekusi.
         let snap = snapshot_before(&wd, &name, &args);
         bus::emit("tool_call_start", &format!("{name} {}", serde_json::to_string(&args).unwrap_or_default()));
+        let tool_started = std::time::Instant::now();
         let result = if loop_::is_browser_tool(&name) {
             crate::browser::agent_exec(root, &name, &args).await
         } else if loop_::is_motion_tool(&name) {
@@ -980,11 +1339,17 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
             };
             crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map).await
         } else {
-            loop_::exec_tool(root, &wd, &name, &args)
+            loop_::exec_tool(root, &wd, &name, &args, &mut cancel_rx).await
         };
         bus::emit("tool_call_end", &format!("{name} → {}", first_line(&result, 160)));
         let ok = !result.starts_with("ERROR");
         let mut r = rt().lock().await;
+        {
+            r.run_seq += 1;
+            if let Some(rid) = r.run_id {
+                store::log_tool(rid, r.run_seq, &name, loop_::tool_level(&name).unwrap_or("safe"), &loop_::public_tool_args(&name, &args), &result, tool_started.elapsed().as_millis() as u64);
+            }
+        }
         // Mutasi tereksekusi pada tugas ini → plan-approval dilucuti.
         if loop_::tool_level(&name) == Some("mutating") {
             r.mutated = true;
@@ -1432,12 +1797,12 @@ mod tests {
         let cfg = mock_config(&wd);
         start(&wd.to_string_lossy(), "", Value::Null).await;
 
-        // (1) flag sisa dibuang ask baru — jawaban bukan "Dibatalkan".
-        { rt().lock().await.cancel = true; }
+        // (1) sinyal sisa dibuang ask baru — jawaban bukan "Dibatalkan".
+        { let _ = rt().lock().await.cancel_tx.send(true); }
         let r = ask(&cfg, &wd, &data, "tugas segar", None).await;
         assert!(r.ok);
         assert_ne!(r.reply, "Dibatalkan oleh user.");
-        assert!(!rt().lock().await.cancel);
+        assert!(!*rt().lock().await.cancel_rx.borrow());
 
         // (2) cancel di tengah ask (mock delay 300 ms): flag dibaca antar-turn —
         // mock final di turn 0, jadi ask tetap selesai normal; yang dikunci:
@@ -1466,6 +1831,83 @@ mod tests {
         let _ = std::fs::remove_dir_all(&wd);
     }
 
+    #[tokio::test]
+    async fn cancel_saat_pause_membuang_kartu_dan_melepas_slot() {
+        // Pause = loop sudah exit sambil menunggu keputusan approval. Dulu
+        // cancel hanya menyetel flag yang tak pernah dikonsumsi (loop exit) —
+        // slot menggantung sampai user memaksa approve/reject. Sekarang cancel
+        // membersihkan sendiri: kartu dibuang, slot lepas, ask berikut jalan.
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("cancpause");
+        let data = dir.join("data");
+        stop().await;
+        let f = mock_config(&dir);
+        start(&dir.to_string_lossy(), "", Value::Null).await;
+        {
+            let mut r = rt().lock().await;
+            r.busy = true;
+            r.paused = true;
+            r.active_task = Some(json!({ "taskId": "t_9", "prompt": "x", "status": "running" }));
+            r.approvals.push(json!({ "id": "ap_pause", "tool": "write_file", "args": {}, "ts": now_ms() }));
+        }
+        let c = cancel().await;
+        assert_eq!(c["accepted"], true);
+        let st = status().await;
+        assert_eq!(st["busy"], json!(false), "pause + cancel → slot lepas");
+        assert_eq!(st["pendingApprovals"].as_array().unwrap().len(), 0, "kartu menggantung dibuang");
+        assert_eq!(st["activeTask"], Value::Null);
+        // Slot benar-benar bebas: ask berikutnya diterima (mock → final).
+        let res = ask(&f, &dir, &data, "halo lagi", None).await;
+        assert!(res.ok, "ask setelah cancel-pause harus jalan: {:?}", res.error);
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn modify_saat_pause_menjalankan_pengganti() {
+        // modify saat tugas menggantung di approval: kartu dibuang, slot lepas,
+        // tugas pengganti berjalan (dulu: pengganti menunggu 60 detik lalu
+        // ditolak "menunggu keputusan" — gagal senyap).
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        let dir = tmp_dir("modpause");
+        let data = dir.join("data");
+        let f = mock_config(&dir);
+        stop().await;
+        start(&dir.to_string_lossy(), "", Value::Null).await;
+        {
+            let mut r = rt().lock().await;
+            r.busy = true;
+            r.paused = true;
+            r.approvals.push(json!({ "id": "ap_pause2", "tool": "write_file", "args": {}, "ts": now_ms() }));
+        }
+        let res = modify(&f, &dir, &data, "t_0", "tugas pengganti").await;
+        assert_eq!(res["ok"], json!(true), "{res}");
+        // Tunggu tugas pengganti benar-benar dimulai (user msg masuk history) —
+        // busy bisa terlihat false sejenak antara cleanup dan ask() yang
+        // di-spawn, jadi tanda hidupnya adalah history, bukan slot.
+        let mut started = false;
+        for _ in 0..300 {
+            if rt().lock().await.history.iter().any(|m| m["content"].as_str().unwrap_or("") == "tugas pengganti") {
+                started = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(started, "tugas pengganti harus masuk history");
+        // Tunggu tugas pengganti (mock echo → final cepat) menyelesaikan slot.
+        for _ in 0..300 {
+            if !rt().lock().await.busy {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let st = status().await;
+        assert_eq!(st["busy"], json!(false), "pengganti selesai → slot lepas");
+        assert_eq!(st["pendingApprovals"].as_array().unwrap().len(), 0, "kartu pause dibuang modify");
+        stop().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn trim_history_pertahankan_tujuan_awal() {
         let mut h: Vec<Value> = vec![json!({ "role": "user", "content": "tujuan" })];
@@ -1476,6 +1918,27 @@ mod tests {
         assert_eq!(h.len(), MAX_HISTORY);
         assert_eq!(h[0]["content"], "tujuan", "pesan user pertama harus tetap ada");
         assert_eq!(h[MAX_HISTORY - 1]["content"], format!("langkah {}", MAX_HISTORY + 9));
+    }
+
+    #[test]
+    fn trim_history_anggaran_konten() {
+        let _g = bus::BUS_TEST_LOCK.lock().unwrap();
+        // Hasil tool besar menumpuk: 60 pesan ≤ batas jumlah, tapi total char
+        // meledakkan konteks model kecil → anggaran char memangkas dari tua.
+        let big = "x".repeat(3000);
+        let mut h: Vec<Value> = vec![json!({ "role": "user", "content": "tujuan" })];
+        for i in 0..MAX_HISTORY {
+            h.push(json!({ "role": "assistant", "content": format!("{big}{i}") }));
+        }
+        trim_history(&mut h);
+        assert!(h.len() < MAX_HISTORY, "harus dipangkas oleh anggaran char: {}", h.len());
+        assert_eq!(h[0]["content"], "tujuan", "tujuan tugas dipertahankan");
+        assert!(h.len() >= 2, "minimal tujuan + pesan terbaru");
+        let total: usize = h.iter().map(|m| m["content"].as_str().unwrap_or("").len()).sum();
+        assert!(
+            total <= MAX_HISTORY_CHARS + 3000,
+            "total {total} harus mendekati anggaran {MAX_HISTORY_CHARS} (toleransi 1 pesan)"
+        );
     }
 
     #[tokio::test]

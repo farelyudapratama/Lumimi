@@ -32,14 +32,17 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef { name: "remember", params: "key: string, value: string", level: "safe" },
     ToolDef { name: "recall", params: "key: string opsional", level: "safe" },
     ToolDef { name: "memory_recall", params: "query: string, limit: number opsional — cari MEMORI USER lintas sesi (fakta/preferensi/keputusan companion; beda store dgn recall)", level: "safe" },
+    ToolDef { name: "run_history", params: "query: string opsional (kosong = tugas terbaru), limit: number opsional — telusuri TUGAS & HASIL TOOL masa lalu dari store observability (beda dari recall/memory_recall)", level: "safe" },
     ToolDef { name: "spawn_subagent", params: "tasks: [{task: deskripsi goal}] — delegasi riset/analisa INDEPENDEN ke subagent read-only paralel (maks 4)", level: "safe" },
     ToolDef { name: "browser_status", params: "", level: "safe" },
     ToolDef { name: "browser_open", params: "url: string opsional — kosong = luncurkan browser di halaman kosong; isi URL dari tugas user bila ada — buka browser terisolasi", level: "mutating" },
     ToolDef { name: "browser_navigate", params: "url: string", level: "mutating" },
     ToolDef { name: "browser_inspect", params: "cursor: number opsional, maxChars: number opsional (maks 3500), snapshotId: string opsional — bila hasil memuat captcha+captchaHint: STOP, beri tahu user menyelesaikan captcha manual di jendela browser dan tunggu konfirmasi; jangan mencoba menyelesaikannya", level: "safe" },
     ToolDef { name: "browser_click", params: "snapshotId: string, ref: string (dari inspect terakhir)", level: "mutating" },
-    ToolDef { name: "browser_type", params: "snapshotId: string, ref: string, text: string, submit: boolean opsional", level: "mutating" },
+    ToolDef { name: "browser_type", params: "snapshotId: string, ref: string, text: string, submit: boolean opsional — DITOLAK untuk field password/rahasia: minta user mengisinya sendiri di jendela browser", level: "mutating" },
     ToolDef { name: "browser_history", params: "action: back|forward|reload", level: "mutating" },
+    ToolDef { name: "browser_screenshot", params: "", level: "safe" },
+    ToolDef { name: "browser_tabs", params: "action: list|new|select|close, index: number opsional (wajib untuk select/close) — kelola tab; snapshot & aksi milik TAB AKTIF", level: "mutating" },
     ToolDef { name: "browser_close", params: "", level: "mutating" },
     ToolDef { name: "browser_grant_private", params: "origin: http/https tanpa path (izinkan localhost/LAN sesi ini)", level: "mutating" },
     ToolDef { name: "motion_analyze", params: "model: string opsional (default model aktif) — laporan range observasi per role + output physics dari disk", level: "safe" },
@@ -76,6 +79,7 @@ pub fn required_args(name: &str) -> &'static [(&'static str, &'static str)] {
         "browser_click" => &[("snapshotId", "string"), ("ref", "string")],
         "browser_type" => &[("snapshotId", "string"), ("ref", "string"), ("text", "string")],
         "browser_history" => &[("action", "string")],
+        "browser_tabs" => &[("action", "string")],
         "browser_grant_private" => &[("origin", "string")],
         "motion_validate" | "motion_save" => &[("motion", "object")],
         _ => &[],
@@ -110,6 +114,11 @@ pub fn validate_args(name: &str, args: &Value) -> Option<String> {
 /// `TOOL: ...` kanonik. Protokol teks tetap jalan untuk SEMUA model — ini
 /// lapisan TAMBAHAN, bukan pengganti (provider yang menolak param `tools`
 /// otomatis dicoba ulang tanpanya, lihat llm.rs).
+///
+/// Argumen OPSIONAL ikut masuk `properties` (tanpa `required`): model lemah
+/// sering menyerah pada argumen yang tak terlihat di skema — dulu hanya arg
+/// wajib yang terdaftar sehingga `submit`, `path`, `limit`, `cursor` dkk.
+/// sering dihilangkan atau dikarang.
 pub fn tool_defs_json() -> Vec<Value> {
     TOOLS
         .iter()
@@ -119,6 +128,10 @@ pub fn tool_defs_json() -> Vec<Value> {
             for (field, ty) in required_args(t.name) {
                 props.insert((*field).into(), json!({ "type": ty }));
                 required.push(json!(field));
+            }
+            for (field, ty) in optional_args(t.name) {
+                props.entry((*field).to_string())
+                    .or_insert_with(|| json!({ "type": ty }));
             }
             json!({
                 "type": "function",
@@ -130,6 +143,23 @@ pub fn tool_defs_json() -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// Argumen OPSIONAL per tool — hanya untuk skema native FC (prompt teks sudah
+/// memuatnya di string params). Tipe dijaga sama dengan required_args.
+pub fn optional_args(name: &str) -> &'static [(&'static str, &'static str)] {
+    match name {
+        "list_dir" => &[("path", "string")],
+        "recall" => &[("key", "string")],
+        "search_code" => &[("path", "string")],
+        "memory_recall" => &[("limit", "number")],
+        "run_history" => &[("query", "string"), ("limit", "number")],
+        "browser_open" => &[("url", "string")],
+        "browser_inspect" => &[("cursor", "number"), ("maxChars", "number"), ("snapshotId", "string")],
+        "browser_type" => &[("submit", "boolean")],
+        "motion_analyze" => &[("model", "string")],
+        _ => &[],
+    }
 }
 
 pub fn tool_level(name: &str) -> Option<&'static str> {
@@ -164,8 +194,9 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "8. PLAN: if an update_plan list exists for this task, keep it LIVE — when you start a step call update_plan marking it in_progress, when you finish it mark done (or failed). Before your final answer every step must be done/failed. If the task needs no plan, do not create one.",
             "9. MEMORY: user prefs / key decisions → remember (short key). Need context → recall. Need USER FACTS across sessions (favorite color, city, decisions) → memory_recall with a free-form query.",
             "10. TOOL FAILED: in the final reply state the ACTUAL cause from the '[hasil tool] ERROR: …' line (condensed is fine, quote the key phrase). NEVER invent a cause the error does not state (e.g. claiming 'no internet' or 'unsafe' when the error says something else). If the error names a next step (e.g. browser_grant_private), do it before giving up.",
-            "11. BROWSER: required order browser_open/browser_navigate → browser_inspect → browser_click/browser_type (use snapshotId and ref FROM the latest inspect, never guess a ref). After a navigation, history change, or a click that changes the page, the snapshot is stale: inspect again before the next action. localhost/LAN pages need browser_grant_private first. If browser_inspect returns a captcha, stop and ask the user to solve it.",
+            "11. BROWSER: required order browser_open/browser_navigate → browser_inspect → browser_click/browser_type (use snapshotId and ref FROM the latest inspect, never guess a ref). After a navigation, history change, or a click that changes the page, the snapshot is stale: inspect again before the next action. localhost/LAN pages need browser_grant_private first. If browser_inspect returns a captcha, stop and ask the user to solve it. If inspect returns login/loginHint: NEVER type passwords/OTP — the task pauses automatically; the user fills credentials in the browser window and presses continue. If login=google_blocked: Google blocks sign-in from automated browsers (their policy, not a bug) — explain honestly, do NOT retry sign-in.",
             "12. WEB DEV: to test a web app being built, first check the server with run_command (e.g. curl), then open the localhost URL in the browser. Report what is actually visible on the page, not assumptions.",
+            "13. VERIFY BEFORE CLAIMING DONE: before marking a plan step done (or saying a task is finished), run a REAL check — tests/lint/build via run_command for code changes, read_file for file content, browser_inspect for page state. Put the evidence in the step note. File tools already verify writes by reading back; if a tool reports verification failure, treat it as NOT done and fix it. Never claim success based on intention.",
         ]
     } else {
         &[
@@ -180,8 +211,9 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
             "8. RENCANA: kalau ada daftar update_plan untuk tugas ini, JAGA tetap hidup — saat mulai satu langkah panggil update_plan yang menandainya in_progress, saat selesai tandai done (atau failed). Sebelum jawaban final, semua langkah harus done/failed. Kalau tugas tak butuh rencana, jangan buat.",
             "9. MEMORY: preferensi/keputusan penting → remember (key singkat). Butuh konteks → recall. Butuh FAKTA/PREFERENSI USER lintas sesi (warna favorit, kota, keputusan) → memory_recall dengan query bebas.",
             "10. TOOL GAGAL: di jawaban final sebutkan SEBAB ASLI dari baris '[hasil tool] ERROR: …' (boleh diringkas, kutip frasa kuncinya). JANGAN mengarang sebab yang tidak tertulis di error (mis. bilang 'internet mati' atau 'tidak aman' padahal error bilang hal lain). Bila error menyarankan langkah berikutnya (mis. browser_grant_private), jalankan dulu sebelum menyerah.",
-            "11. BROWSER: urutan wajib browser_open/browser_navigate → browser_inspect → browser_click/browser_type (pakai snapshotId dan ref DARI inspect terakhir, jangan menebak ref). Setelah navigasi, history, atau klik yang mengubah halaman, snapshot lama basi: inspect ulang sebelum aksi berikutnya. Halaman localhost/LAN butuh browser_grant_private dulu. Kalau browser_inspect memuat captcha, berhenti dan minta user menyelesaikannya.",
+            "11. BROWSER: urutan wajib browser_open/browser_navigate → browser_inspect → browser_click/browser_type (pakai snapshotId dan ref DARI inspect terakhir, jangan menebak ref). Setelah navigasi, history, atau klik yang mengubah halaman, snapshot lama basi: inspect ulang sebelum aksi berikutnya. Halaman localhost/LAN butuh browser_grant_private dulu. Kalau browser_inspect memuat captcha, berhenti dan minta user menyelesaikannya. Kalau inspect memuat login/loginHint: JANGAN pernah mengetik password/OTP — tugas otomatis dijeda; user mengisi kredensial sendiri di jendela browser lalu menekan lanjut. Kalau login=google_blocked: Google memblokir sign-in dari browser otomatis (kebijakan mereka, bukan bug) — jelaskan dengan jujur, JANGAN mengulang sign-in.",
             "12. WEB DEV: untuk menguji aplikasi web yang sedang dibuat, cek server dulu dengan run_command (mis. curl) lalu buka URL localhost lewat browser. Laporkan hasil nyata yang terlihat di halaman, bukan asumsi.",
+            "13. VERIFIKASI SEBELUM MENGAKU SELESAI: sebelum menandai langkah rencana 'done' (atau menyatakan tugas selesai), jalankan pemeriksaan NYATA — test/lint/build lewat run_command untuk perubahan kode, read_file untuk isi file, browser_inspect untuk keadaan halaman. Cantumkan buktinya di note langkah. Tool file sudah memverifikasi tulisan dengan membaca ulang; bila tool melaporkan kegagalan verifikasi, perlakukan sebagai BELUM selesai dan perbaiki. Jangan pernah klaim sukses berdasarkan niat.",
         ]
     };
     let final_line = if en {
@@ -239,9 +271,13 @@ pub fn detect_tool_call(reply: &str) -> Option<(String, Value)> {
             // Draft motion dkk. membawa JSON BERSARANG yang panjang (tracks/
             // keys) — window kecil + kurung-pertama memotong di `}` dalam dan
             // parse selalu gagal. Ambil objek ber-imbangan (string-aware)
-            // dari window besar.
-            let window: String = clean[after_start..].chars().take(8000).collect();
-            if let Some(obj) = first_brace_obj(&window) {
+            // dari window besar (16k char — draft multi-track bisa melewati 8k).
+            let window: String = clean[after_start..].chars().take(16000).collect();
+            // Objek seimbang utama; bila tidak ada (output model terpotong di
+            // tengah JSON), rescue: perbaiki kurung/string menggantung dari
+            // '{' pertama. Tanpa ini panggilan yang 95% benar dibuang utuh.
+            let candidate = first_brace_obj(&window).or_else(|| repair_truncated_json(&window));
+            if let Some(obj) = candidate {
                 if let Ok(v) = serde_json::from_str::<Value>(&obj) {
                     return Some((name.to_string(), v));
                 }
@@ -251,6 +287,98 @@ pub fn detect_tool_call(reply: &str) -> Option<(String, Value)> {
                     return Some((name.to_string(), v));
                 }
             }
+        }
+    }
+    None
+}
+
+/// Perbaiki JSON TERPOTONG (output model kehabisan budget di tengah objek):
+/// tutup string & kurung yang menggantung; bila tetap invalid, potong segmen
+/// menggantung terakhir (setelah koma/colon di luar string) lalu coba lagi —
+/// kandidat potong dicoba dari paling belakang. Return string JSON valid atau
+/// None. Ini rescue terakhir SEBELUM umpan-balik ke model, bukan jalur utama.
+pub fn repair_truncated_json(s: &str) -> Option<String> {
+    let close_open = |src: &str| -> String {
+        let mut out = String::with_capacity(src.len() + 8);
+        let mut stack: Vec<char> = Vec::new();
+        let (mut in_str, mut esc) = (false, false);
+        for c in src.chars() {
+            out.push(c);
+            if esc {
+                esc = false;
+                continue;
+            }
+            if in_str {
+                if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    in_str = false;
+                }
+                continue;
+            }
+            match c {
+                '"' => in_str = true,
+                '{' | '[' => stack.push(c),
+                '}' | ']' => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        if in_str {
+            out.push('"');
+        }
+        for c in stack.iter().rev() {
+            out.push(if *c == '{' { '}' } else { ']' });
+        }
+        out
+    };
+    // Kandidat potong: posisi koma/colon terakhir di luar string. Urutan
+    // percobaan: (1) tutup penuh TANPA potong — informasi paling utuh;
+    // (2) potong dari segmen menggantung PALING BELAKANG (paling sedikit
+    // hilang) ke belakang; (3) fallback objek kosong.
+    let close = |src: &str| -> Option<String> {
+        let closed = close_open(src);
+        match serde_json::from_str::<Value>(&closed) {
+            Ok(v) if v.is_object() => Some(closed),
+            _ => None,
+        }
+    };
+    if let Some(ok) = close(s) {
+        return Some(ok);
+    }
+    let bytes: Vec<char> = s.chars().collect();
+    let (mut in_str, mut esc) = (false, false);
+    let mut cuts: Vec<usize> = Vec::new();
+    for (i, c) in bytes.iter().enumerate() {
+        if esc {
+            esc = false;
+            continue;
+        }
+        if in_str {
+            if *c == '\\' {
+                esc = true;
+            } else if *c == '"' {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            ',' | ':' => cuts.push(i),
+            _ => {}
+        }
+    }
+    for cut in cuts.iter().rev() {
+        let head: String = bytes[..*cut].iter().collect();
+        if let Some(ok) = close(&head) {
+            return Some(ok);
+        }
+    }
+    // Fallback terakhir: buang semua isi → {}.
+    if let Some(brace) = s.find('{') {
+        if let Some(ok) = close(&s[..brace + 1]) {
+            return Some(ok);
         }
     }
     None
@@ -276,6 +404,16 @@ fn detect_native_tool_call(s: &str) -> Option<(String, Value)> {
         other => other,
     };
     Some((name, args))
+}
+
+/// Hitung direktif tool dalam satu balasan (baris `TOOL:` + blok
+/// `<tool_call>`). Dipakai loop untuk memberi tahu model bila dia mengirim
+/// lebih dari satu panggilan dalam satu giliran — dulu panggilan kedua
+/// lenyap diam-diam dan model mengira aksinya sudah terjadi.
+pub fn count_tool_directives(reply: &str) -> usize {
+    let lines = reply.lines().filter(|l| l.trim_start().to_lowercase().starts_with("tool:")).count();
+    let native = reply.to_lowercase().matches("<tool_call>").count();
+    lines + native
 }
 
 /// Buang pasangan blok `open`…`close` (case-insensitive). Blok tanpa penutup →
@@ -399,9 +537,16 @@ fn looseify(obj: &str) -> String {
     out
 }
 
-/// Eksekusi satu tool. `root` = app root (utk memory), `work_dir` = folder kerja.
+/// Eksekusi satu tool. `root` = app root (utk memory), `work_dir` = folder kerja,
+/// `cancel` = sinyal batal (run_command meng-kill child saat menyala).
 /// Selalu mengembalikan String (ERROR: … bukan panic) — sesuai kontrak loop.
-pub fn exec_tool(root: &Path, work_dir: &Path, name: &str, args: &Value) -> String {
+pub async fn exec_tool(
+    root: &Path,
+    work_dir: &Path,
+    name: &str,
+    args: &Value,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> String {
     let s = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let res: Result<String, String> = match name {
         "list_dir" => tools::list_dir(work_dir, &s(args, "path")),
@@ -414,7 +559,7 @@ pub fn exec_tool(root: &Path, work_dir: &Path, name: &str, args: &Value) -> Stri
         "write_file" => tools::write_file(work_dir, &s(args, "path"), &s(args, "content")),
         "edit_file" => tools::edit_file(work_dir, &s(args, "path"), &s(args, "old"), &s(args, "new")),
         "delete_file" => tools::delete_file(work_dir, &s(args, "path")),
-        "run_command" => Ok(tools::run_command(work_dir, &s(args, "command"))),
+        "run_command" => Ok(tools::run_command_async(work_dir, &s(args, "command"), cancel).await),
         "remember" => Ok(memory::remember(root, &s(args, "key"), &s(args, "value"))),
         "recall" => {
             let key = args.get("key").and_then(|x| x.as_str());
@@ -429,6 +574,14 @@ pub fn exec_tool(root: &Path, work_dir: &Path, name: &str, args: &Value) -> Stri
             let limit = args.get("limit").and_then(|x| x.as_u64()).unwrap_or(6) as usize;
             let store = crate::companion_memory::retrieve(&root.join("data"), &query, limit);
             Ok(crate::companion_memory::entries_as_text(&store))
+        }
+        // Jejak tugas lampau dari store observability (SQLite) — agent bisa
+        // mengecek "apa yang sudah pernah dicoba" sebelum mengulang percobaan.
+        "run_history" => {
+            let query = args.get("query").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let limit = args.get("limit").and_then(|x| x.as_u64()).unwrap_or(5).clamp(1, 20) as usize;
+            let runs = crate::agent::store::runs(limit, query.as_deref());
+            Ok(crate::agent::store::runs_as_text(&runs))
         }
         other => Err(format!("tool belum diport ke core: {other}")),
     };
@@ -470,37 +623,93 @@ mod tests {
         assert!(detect_tool_call("halo, apa kabar?").is_none());
     }
 
-    #[test]
-    fn exec_dispatch_fs_dan_run() {
+    #[tokio::test]
+    async fn exec_dispatch_fs_dan_run() {
         let d = std::env::temp_dir().join(format!("l2dloop-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&d).unwrap();
-        let out = exec_tool(&d, &d, "write_file", &json!({ "path": "x.txt", "content": "hai" }));
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
+        let out = exec_tool(&d, &d, "write_file", &json!({ "path": "x.txt", "content": "hai" }), &mut rx).await;
         assert!(out.contains("char"));
-        assert_eq!(exec_tool(&d, &d, "read_file", &json!({ "path": "x.txt" })), "hai");
-        // run_command aman (echo)
-        let echo = if cfg!(windows) { "echo halo" } else { "echo halo" };
-        let r = exec_tool(&d, &d, "run_command", &json!({ "command": echo }));
+        assert_eq!(exec_tool(&d, &d, "read_file", &json!({ "path": "x.txt" }), &mut rx).await, "hai");
+        // run_command async (echo) lewat exec_tool.
+        let r = exec_tool(&d, &d, "run_command", &json!({ "command": "echo halo" }), &mut rx).await;
         assert!(r.to_lowercase().contains("halo"), "{r}");
         // tool belum diport
-        assert!(exec_tool(&d, &d, "browser_open", &json!({})).contains("belum diport"));
+        assert!(exec_tool(&d, &d, "browser_open", &json!({}), &mut rx).await.contains("belum diport"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn memory_recall_tool_baca_store_companion() {
+    fn hitung_direktif_tool() {
+        assert_eq!(count_tool_directives("jawaban final tanpa tool"), 0);
+        assert_eq!(count_tool_directives("Oke.\nTOOL: read_file {\"path\":\"a\"}"), 1);
+        assert_eq!(count_tool_directives("TOOL: list_dir {}\nTOOL: git_diff {}"), 2);
+        assert_eq!(count_tool_directives("<tool_call>{\"name\":\"list_dir\"}</tool_call>"), 1);
+        assert_eq!(count_tool_directives("TOOL: git_diff {}\n<tool_call>{\"name\":\"list_dir\"}</tool_call>"), 2);
+    }
+
+    #[test]
+    fn repair_json_terpotong() {
+        // Terpotong di tengah string → string ditutup, isi utuh.
+        let r = repair_truncated_json(r#"{"path": "a.rs", "content": "fn main() { pri"#).unwrap();
+        let v: Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["path"], "a.rs");
+        assert_eq!(v["content"], "fn main() { pri");
+        // Terpotong setelah koma → segmen menggantung dipotong.
+        let r2 = repair_truncated_json(r#"{"path": "x.txt", "#).unwrap();
+        let v2: Value = serde_json::from_str(&r2).unwrap();
+        assert_eq!(v2["path"], "x.txt");
+        // Nested (draft motion) → subset yang selamat tetap valid.
+        let r3 = repair_truncated_json(r#"{"motion": {"id": "m", "tracks": [{"t": 0, "v": 1}, {"t"#).unwrap();
+        let v3: Value = serde_json::from_str(&r3).unwrap();
+        assert_eq!(v3["motion"]["id"], "m");
+        assert!(v3["motion"]["tracks"].as_array().unwrap().len() >= 1);
+        // Hanya "{ utk kunci: → fallback objek kosong.
+        let r4 = repair_truncated_json("{\"a\": ").unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&r4).unwrap(), json!({}));
+        // Sampah total → None.
+        assert!(repair_truncated_json("teks tanpa json").is_none());
+    }
+
+    #[test]
+    fn detect_tool_call_terpotong_diselamatkan() {
+        // Output model kehabisan budget di tengah argumen — dulu dibuang utuh
+        // dan tugas berakhir senyap; kini subset validnya diselamatkan.
+        let reply = r#"Oke. TOOL: write_file {"path": "catatan.txt", "content": "baris satu"#;
+        let (n, a) = detect_tool_call(reply).unwrap();
+        assert_eq!(n, "write_file");
+        assert_eq!(a["path"], "catatan.txt");
+        assert_eq!(a["content"], "baris satu");
+    }
+
+    #[test]
+    fn skema_fc_memuat_argumen_opsional() {
+        let defs = tool_defs_json();
+        let bt = defs.iter().find(|d| d["function"]["name"] == "browser_type").unwrap();
+        assert_eq!(bt["function"]["parameters"]["properties"]["submit"]["type"], "boolean");
+        let req = bt["function"]["parameters"]["required"].as_array().unwrap();
+        assert!(!req.iter().any(|v| v == "submit"), "submit opsional, tidak di required");
+        let bi = defs.iter().find(|d| d["function"]["name"] == "browser_inspect").unwrap();
+        assert!(bi["function"]["parameters"]["properties"]["cursor"].is_object());
+        assert!(bi["function"]["parameters"]["properties"]["maxChars"].is_object());
+    }
+
+    #[tokio::test]
+    async fn memory_recall_tool_baca_store_companion() {
         // Memory companion = shared infrastructure: agent menarik sendiri fakta
         // user lewat tool read-only ini (root/data/companion-memory.json).
         let d = std::env::temp_dir().join(format!("l2dloopmem-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         std::fs::create_dir_all(&d).unwrap();
+        let (_tx, mut rx) = tokio::sync::watch::channel(false);
         assert_eq!(
-            exec_tool(&d, &d, "memory_recall", &json!({ "query": "apa saja" })),
+            exec_tool(&d, &d, "memory_recall", &json!({ "query": "apa saja" }), &mut rx).await,
             "(tidak ada memori user yang relevan)"
         );
         crate::companion_memory::add_entries(
             &d.join("data"),
             &[json!({ "text": "Warna favorit user hijau lumut." })],
         );
-        let out = exec_tool(&d, &d, "memory_recall", &json!({ "query": "warna favorit user" }));
+        let out = exec_tool(&d, &d, "memory_recall", &json!({ "query": "warna favorit user" }), &mut rx).await;
         assert!(out.contains("hijau lumut"), "{out}");
         assert!(out.starts_with("- [m_"), "hasil memuat id entri: {out}");
         let _ = std::fs::remove_dir_all(&d);

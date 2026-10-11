@@ -84,14 +84,17 @@ migrasi sekali dari `assistant-history.json` lama + arsip `.bak`):
 
 ## Cancel per-task & status global (2026-09-07 (2))
 
-- **Cancel kooperatif**: `POST /api/assistant/cancel` menyetel
-  `rt.cancelRequested` (hanya saat `busy` → `{ok,accepted}`); loop mengecek
-  flag di awal tiap turn & setelah `execTool` kembali — tool yang sedang
-  jalan selesai dulu (`run_command` ≤30 dtk), lalu reply
+- **Cancel kooperatif**: `POST /api/assistant/cancel` menyetel sinyal batal
+  (watch channel `cancel_tx`, hanya saat `busy`/paused → `{ok,accepted}`);
+  loop mengecek sinyal di awal tiap turn, dan — karena watch — panggilan LLM
+  serta `run_command` yang sedang menggantung dibatalkan SEKETIKA (child
+  process di-kill), bukan menunggu selesai seperti semula. Reply
   "Dibatalkan oleh user." + bus `error "dibatalkan: oleh user"`. Runtime
   TIDAK dimatikan (beda dengan `POST /api/assistant/stop` yang membongkar
-  runtime & approval). Panel: tombol "Stop Task" (`#as-cancel`), aktif
-  saat `running && (busy || liveAsk)`.
+  runtime & approval). Saat tugas **paused** menunggu approval (loop sudah
+  exit), cancel membersihkan sendiri: kartu approval dibuang, slot lepas —
+  tanpa ini cancel di keadaan approval tidak pernah dikonsumsi. Panel: tombol
+  "Stop Task" (`#as-cancel`), aktif saat `running && (busy || liveAsk)`.
 - **Metadata tool**: `GET /api/assistant/status` menyertakan
   `tools: [{name, level}]` (dari registry `TOOLS`) — panel menampilkan
   badge "auto" (safe) / "izin" (mutating) di header kartu tool & approval.

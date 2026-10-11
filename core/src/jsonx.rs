@@ -223,6 +223,15 @@ mod tests {
     }
 
     #[test]
+    fn extract_json_router_sampah_done_menempel() {
+        // Regresi live (router lokal): body JSON utuh + `data: [DONE]` SSE
+        // menempel di akhir — parser ketat menolak seluruh respons.
+        let raw = r#"{"id":"2bf9","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","tool_calls":null,"content":"Halo"}}]}data: [DONE]"#;
+        let v = extract_json(raw).unwrap();
+        assert_eq!(v.pointer("/choices/0/message/content").unwrap(), "Halo");
+    }
+
+    #[test]
     fn extract_json_sse_merge() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Ha\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\ndata: [DONE]\n";
         let v = extract_json(sse).unwrap();

@@ -19,6 +19,7 @@ pub mod director;
 pub mod expressions;
 pub mod jsonx;
 pub mod llm;
+pub mod llm_sched;
 pub mod media;
 pub mod mode;
 pub mod model;
@@ -142,6 +143,8 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/assistant/cancel", axum::routing::post(post_assistant_cancel))
         .route("/api/assistant/events", get(get_assistant_events))
         .route("/api/assistant/undo", get(get_assistant_undo))
+        .route("/api/assistant/runs", get(get_assistant_runs))
+        .route("/api/assistant/runs/{id}", get(get_assistant_run_detail))
         .route("/api/assistant/revert", axum::routing::post(post_assistant_revert))
         .route("/api/assistant/quip", axum::routing::post(post_assistant_quip))
         .route("/api/assistant/modify", axum::routing::post(post_assistant_modify))
@@ -637,6 +640,21 @@ async fn get_assistant_events(uri: Uri) -> Json<serde_json::Value> {
 /// GET /api/assistant/undo — daftar snapshot mutasi.
 async fn get_assistant_undo() -> Json<serde_json::Value> {
     Json(json!({ "entries": agent::assistant::undo_list().await }))
+}
+
+/// GET /api/assistant/runs?limit=&q= — daftar run observability (terbaru dulu).
+async fn get_assistant_runs(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Json<serde_json::Value> {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(20);
+    let query = q.get("q").map(|s| s.as_str()).filter(|s| !s.trim().is_empty());
+    Json(json!({ "runs": agent::store::runs(limit, query) }))
+}
+
+/// GET /api/assistant/runs/{id} — detail run + tool execs + plan steps.
+async fn get_assistant_run_detail(axum::extract::Path(id): axum::extract::Path<i64>) -> Response {
+    match agent::store::run_detail(id) {
+        Some(v) => axum::response::IntoResponse::into_response(Json(v)),
+        None => json_status(StatusCode::NOT_FOUND, json!({ "ok": false, "error": format!("run tidak dikenal: {id}") })),
+    }
 }
 
 /// POST /api/assistant/revert {id} — kembalikan file ke snapshot.
@@ -1160,7 +1178,21 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
 
     // channel: kirim event JSON string ke SSE.
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Klien SSE putus → ev_rx di-drop → send gagal → token batal ke LLM.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    {
+        // Pantau putusnya klien langsung, bukan hanya saat delta gagal kirim:
+        // sebelum token pertama LLM tidak mengirim apa pun, jadi tanpa ini
+        // request tetap jalan sampai selesai walau user sudah Stop.
+        let watch_tx = ev_tx.clone();
+        let cancel_watch = cancel_tx.clone();
+        tokio::spawn(async move {
+            watch_tx.closed().await;
+            let _ = cancel_watch.send(true);
+        });
+    }
     tokio::spawn(async move {
+        let mut cancel_rx = cancel_rx;
         let cfg = config::load(&cfg_path);
         let conns: Vec<serde_json::Value> = cfg.get("connections").and_then(|x| x.as_array()).cloned().unwrap_or_default();
         let mut order = llm::order_for_role("chat", &conns);
@@ -1189,17 +1221,21 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
             let sysc = system.clone();
             // jalankan LLM stream; forward token → SSE selagi datang.
             let ev_tx2 = ev_tx.clone();
+            let cancel_tx2 = cancel_tx.clone();
             let forwarder = tokio::spawn(async move {
                 while let Some(tok) = tok_rx.recv().await {
-                    let _ = ev_tx2.send(json!({ "delta": tok }).to_string());
+                    if ev_tx2.send(json!({ "type": "delta", "text": tok }).to_string()).is_err() {
+                        let _ = cancel_tx2.send(true);
+                        break;
+                    }
                 }
             });
-            let res = llm::call_llm_stream(&conn, &msgs, &sysc, &tok_tx).await;
+            let res = llm::call_llm_stream_retry(&conn, &msgs, &sysc, &tok_tx, &mut cancel_rx).await;
             drop(tok_tx);
             let _ = forwarder.await;
             match res {
                 Ok(full) => {
-                    let _ = ev_tx.send(json!({ "done": true, "reply": full }).to_string());
+                    let _ = ev_tx.send(json!({ "type": "done", "ok": true, "reply": full }).to_string());
                     emitted_any = true;
                     break;
                 }
@@ -1211,7 +1247,7 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
             }
         }
         if !emitted_any {
-            let _ = ev_tx.send(json!({ "done": true, "error": last_err }).to_string());
+            let _ = ev_tx.send(json!({ "type": "done", "ok": false, "error": last_err }).to_string());
         }
     });
 

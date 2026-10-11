@@ -120,6 +120,14 @@ const CAPTCHA_MARKERS: &[(&str, &str)] = &[
 /// Instruksi untuk agent saat captcha terdeteksi: berhenti & serahkan ke user.
 const CAPTCHA_HINT: &str = "Captcha terdeteksi di halaman ini. JANGAN mencoba menyelesaikannya (klik/otomasi tidak akan lolos dan melanggar aturan situs). Berhenti, beri tahu user untuk menyelesaikan captcha secara manual di jendela browser yang terbuka, lalu tunggu konfirmasi user sebelum melanjutkan.";
 
+/// Instruksi saat halaman login terdeteksi: kredensial HANYA boleh diisi user.
+const LOGIN_HINT: &str = "Halaman login terdeteksi. JANGAN mencoba mengisi password/OTP/kode verifikasi (tool type menolak field rahasia, dan kredensial hanya boleh diisi user). Minta user mengisi kredensial LANGSUNG di jendela browser yang terbuka; tugas akan dijeda sampai user menekan lanjut, lalu periksa ulang halaman dan lanjutkan dari state sekarang. Bila tugas tidak butuh login, lanjutkan tanpa login.";
+
+/// Google MENOLAK login dari browser terkontrol otomatis ("This browser or
+/// app may not be secure") — kebijakan keamanan Google, BUKAN bug di sini.
+/// Jelaskan jujur; JANGAN mengulang klik sign-in atau mengakali deteksi.
+const GOOGLE_BLOCKED_HINT: &str = "Google memblokir sign-in dari browser yang dikendalikan otomatis (halaman 'Couldn't sign you in / This browser or app may not be secure'). Ini kebijakan keamanan Google, bukan kesalahan konfigurasi. JANGAN mengulang klik sign-in dan JANGAN mencoba mengakali deteksi. Alternatif yang jujur: (1) lanjutkan bagian tugas yang tidak butuh login, (2) sarankan user memakai akun/situs lain, atau (3) laporkan keterbatasan ini dengan jelas ke user.";
+
 /// Deteksi captcha dari sinyal halaman yang nyata: URL (host widget/challenge),
 /// judul, dan nama node widget (iframe/checkbox/tombol). Kata "captcha" di
 /// teks biasa (mis. "protected by reCAPTCHA" di footer form login) TIDAK
@@ -157,6 +165,28 @@ pub fn detect_captcha(url: &str, title: &str, widgets: &[String]) -> Option<&'st
     None
 }
 
+/// Deteksi halaman LOGIN (bukan captcha): URL auth yang kuat, atau field
+/// password + sinyal judul/URL. Return "google_blocked" bila halaman adalah
+/// penolakan sign-in Google (kebijakan anti-automation), "login" bila
+/// halaman autentikasi biasa, None bila bukan. Advisory — pemicu jeda
+/// human-in-the-loop, bukan penghalang navigasi.
+pub fn detect_login(url: &str, title: &str, has_password_field: bool) -> Option<&'static str> {
+    let u = url.to_lowercase();
+    let t = title.to_lowercase();
+    if u.contains("signin/rejected") || t.contains("couldn't sign you in") || t.contains("may not be secure") {
+        return Some("google_blocked");
+    }
+    let auth_url = [
+        "/login", "/signin", "/sign-in", "/signon", "/authenticate", "/auth/",
+        "accounts.", "sso.", "login.", "signin.", "account login", "/session/new",
+    ].iter().any(|m| u.contains(m));
+    let auth_title = ["sign in", "sign-in", "signin", "log in", "login", "masuk"].iter().any(|m| t.contains(m));
+    if auth_url || (has_password_field && auth_title) {
+        return Some("login");
+    }
+    None
+}
+
 fn engine_of(exe: &Option<String>) -> Option<&'static str> {
     let name = exe.as_deref()?.to_lowercase();
     if name.contains("edge") {
@@ -174,11 +204,16 @@ pub struct BrowserManager {
     executable: Option<String>,
     engine_pref: Option<String>, // None = belum dimuat dari config
     captcha: Option<String>,     // kind captcha di halaman aktif (advisory)
+    login: Option<&'static str>, // "login" | "google_blocked" (advisory, dari inspect)
     profile_dir: Option<PathBuf>,
     root: Option<PathBuf>,       // akar app — disimpan utk re-launch otomatis
     launched: bool,              // pernah diluncurkan & BELUM ditutup sengaja
     client: Option<CdpClient>,
     process: Option<std::process::Child>,
+    /// Port DevTools (dari DevToolsActivePort saat launch) — dipakai tab mgmt.
+    devtools_port: Option<u32>,
+    /// Target CDP aktif (page) — dasar "tab aktif" untuk browser_tabs.
+    active_target_id: Option<String>,
     url: String,
     title: String,
     can_back: bool,
@@ -257,12 +292,15 @@ impl BrowserManager {
             let _ = p.kill();
         }
         self.client = None;
+        self.devtools_port = None;
+        self.active_target_id = None;
         self.url.clear();
         self.title.clear();
         self.can_back = false;
         self.can_forward = false;
         self.current_snapshot_id = None;
         self.captcha = None;
+        self.login = None;
         self.snapshots.clear();
         self.last_error = error;
     }
@@ -319,6 +357,7 @@ impl BrowserManager {
 
         // Tunggu DevToolsActivePort (baris 1 = port).
         let port = self.wait_devtools_port(&profile).await?;
+        self.devtools_port = Some(port);
         let list_url = format!("http://127.0.0.1:{port}/json/list");
         let client = reqwest::Client::new();
         let targets: Vec<Value> = match client.get(&list_url).timeout(std::time::Duration::from_secs(5)).send().await {
@@ -329,6 +368,7 @@ impl BrowserManager {
             }
         };
         let target = choose_page_target(&targets);
+        self.active_target_id = target.and_then(|t| t.get("id").and_then(|v| v.as_str())).map(String::from);
         let ws_url = match target.and_then(|t| t.get("webSocketDebuggerUrl").and_then(|v| v.as_str())) {
             Some(u) => u.to_string(),
             None => {
@@ -408,6 +448,7 @@ impl BrowserManager {
         self.title.clear();
         self.current_snapshot_id = None;
         self.captcha = None;
+        self.login = None;
         Ok(())
     }
 
@@ -426,6 +467,7 @@ impl BrowserManager {
                 self.url = live;
                 self.current_snapshot_id = None;
                 self.captcha = None;
+                self.login = None;
             }
             return Ok(());
         }
@@ -452,6 +494,7 @@ impl BrowserManager {
             self.url = d.url.unwrap_or(live);
             self.current_snapshot_id = None;
             self.captcha = None;
+            self.login = None;
         }
         Ok(())
     }
@@ -559,6 +602,153 @@ fn jelaskan_error_navigasi(error_text: &str, host: &str) -> String {
 fn choose_page_target(targets: &[Value]) -> Option<&Value> {
     let pages: Vec<&Value> = targets.iter().filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page") && t.get("webSocketDebuggerUrl").and_then(|v| v.as_str()).is_some()).collect();
     pages.iter().find(|t| t.get("url").and_then(|v| v.as_str()) == Some("about:blank")).copied().or_else(|| pages.first().copied())
+}
+
+impl BrowserManager {
+    /// Hubungkan ulang CDP ke target page tertentu (perpindahan tab aktif).
+    async fn connect_target(&mut self, target: &Value) -> Result<(), String> {
+        let ws_url = target
+            .get("webSocketDebuggerUrl")
+            .and_then(|v| v.as_str())
+            .ok_or("target tanpa webSocketDebuggerUrl")?
+            .to_string();
+        if let Some(old) = self.client.take() {
+            old.close().await;
+        }
+        let cdp = CdpClient::connect(&ws_url).await?;
+        for m in ["Page.enable", "Runtime.enable", "Accessibility.enable", "DOM.enable"] {
+            let _ = cdp.send(m, json!({}), 10_000).await;
+        }
+        self.active_target_id = target.get("id").and_then(|v| v.as_str()).map(String::from);
+        self.url = target.get("url").and_then(|v| v.as_str()).unwrap_or("").trim_start_matches("about:blank").to_string();
+        self.title = target.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        self.current_snapshot_id = None;
+        self.captcha = None;
+        self.login = None;
+        self.client = Some(cdp);
+        self.refresh_history().await;
+        Ok(())
+    }
+}
+
+/// Daftar target page (tab) dari endpoint HTTP DevTools.
+async fn page_targets(port: u32) -> Result<Vec<Value>, String> {
+    let client = reqwest::Client::new();
+    let targets: Vec<Value> = client
+        .get(format!("http://127.0.0.1:{port}/json/list"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("daftar target CDP gagal: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("daftar target CDP bukan JSON: {e}"))?;
+    Ok(targets
+        .into_iter()
+        .filter(|t| t.get("type").and_then(|v| v.as_str()) == Some("page") && t.get("webSocketDebuggerUrl").and_then(|v| v.as_str()).is_some())
+        .collect())
+}
+
+/// browser_tabs {action, index} — kelola tab browser terkontrol (pola
+/// Playwright MCP: primitive tab EKSPLISIT; snapshot selalu milik tab aktif).
+pub async fn tabs(action: &str, index: Option<usize>) -> Result<Value, String> {
+    let mut m = mgr().lock().await;
+    let port = m.devtools_port.ok_or("browser belum terbuka")?;
+    let mut targets = page_targets(port).await?;
+    match action {
+        "list" => {
+            let active = m.active_target_id.clone();
+            let rows: Vec<Value> = targets
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    json!({
+                        "index": i,
+                        "id": t.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "url": t.get("url").and_then(|v| v.as_str()).unwrap_or(""),
+                        "title": t.get("title").and_then(|v| v.as_str()).unwrap_or(""),
+                        "active": t.get("id").and_then(|v| v.as_str()) == active.as_deref(),
+                    })
+                })
+                .collect();
+            Ok(json!({ "ok": true, "tabs": rows, "count": rows.len() }))
+        }
+        "new" => {
+            let client = reqwest::Client::new();
+            let t: Value = client
+                .put(format!("http://127.0.0.1:{port}/json/new?about:blank"))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| format!("gagal membuat tab: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("respon buat tab bukan JSON: {e}"))?;
+            targets = page_targets(port).await?;
+            let created_id = t.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let target = targets.iter().find(|x| x.get("id").and_then(|v| v.as_str()) == Some(created_id.as_str())).cloned().ok_or("tab baru tidak ditemukan di daftar target")?;
+            m.connect_target(&target).await?;
+            Ok(m.status_value())
+        }
+        "select" => {
+            let idx = index.ok_or("index wajib untuk select")?;
+            let target = targets.get(idx).cloned().ok_or_else(|| format!("index tab {idx} di luar jangkauan (0..{})", targets.len()))?;
+            m.connect_target(&target).await?;
+            Ok(m.status_value())
+        }
+        "close" => {
+            let idx = index.ok_or("index wajib untuk close")?;
+            let target = targets.get(idx).cloned().ok_or_else(|| format!("index tab {idx} di luar jangkauan (0..{})", targets.len()))?;
+            let id = target.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let was_active = m.active_target_id.as_deref() == Some(id.as_str());
+            let client = reqwest::Client::new();
+            let txt = client
+                .get(format!("http://127.0.0.1:{port}/json/close/{id}"))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+                .map_err(|e| format!("gagal menutup tab: {e}"))?
+                .text()
+                .await
+                .unwrap_or_default();
+            let t = txt.to_lowercase();
+            // Chrome modern menjawab "Target is closing" (HTTP 200) = sukses;
+            // lama menjawab "Success is closing the target". Keduanya diterima.
+            if !t.contains("success") && !t.contains("target is closing") {
+                return Err(format!("gagal menutup tab {idx}: {txt}"));
+            }
+            if was_active {
+                // Tab aktif ditutup → pindah ke tab page tersisa (bila ada).
+                targets = page_targets(port).await?;
+                if let Some(next) = targets.first().cloned() {
+                    m.connect_target(&next).await?;
+                } else {
+                    m.reset(Some("semua tab ditutup".into()));
+                    m.launched = false;
+                }
+            }
+            Ok(m.status_value())
+        }
+        _ => Err("action harus list, new, select, atau close".into()),
+    }
+}
+
+/// browser_screenshot — tangkap halaman aktif ke file (bukti visual + bahan
+/// verifikasi). Return {ok, path, width, height, bytes}.
+pub async fn screenshot_tool(root: &Path) -> Result<Value, String> {
+    let (bytes, mime, w, h, ts) = screenshot("png", 90).await?;
+    let ext = if mime == "image/jpeg" { "jpg" } else { "png" };
+    let dir = root.join("data").join("browser").join("screenshots");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("gagal membuat folder screenshot: {e}"))?;
+    let path = dir.join(format!("s_{ts}.{ext}"));
+    std::fs::write(&path, &bytes).map_err(|e| format!("gagal menyimpan screenshot: {e}"))?;
+    Ok(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "width": w,
+        "height": h,
+        "bytes": bytes.len(),
+    }))
 }
 
 // ── API publik (dipakai handler lib.rs) ─────────────────────────────────────
@@ -707,10 +897,18 @@ pub async fn inspect(cursor: usize, max_chars: usize, snapshot_id: Option<&str>)
         .collect();
     let kind = detect_captcha(&snap.url, &snap.title, &widgets);
     m.captcha = kind.map(|s| s.to_string());
+    // Deteksi halaman login/MFA: field password di AX tree + URL/judul auth.
+    let has_password = snap.nodes.iter().any(|n| n.sensitive);
+    let lkind = detect_login(&snap.url, &snap.title, has_password);
+    m.login = lkind;
     let mut out = format_inspect(&snap, cursor, max_chars);
     if let Some(k) = kind {
         out["captcha"] = json!(k);
         out["captchaHint"] = json!(CAPTCHA_HINT);
+    }
+    if let Some(lk) = lkind {
+        out["login"] = json!(lk);
+        out["loginHint"] = json!(if lk == "google_blocked" { GOOGLE_BLOCKED_HINT } else { LOGIN_HINT });
     }
     m.snapshots.put(snap);
     m.current_snapshot_id = Some(sid);
@@ -867,6 +1065,17 @@ pub async fn captcha_note() -> Value {
     }
 }
 
+/// {login, loginHint} bila halaman aktif adalah halaman login (atau penolakan
+/// sign-in Google) — pemicu jeda human-in-the-loop di run_loop. Null bila bukan.
+pub async fn login_note() -> Value {
+    let m = mgr().lock().await;
+    match m.login {
+        Some("google_blocked") => json!({ "login": "google_blocked", "loginHint": GOOGLE_BLOCKED_HINT }),
+        Some(_) => json!({ "login": "login", "loginHint": LOGIN_HINT }),
+        None => Value::Null,
+    }
+}
+
 // ── Jalur tool agent (dipanggil loop assistant) ─────────────────────────────
 const DEFAULT_URL: &str = "";
 const MAX_INSPECT_CHARS: usize = 3500;
@@ -934,6 +1143,14 @@ pub async fn agent_exec(root: &Path, name: &str, args: &Value) -> String {
             close().await;
             Ok(json!({ "ok": true }).to_string())
         }
+        "browser_screenshot" => screenshot_tool(root).await.map(|v| v.to_string()),
+        "browser_tabs" => match sreq("action") {
+            Ok(a) => {
+                let index = args.get("index").and_then(|v| v.as_u64()).map(|n| n as usize);
+                tabs(&a, index).await.map(|v| v.to_string())
+            }
+            Err(e) => Err(e),
+        },
         "browser_grant_private" => match sreq("origin") {
             Ok(o) => grant_private_origin(&o).await.map(|origin| json!({ "ok": true, "origin": origin }).to_string()),
             Err(e) => Err(e),
@@ -1017,6 +1234,26 @@ mod tests {
         assert_eq!(detect_captcha("https://site.test/", "Just a moment...", &none), Some("Cloudflare"));
         assert_eq!(detect_captcha("https://site.test/", "x", &["Verify you are human".into()]), Some("Cloudflare"));
         assert_eq!(detect_captcha("https://site.test/", "x", &["reCAPTCHA challenge".into()]), Some("reCAPTCHA"));
+    }
+
+    #[test]
+    fn deteksi_halaman_login_dan_blokir_google() {
+        // URL auth kuat → login, walau tanpa field password terdeteksi.
+        assert_eq!(detect_login("https://site.test/login", "Masuk", false), Some("login"));
+        assert_eq!(detect_login("https://accounts.google.com/v3/signin/", "Sign in", false), Some("login"));
+        // Field password TANPA sinyal URL/judul → bukan halaman login
+        // (form ganti-password di halaman settings, dsb. tidak memicu).
+        assert_eq!(detect_login("https://site.test/settings", "Pengaturan", true), None);
+        // Field password + judul auth → login.
+        assert_eq!(detect_login("https://site.test/akun", "Sign in to continue", true), Some("login"));
+        // Halaman baru tanpa sinyal → None.
+        assert_eq!(detect_login("https://site.test/", "Beranda", false), None);
+        // Penolakan sign-in Google → kind khusus (dijelaskan jujur, bukan retry).
+        assert_eq!(
+            detect_login("https://accounts.google.com/v3/signin/rejected?continue=x", "Couldn't sign you in", false),
+            Some("google_blocked")
+        );
+        assert_eq!(detect_login("https://x.test/", "This browser or app may not be secure", false), Some("google_blocked"));
     }
 
     #[test]
@@ -1165,6 +1402,44 @@ mod tests {
         assert!(out.contains("\"running\":true"), "browser tidak jalan: {out}");
         let out2 = agent_exec(&root, "browser_close", &serde_json::json!({})).await;
         assert!(out2.contains("\"ok\":true"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Skenario nyata tool baru: screenshot menyimpan file; tabs new/select/
+    /// close pindah koneksi CDP antar target. Jalankan manual:
+    /// `cargo test -p live2d-core browser_tabs_screenshot -- --ignored`
+    #[tokio::test]
+    #[ignore]
+    async fn browser_tabs_screenshot_via_agent_exec() {
+        // Root UNIK per run: profil browser sisa run sebelumnya membuat
+        // Chrome baru langsung exit ("berhenti sebelum CDP siap").
+        let root = std::env::temp_dir().join(format!("wb-tabs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let open = agent_exec(&root, "browser_open", &serde_json::json!({})).await;
+        assert!(!open.starts_with("ERROR"), "open: {open}");
+        let nav = agent_exec(&root, "browser_navigate", &serde_json::json!({ "url": "https://example.com" })).await;
+        assert!(!nav.starts_with("ERROR"), "nav: {nav}");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        // Screenshot → file tersimpan di data/browser/screenshots.
+        let shot = agent_exec(&root, "browser_screenshot", &serde_json::json!({})).await;
+        assert!(!shot.starts_with("ERROR"), "screenshot: {shot}");
+        let v: serde_json::Value = serde_json::from_str(&shot).unwrap();
+        assert!(std::path::Path::new(v["path"].as_str().unwrap()).exists(), "file screenshot ada: {shot}");
+        assert!((v["bytes"].as_u64().unwrap_or(0)) > 1000, "png tak mungkin <1KB: {shot}");
+        // Tabs: new → 2 tab, select 0, close 1 (aktif) → kembali ke sisa.
+        let new = agent_exec(&root, "browser_tabs", &serde_json::json!({ "action": "new" })).await;
+        assert!(!new.starts_with("ERROR"), "tabs new: {new}");
+        let list: serde_json::Value = serde_json::from_str(&agent_exec(&root, "browser_tabs", &serde_json::json!({ "action": "list" })).await).unwrap();
+        assert_eq!(list["count"], 2, "{list}");
+        let sel = agent_exec(&root, "browser_tabs", &serde_json::json!({ "action": "select", "index": 0 })).await;
+        assert!(!sel.starts_with("ERROR"), "select: {sel}");
+        let close = agent_exec(&root, "browser_tabs", &serde_json::json!({ "action": "close", "index": 1 })).await;
+        assert!(!close.starts_with("ERROR"), "close: {close}");
+        let list2: serde_json::Value = serde_json::from_str(&agent_exec(&root, "browser_tabs", &serde_json::json!({ "action": "list" })).await).unwrap();
+        assert_eq!(list2["count"], 1, "{list2}");
+        let cl = agent_exec(&root, "browser_close", &serde_json::json!({})).await;
+        assert!(cl.contains("\"ok\":true"));
         let _ = std::fs::remove_dir_all(root);
     }
 

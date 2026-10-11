@@ -49,7 +49,15 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// Satu subagent: loop mini read-only sampai final / batas iterasi.
-async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &str) -> Result<String, String> {
+/// `cancel_rx` = sinyal batal tugas orchestrator (dicek antar-langkah dan
+/// diteruskan ke panggilan LLM agar LLM yang menggantung ikut berhenti).
+async fn run_sub_loop(
+    config_path: &Path,
+    root: &Path,
+    work_dir: &str,
+    task: &str,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> Result<String, String> {
     let wd = PathBuf::from(work_dir);
     let lang = lang_of(config_path);
     let extra = if lang == "en" {
@@ -79,7 +87,10 @@ async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &st
                 }
             })
             .collect();
-        let reply = llm::llm_for_role_tools(config_path, "assistant", &messages, &system, &loop_::tool_defs_json()).await.map_err(|(_, m)| m)?.reply;
+        let reply = llm::llm_for_role_cancelable(config_path, "assistant", &messages, &system, &loop_::tool_defs_json(), &mut cancel_rx)
+            .await
+            .map_err(|(_, m)| m)?
+            .reply;
 
         let detected = loop_::detect_tool_call(&reply);
         let (name, args) = match detected {
@@ -105,7 +116,7 @@ async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &st
             history.push(("tool".into(), "[update_plan] (diabaikan untuk subagent)".into()));
             continue;
         }
-        let result = loop_::exec_tool(root, &wd, &name, &args);
+        let result = loop_::exec_tool(root, &wd, &name, &args, &mut cancel_rx).await;
         history.push(("assistant".into(), strip_tool_directive(&reply)));
         history.push(("tool".into(), clip(&result, 4000)));
     }
@@ -113,7 +124,14 @@ async fn run_sub_loop(config_path: &Path, root: &Path, work_dir: &str, task: &st
 }
 
 /// Jalankan batch subagent paralel. Return teks tool_result gabungan.
-pub async fn run_batch(config_path: &Path, root: &Path, work_dir: &str, tasks: Vec<String>) -> String {
+/// `cancel_rx` = sinyal batal tugas orchestrator.
+pub async fn run_batch(
+    config_path: &Path,
+    root: &Path,
+    work_dir: &str,
+    tasks: Vec<String>,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> String {
     let total = tasks.len();
     let batch: Vec<String> = tasks.into_iter().take(MAX_PARALLEL).collect();
     let skipped = total.saturating_sub(batch.len());
@@ -125,8 +143,9 @@ pub async fn run_batch(config_path: &Path, root: &Path, work_dir: &str, tasks: V
         let cp = config_path.to_path_buf();
         let rt = root.to_path_buf();
         let wd = work_dir.to_string();
+        let sub_cancel = cancel_rx.clone();
         futs.push(async move {
-            let out = match run_sub_loop(&cp, &rt, &wd, &task).await {
+            let out = match run_sub_loop(&cp, &rt, &wd, &task, sub_cancel).await {
                 Ok(s) if !s.is_empty() => clip(&s, 2000),
                 Ok(_) => "(kosong)".into(),
                 Err(e) => format!("ERROR: {}", clip(&e, 200)),
