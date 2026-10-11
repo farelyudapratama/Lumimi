@@ -9,6 +9,28 @@
 > belum pernah punya trace rilis (nol tag). Rilis pertama yang ditandai
 > karena itu mulai dari `0.1.0`.
 
+## [0.1.2] — 2026-10-12
+
+### Added
+- **Agent Workbench dibangun ulang clean-slate ala ZCode** (`src/client/agent/panel/`): dock presence resizable dengan collapse/expand eksplisit, tab dock, transcript/term-log/registry model murni; Fase 3–4 plus visual rework.
+- **Plan-approval gate** — rencana agent wajib disetujui user sebelum mutasi pertama; allowlist izin sesi ("selalu izinkan") di kartu approval; kartu approval login.
+- **Streaming chat SSE + tombol Stop** — balasan chat mengalir token-demi-token; stop membatalkan end-to-end.
+- **Harness agent tangguh** — scheduler antar-task, cancel end-to-end, verifikasi hasil, store observability (`/api/assistant/runs`).
+- **API Management terpusat di core** — routing per role, `enabled` eksplisit per koneksi, panel AI baru (daftar koneksi + rencana routing read-only).
+- **Dukungan native function-calling** — model FC (gpt-oss dkk.) memanggil tool lewat jalur native provider; tak lagi 400 "tool called a tool".
+- **Multi-session assistant** — fungsionalitas antar-sesi + UI.
+- **Preferensi engine browser terkontrol** (auto/edge/chrome) + deteksi captcha advisory.
+- **Companion** — bubble dihapus, respons penuh di chat; TTS panjang tak terpotong lagi.
+- **Filter chat penonton (moderasi komentar)** — komentar audience VTuber kini disaring dua lapis sebelum diproses LLM: blocklist kata/frasa milik user (instan, gratis) dan mesin keputusan opsional via role baru `moderation`. Mesin keputusan memprioritaskan koneksi SystemOne (Jev cloud / Laya lokal) lewat endpoint `v1/systemone` (pola yang sama dengan role `behavior`), fallback ke LLM mana pun yang ditandai role `moderation` eksplisit. Komentar ditahan tetap tampil di feed plus alasan, tapi tidak dibalas; mesin gagal/timeout → fail-open (komentar diteruskan) supaya stream tidak mati. Panel "Filter Chat" baru di tab AI (toggle, blocklist, aturan tambahan bebas) menyimpan via action `saveChatFilter` pada `/api/config`.
+
+### Fixed
+- Transport: handshake token instalasi + self-heal port loopback di exe.
+- Browser CDP yang ditutup user di-auto-relaunch (task agent tak menggantung lagi); guard auto-relaunch menutup pintu `browser_open` (task browser selalu "CDP terputus"); pesan error jujur & actionable — LLM tak lagi mengarang "ga ada internet"/"tidak aman".
+- Panel: transcript re-sync saat task masuk dari luar panel; todo stale tak tampil lagi; spinner berjalan abadi dihapus; model diarahkan jaga status plan; tab dock tanpa scrollbar — label collapse ke ikon saat dock sempit.
+
+### Tests
+- Gate hijau penuh: unit bun 611, guard 326, cargo 277 (+11 test filter chat), tsc, build.
+
 ## [0.1.1] — 2026-10-04
 
 ### Added
