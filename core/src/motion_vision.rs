@@ -151,7 +151,7 @@ pub fn parse_verdict(reply: &str) -> Value {
     verdict
 }
 
-async fn wait_ready(timeout_polls: usize) -> Result<(), String> {
+pub async fn wait_ready(timeout_polls: usize) -> Result<(), String> {
     for _ in 0..timeout_polls {
         let res = browser::evaluate(
             "JSON.stringify(window.__motionHarness ? window.__motionHarness.state() : {ready:false, booting:true})",

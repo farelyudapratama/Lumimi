@@ -10,6 +10,13 @@ use crate::{jsonx, llm};
 
 const DEFAULT_EMOTIONS: &[&str] = &["senang", "sedih", "malu", "kaget", "normal"];
 
+// Role canonical yang dipakai planner + validator beat (satu sumber, bukan regex per file).
+const KNOWN_ROLES: &[&str] = &[
+    "ax", "ay", "az", "bodyZ", "bodyX", "bodyY", "ex", "ey",
+    "mouthForm", "mouthOpen", "smileL", "smileR", "browLY", "browRY",
+    "browLF", "browRF",
+];
+
 fn strip_fences(text: &str) -> String {
     text.replace("```json", "").replace("```JSON", "").replace("```", "").trim().to_string()
 }
@@ -191,7 +198,7 @@ fn model_context_block(analysis: &Value) -> Option<String> {
 /// Bangun prompt generate. `ctx` (opsional) = blok konteks model yang
 /// disisipkan sebelum bagian Aturan. Tanpa ctx, hasil byte-per-byte sama
 /// dengan prompt lama (backward compat).
-fn build_generate_prompt(desc: &str, emo: &str, ctx: Option<&str>) -> String {
+fn build_generate_prompt(desc: &str, emo: &str, ctx: Option<&str>, allowed: Option<&[String]>) -> String {
     let base = format!(
         "Kamu membuat gerakan (motion) untuk karakter Live2D dari deskripsi user.\n\
 Permintaan user: \"{desc}\"\n\n\
@@ -228,13 +235,178 @@ KEMBALIKAN HANYA JSON. MULAI balasanmu langsung dengan {{ dan AKHIRI dengan }} �
         desc = desc,
         emo = emo,
     );
-    match ctx {
+    let mut base = match ctx {
         None => base,
         Some(c) => match base.find("\nAturan:\n") {
             Some(i) => format!("{}\n\n{}\n\n{}", base[..i].trim_end(), c, &base[i + 1..]),
             None => base,
         },
+    };
+    if let Some(roles) = allowed {
+        if !roles.is_empty() {
+            if let Some(i) = base.find("\nAturan:\n") {
+                base = format!(
+                    "{}\nFokus role pilihan planner: {}\n{}",
+                    base[..i].trim_end(),
+                    roles.join(", "),
+                    &base[i..]
+                );
+            } else {
+                base.push_str("\nFokus role pilihan planner: ");
+                base.push_str(&roles.join(", "));
+            }
+        }
     }
+    base
+}
+
+/// Planner langkah A (RENCANA backlog 4a) - pilih role yang relevan dulu.
+/// Kembalikan daftar role canonical. Gagal/kosong → vec![] (prompt penuh).
+async fn plan_roles(config_path: &Path, desc: &str) -> Vec<String> {
+    let prompt = format!(
+        "Kamu memilih RET (role) yang relevan untuk gerakan berikut:\n\
+\"{desc}\"\n\n\
+Role yang tersedia: {}\n\
+Pilih hanya yang sungguh diperlukan (maks 4). Balas HANYA array JSON of string role. \
+Contoh: [\"ax\",\"ay\"]. Jangan tambahkan penjelasan.",
+        KNOWN_ROLES.join(", ")
+    );
+    let msgs = vec![llm::ChatMessage { role: "user".into(), content: prompt }];
+    let reply = match llm::llm_for_role(config_path, "motion", &msgs, "").await {
+        Ok(ok) => ok.reply,
+        Err(_) => return Vec::new(),
+    };
+    let arr = jsonx::extract_json_array_loose(&reply);
+    let mut out: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|r| KNOWN_ROLES.iter().any(|k| k == r))
+        .collect();
+    out.dedup();
+    out.truncate(4);
+    out
+}
+
+/// Prompt untuk api "beats" (Fase 4a → 4b): LLM menghasilkan storyboard beat,
+/// compiler klien yang mengubah ke keyframe. Angka tetap dari LLM, tapi di-sort
+/// server (sanitize di gerbang akhir: motion_dsl saat simpan).
+fn build_beats_prompt(desc: &str, emo: &str, ctx: Option<&str>, allowed: Option<&[String]>, probe_params: Option<&str>) -> String {
+    let base = format!(
+        "Kamu membuat STORYBOARD gerakan untuk karakter Live2D dari deskripsi user.\n\
+Permintaan user: \"{desc}\"\n\n\
+Kamu TIDAK menulis track/keyframe. Kamu menulis BEAT: pose semantik + timing + intensitas.\n\n\
+Role yang boleh dipakai HANYA:\n\
+ax = kepala kiri(-)/kanan(+), ay = kepala atas(-)/bawah(+), az = kepala miring, derajat ±30\n\
+bodyZ/bodyX/bodyY = badan miring/geser/naik-turun, derajat ±30\n\
+ex/ey = bola mata kiri(-)/kanan(+), atas(-)/bawah(+), -1..1\n\
+mouthForm = bentuk mulut (-1..1), mouthOpen = 0 diam → 1 terbuka penuh\n\
+smileL/smileR = senyum mata kiri/kanan (0=netral, 1=senyum penuh)\n\
+browLY/browRY = alis turun(-)/naik(+), browLF/browRF = bentuk alis (±1)\n\n\
+Aturan:\n\
+- Maksimal 4 beat, tiap beat maksimal 1 role.\n\
+- start.detik 0..durasi; duration 0.1..3; start + duration <= durasi.\n\
+- intensity 0.0..1.0; sign ±1.\n\
+- holdEnd=true HANYA untuk beat terakhir bila sengaja berakhir di pose (tidak pulang).\n\
+- Durasi total wajar: 0.6..3 detik.\n\n\
+Balas HANYA JSON:\n\
+{{\n  \"id\": \"nama_id_snake_case\",\n  \"name\": \"Nama Singkat\",\n  \"description\": \"satu kalimat bahasa Indonesia\",\n  \"tags\": [\"dua-empat tag\"],\n  \"duration\": 1.4,\n  \"emotionCompatibility\": {{ \"<emosi>\": 0.0-1.0 }},\n  \"beats\": [\n    {{ \"beatId\": \"b1\", \"role\": \"ay\", \"start\": 0.0, \"duration\": 0.6, \"intensity\": 0.6, \"sign\": 1, \"holdEnd\": false, \"easing\": \"ease-in-out\" }}\n  ]\n}}\n\
+Emosi yang boleh dipakai HANYA: [{emo}]\n\
+KEMBALIKAN HANYA JSON. MULAI balasanmu langsung dengan {{ dan AKHIRI dengan }} — JANGAN mengulang instruksi ini.",
+        desc = desc,
+        emo = emo,
+    );
+    // Param ekstra hasil approve user (sheet probeApprovals, role=null): beat
+    // boleh memakai field "param" (bukan "role") untuk param di daftar ini.
+    let base = match probe_params {
+        None => base,
+        Some(pp) => match base.find("\nAturan:\n") {
+            Some(i) => format!("{}\n{}\n{}", &base[..i], pp, &base[i + 1..]),
+            None => format!("{base}\n{pp}"),
+        },
+    };
+    let mut base = match ctx {
+        None => base,
+        Some(c) => match base.find("\nAturan:\n") {
+            Some(i) => format!("{}\n\n{}\n\n{}", base[..i].trim_end(), c, &base[i + 1..]),
+            None => base,
+        },
+    };
+    if let Some(roles) = allowed {
+        if !roles.is_empty() {
+            if let Some(i) = base.find("\nAturan:\n") {
+                base = format!(
+                    "{}\nFokus role pilihan planner: {}\n{}",
+                    base[..i].trim_end(),
+                    roles.join(", "),
+                    &base[i..]
+                );
+            } else {
+                base.push_str("\nFokus role pilihan planner: ");
+                base.push_str(&roles.join(", "));
+            }
+        }
+    }
+    base
+}
+
+/// Validasi ringan hasil beats (sanitasi angka + target). Kembalikan Ok(())
+/// atau pesan error singkat. Angka sudah di-clamp di klien (compileMotion);
+/// server hanya memastikan bentuk dan batas supaya compiler tidak menebak.
+/// Target beat valid bila: `role` ∈ 16 role kanonik, ATAU `param` ∈
+/// `probe_ids` (param ekstra hasil approve user — jalur kind param).
+fn parse_beats(obj: &Value, probe_ids: &std::collections::HashSet<String>) -> Result<(), String> {
+    let beats = obj
+        .get("beats")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "beats bukan array".to_string())?;
+    if beats.is_empty() {
+        return Err("beats kosong".into());
+    }
+    if beats.len() > 8 {
+        return Err("terlalu banyak beat".into());
+    }
+    let dur_total = obj.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    for (i, b) in beats.iter().enumerate() {
+        let role = b.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let param = b.get("param").and_then(|v| v.as_str()).unwrap_or("");
+        let target_ok = if !param.is_empty() {
+            probe_ids.contains(param)
+        } else {
+            KNOWN_ROLES.contains(&role)
+        };
+        if !target_ok {
+            let shown = if param.is_empty() { role } else { param };
+            return Err(format!("beat {}: target tidak dikenal '{}'", i + 1, shown));
+        }
+        let start = b.get("start").and_then(|v| v.as_f64());
+        let dur = b.get("duration").and_then(|v| v.as_f64());
+        let inten = b.get("intensity").and_then(|v| v.as_f64());
+        if start.map(|x| !(0.0..=dur_total.max(0.0)).contains(&x)).unwrap_or(true)
+            || dur.map(|x| !(0.05..=3.0).contains(&x)).unwrap_or(true)
+            || inten.map(|x| !(0.0..=1.0).contains(&x)).unwrap_or(true)
+        {
+            return Err(format!("beat {}: angka di luar rentang", i + 1));
+        }
+        let sign = b.get("sign").and_then(|v| v.as_i64());
+        if let Some(s) = sign {
+            if s != 1 && s != -1 {
+                return Err(format!("beat {}: sign bukan -1..+1", i + 1));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalisasi id motion (snake_case, cap 60, dedup '__'). Dipakai oleh
+/// mode beatsMode dan mode track lama supaya id konsisten.
+fn motion_id_from(id_src: &str) -> String {
+    let id: String = id_src.to_lowercase().chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let id = id.replace("__", "_");
+    let id: String = id.trim_matches('_').chars().take(60).collect();
+    if id.is_empty() { "gerakan_ai".to_string() } else { id }
 }
 
 /// POST /api/motions/generate — buat motion dari deskripsi user (role "motion")
@@ -271,7 +443,108 @@ pub async fn generate_motion(config_path: &Path, body: &Value) -> (u16, String) 
     };
     let ctx = analysis.as_ref().and_then(|a| model_context_block(a));
 
-    let prompt = build_generate_prompt(&desc, &emotions.join(", "), ctx.as_deref());
+    // RENCANA backlog 4a: planner 2-langkah. Langkah A memilih role dulu
+    // (panggilan ringkas), langkah B barulah prompt generate dibatasi ke
+    // role itu. Fail-soft: bila gagal/ kosong → kembali ke prompt penuh.
+    let planned = plan_roles(config_path, &desc).await;
+    let planned_ref: Option<&[String]> = if planned.is_empty() { None } else { Some(&planned) };
+
+    // MODE BEATS (Fase 4a-4b): client → server meminta storyboard beat via
+    // `mode: "beats"`; compiler klien (MotionCompiler) yang mengubah ke track.
+    // Gagal parse → fallback ke jalur lama (tanpa menggandakan error).
+    //
+    // Param ekstra hasil approve user (sheet probeApprovals role=null, klien
+    // mengirim `probeParams`): boleh jadi target beat via field "param".
+    // Server TIDAK membaca sheet — daftar mengalir per-request seperti roleMap.
+    let mut probe_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut probe_lines: Vec<String> = Vec::new();
+    if let Some(arr) = body.get("probeParams").and_then(|v| v.as_array()) {
+        for p in arr.iter().take(24) {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            if id.is_empty() || id.len() > 120 {
+                continue;
+            }
+            let label: String = p.get("label")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .chars()
+                .take(60)
+                .collect();
+            let range_txt = match p.get("safeRange").and_then(|v| v.as_array()) {
+                Some(a) => {
+                    let nums: Vec<f64> = a.iter().filter_map(|x| x.as_f64()).take(2).collect();
+                    if nums.len() == 2 && nums[0] <= nums[1] {
+                        format!("nilai aman {}..{}", nums[0], nums[1])
+                    } else {
+                        "range param penuh".to_string()
+                    }
+                }
+                None => "range param penuh".to_string(),
+            };
+            let sign = p.get("sign").and_then(|v| v.as_i64()).unwrap_or(1);
+            let label_txt = if label.is_empty() { id.clone() } else { label };
+            probe_lines.push(format!("- param: \"{id}\" — {label_txt}, {range_txt}, arah efek {sign}"));
+            probe_ids.insert(id);
+        }
+    }
+    let probe_section: Option<String> = if probe_lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Param tambahan hasil approve user (beat memakai field \"param\", BUKAN \"role\" — hanya param terdaftar):\n{}",
+            probe_lines.join("\n")
+        ))
+    };
+
+    let beats_mode = body.get("mode").and_then(|v| v.as_str()).map(|s| s == "beats").unwrap_or(false);
+    if beats_mode {
+        let bp = build_beats_prompt(&desc, &emotions.join(", "), ctx.as_deref(), planned_ref, probe_section.as_deref());
+        let echoed = |clean: &str| -> bool {
+            let low = clean.to_lowercase();
+            low.contains("balas hanya json") || low.contains("kamu membuat storyboard")
+        };
+        let msgs1 = vec![llm::ChatMessage { role: "user".into(), content: bp.clone() }];
+        if let Ok(ok) = llm::llm_for_role(config_path, "motion", &msgs1, "").await {
+            let clean = strip_fences(&ok.reply);
+            let mut parsed = jsonx::extract_json_object_loose(&ok.reply);
+            if parsed.is_none() || echoed(&clean) {
+                let msgs2 = vec![
+                    llm::ChatMessage { role: "user".into(), content: bp.clone() },
+                    llm::ChatMessage { role: "assistant".into(), content: clean.chars().take(2000).collect() },
+                    llm::ChatMessage {
+                        role: "user".into(),
+                        content: "Balasan-mu tadi salah: kamu mengulang instruksi. Balas HANYA objek JSON storyboard {id, name, duration, beats:[…] — mulai dengan { langsung.".into(),
+                    },
+                ];
+                if let Ok(ok2) = llm::llm_for_role(config_path, "motion", &msgs2, "").await {
+                    let p2 = jsonx::extract_json_object_loose(&ok2.reply);
+                    if p2.is_some() { parsed = p2; }
+                }
+            }
+            if let Some(obj) = parsed {
+                if obj.is_object() && parse_beats(&obj, &probe_ids).is_ok() {
+                    let ok_emo: std::collections::HashSet<&str> = emotions.iter().map(String::as_str).collect();
+                    let mut obj = obj;
+                    if let Some(ec) = obj.get_mut("emotionCompatibility").and_then(|v| v.as_object_mut()) {
+                        let allowed_keys: Vec<String> = ec.keys().map(|k| k.clone()).collect();
+                        for k in allowed_keys {
+                            if !ok_emo.contains(k.as_str()) { ec.remove(&k); }
+                        }
+                    }
+                    // id normalisasi + anchor jangan pakai tracks
+                    let id_src = obj.get("id").and_then(|v| v.as_str()).map(str::to_string).unwrap_or(desc.clone());
+                    let id = motion_id_from(&id_src);
+                    obj["id"] = json!(id);
+                    if let Some(m) = obj.as_object_mut() { m.remove("tracks"); }
+                    return (200, json!({ "motion": obj, "source": "ai", "beats": true }).to_string());
+                }
+            }
+        }
+        // fallback → lanjut ke jalur lama di bawah
+    }
+
+    let prompt = build_generate_prompt(&desc, &emotions.join(", "), ctx.as_deref(), planned_ref);
 
     let echoed = |clean: &str| -> bool {
         let low = clean.to_lowercase();
@@ -357,29 +630,35 @@ fn significant_issues(report: &Value) -> u64 {
 /// issue signifikan berkurang; selain itu draft asli dipertahankan. Graceful:
 /// tanpa issue / tanpa koneksi / JSON gagal → kembalikan draft apa adanya.
 async fn refine_with_validator(config_path: &Path, draft: Value, analysis: Option<&Value>, emo: &str) -> Value {
-    let report = crate::motion_validation::validate_asset(&draft, analysis);
-    let before = significant_issues(&report);
-    if before == 0 {
-        return draft;
-    }
-    let lines: Vec<String> = report
-        .get("issues")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter(|i| i["level"] == json!("error") || i["level"] == json!("warn"))
-                .take(12)
-                .map(|i| format!("- [{}] {}", i["code"].as_str().unwrap_or("?"), i["message"].as_str().unwrap_or("")))
-                .collect()
-        })
-        .unwrap_or_default();
-    if lines.is_empty() {
-        return draft;
+    let mut best = draft;
+    let mut best_issues = significant_issues(&crate::motion_validation::validate_asset(&best, analysis));
+    if best_issues == 0 {
+        return best;
     }
 
-    let draft_str: String = serde_json::to_string(&draft).unwrap_or_default().chars().take(2000).collect();
-    let fix_prompt = format!(
-        "Draft motion buatanmu diperiksa validator independen dan ada yang perlu diperbaiki.\n\n\
+    // REncana backlog 4e: loop refine maks 3. Tiap putaran pakai validator
+    // independen dan dipilih HANYA bila jumlah issue signifikan berkurang;
+    // kalau tidak — draft terbaik dipertahankan.
+    for attempt in 0..3 {
+        if best_issues == 0 { break; }
+        let report = crate::motion_validation::validate_asset(&best, analysis);
+        let lines: Vec<String> = report
+            .get("issues")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|i| i["level"] == json!("error") || i["level"] == json!("warn"))
+                    .take(12)
+                    .map(|i| format!("- [{}] {}", i["code"].as_str().unwrap_or("?"), i["message"].as_str().unwrap_or("")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if lines.is_empty() {
+            break;
+        }
+        let draft_str: String = serde_json::to_string(&best).unwrap_or_default().chars().take(2000).collect();
+        let fix_prompt = format!(
+            "Draft motion buatanmu diperiksa validator independen dan ada yang perlu diperbaiki.\n\n\
 Draft sekarang (JSON):\n{draft_str}\n\n\
 Masalah yang ditemukan:\n{issues}\n\n\
 Perbaiki HANYA masalah di atas. Tetap pakai nama track PERAN (ax, ay, az, bodyX,\n\
@@ -388,27 +667,31 @@ browLF, browRF) — \
 JANGAN menyebut nama parameter rig. Jaga nilai realistis (±5..15 derajat kepala/badan, ±0.2..0.6 mata) dan \
 PULANG ke 0 di keyframe terakhir tiap track supaya gerakan tidak nyangkut. Emosi yang boleh HANYA: [{emo}].\n\
 Balas HANYA objek JSON motion lengkap (id, name, description, tags, duration, emotionCompatibility, tracks) — \
-mulai dengan {{ dan akhiri dengan }}. JANGAN mengulang instruksi ini.",
-        draft_str = draft_str,
-        issues = lines.join("\n"),
-        emo = emo,
-    );
+mulai dengan {{ dan akhiri dengan }}. JANGAN mengulang instruksi ini. Ini percobaan {attempt}.",
+            draft_str = draft_str,
+            issues = lines.join("\n"),
+            emo = emo,
+            attempt = attempt + 1,
+        );
 
-    let msgs = vec![llm::ChatMessage { role: "user".into(), content: fix_prompt }];
-    let reply = match llm::llm_for_role(config_path, "motion", &msgs, "").await {
-        Ok(ok) => ok.reply,
-        Err(_) => return draft,
-    };
-    let fixed = match jsonx::extract_json_object_loose(&reply) {
-        Some(f) if f.is_object() => f,
-        _ => return draft,
-    };
-    let after = significant_issues(&crate::motion_validation::validate_asset(&fixed, analysis));
-    if after < before {
-        fixed
-    } else {
-        draft
+        let msgs = vec![llm::ChatMessage { role: "user".into(), content: fix_prompt }];
+        let reply = match llm::llm_for_role(config_path, "motion", &msgs, "").await {
+            Ok(ok) => ok.reply,
+            Err(_) => break,
+        };
+        let fixed = match jsonx::extract_json_object_loose(&reply) {
+            Some(f) if f.is_object() => f,
+            _ => break,
+        };
+        let after = significant_issues(&crate::motion_validation::validate_asset(&fixed, analysis));
+        if after < best_issues {
+            best = fixed;
+            best_issues = after;
+        } else {
+            break;
+        }
     }
+    best
 }
 
 #[cfg(test)]
@@ -433,7 +716,7 @@ mod tests {
     #[test]
     fn prompt_tanpa_konteks_dan_dengan_konteks() {
         // Tanpa konteks: prompt lama utuh — tanpa blok Konteks, Aturan tetap ada.
-        let p0 = build_generate_prompt("buat angguk", "senang, sedih", None);
+        let p0 = build_generate_prompt("buat angguk", "senang, sedih", None, None);
         assert!(p0.starts_with("Kamu membuat gerakan (motion) untuk karakter Live2D dari deskripsi user.\n"));
         assert!(p0.contains("Permintaan user: \"buat angguk\""));
         assert!(p0.contains("Emosi yang boleh dipakai HANYA: [senang, sedih]"));
@@ -448,7 +731,7 @@ mod tests {
 
         // Dengan konteks: blok disisipkan sebelum "Aturan:", aturan tetap utuh.
         let ctx = "Konteks model ini (diukur engine dari motion milik model ini):\n- amplitudo teramati: ax -30..20";
-        let p1 = build_generate_prompt("buat angguk", "senang", Some(ctx));
+        let p1 = build_generate_prompt("buat angguk", "senang", Some(ctx), None);
         let i_ctx = p1.find(ctx).unwrap();
         let i_aturan = p1.find("\nAturan:\n").unwrap();
         assert!(i_ctx < i_aturan, "konteks harus sebelum Aturan");
@@ -528,5 +811,81 @@ mod tests {
         let after = significant_issues(&crate::motion_validation::validate_asset(&out, None));
         assert!(after <= before, "refine tidak boleh memperburuk draft");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_beats_validasi_bentuk() {
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let good = json!({
+            "duration": 1.4,
+            "beats": [{ "beatId": "b1", "role": "ay", "start": 0.0, "duration": 0.6, "intensity": 0.6, "sign": 1, "holdEnd": false }]
+        });
+        assert!(parse_beats(&good, &empty).is_ok());
+        // role tidak dikenal → ditolak
+        let bad1 = json!({
+            "duration": 1.4,
+            "beats": [{ "beatId": "b1", "role": "hax", "start": 0.0, "duration": 0.6, "intensity": 0.6 }]
+        });
+        assert!(parse_beats(&bad1, &empty).is_err());
+        // angka di luar rentang → ditolak
+        let bad2 = json!({
+            "duration": 1.4,
+            "beats": [{ "beatId": "b1", "role": "ay", "start": 2.0, "duration": 0.6, "intensity": 1.5 }]
+        });
+        assert!(parse_beats(&bad2, &empty).is_err());
+        // motion id normalization tetap aman
+        assert_eq!(motion_id_from("  Angguk Kecil  "), "angguk_kecil");
+    }
+
+    #[test]
+    fn parse_beats_param_ekstra_hanya_dari_approve() {
+        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        ids.insert("ParamHairSway".to_string());
+        // param terdaftar → sah (jalur kind param)
+        let ok = json!({
+            "duration": 1.4,
+            "beats": [{ "beatId": "b1", "param": "ParamHairSway", "start": 0.0, "duration": 0.5, "intensity": 0.7, "sign": 1 }]
+        });
+        assert!(parse_beats(&ok, &ids).is_ok());
+        // param asing (tidak di approve) → ditolak — LLM tak bisa menyelundup
+        // paramId sembarangan lewat field "param".
+        let bad = json!({
+            "duration": 1.4,
+            "beats": [{ "beatId": "b1", "param": "ParamBocor", "start": 0.0, "duration": 0.5, "intensity": 0.7 }]
+        });
+        assert!(parse_beats(&bad, &ids).is_err());
+        // role kanonik tetap sah bersama param ekstra dalam satu storyboard
+        let mix = json!({
+            "duration": 1.4,
+            "beats": [
+                { "beatId": "b1", "role": "ay", "start": 0.0, "duration": 0.6, "intensity": 0.6 },
+                { "beatId": "b2", "param": "ParamHairSway", "start": 0.3, "duration": 0.5, "intensity": 0.4, "sign": -1 }
+            ]
+        });
+        assert!(parse_beats(&mix, &ids).is_ok());
+        // tanpa approve sama sekali → param beat ditolak (kosakata tetap terkunci)
+        assert!(parse_beats(&ok, &std::collections::HashSet::new()).is_err());
+    }
+
+    #[test]
+    fn beats_prompt_memuat_param_approve_dan_tetap_kunci_role() {
+        let p = build_beats_prompt(
+            "goyang rambut",
+            "senang",
+            None,
+            None,
+            Some("Param tambahan hasil approve user (beat memakai field \"param\", BUKAN \"role\"):\n- param: \"ParamHairSway\" — Goyang Rambut, nilai aman -15..15, arah efek 1"),
+        );
+        assert!(p.contains("ParamHairSway"), "{p}");
+        assert!(p.contains("BUKAN \"role\""), "{p}");
+        // Urutan section: kamus role → param approve → aturan.
+        let i_roles = p.find("Role yang boleh dipakai HANYA").unwrap();
+        let i_param = p.find("ParamHairSway").unwrap();
+        let i_aturan = p.find("\nAturan:\n").unwrap();
+        assert!(i_roles < i_param && i_param < i_aturan, "{p}");
+        // Tanpa param approve → prompt tidak memuat section param.
+        let p0 = build_beats_prompt("goyang", "senang", None, None, None);
+        assert!(!p0.contains("Param tambahan"), "{p0}");
+        assert!(p0.contains("Role yang boleh dipakai HANYA"), "{p0}");
     }
 }

@@ -46,6 +46,9 @@ declare global {
     MotionDSL?: typeof MotionDSL;
     MotionRegistry?: typeof MotionRegistry;
     MotionRuntime?: typeof MotionRuntime;
+    MotionCompiler?: any;
+    MotionCritic?: any;
+    MotionProbe?: any;
     MotionTaxonomy?: typeof MotionTaxonomy;
     LipSync?: typeof LipSync;
     __agentPanel?: { start(): Destroy };

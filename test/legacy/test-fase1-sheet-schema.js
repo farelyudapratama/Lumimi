@@ -47,6 +47,10 @@ const normPresetListSrc = extractFn(appSrc, 'normalizePresetList');
 const normPresetsSrc = extractFn(appSrc, 'normalizePresets');
 const normGroupMapSrc = extractFn(appSrc, 'normalizeGroupMap');
 const normParamGroupsSrc = extractFn(appSrc, 'normalizeParamGroups');
+// v5 dep: migrateSheet() memanggil normalizeProbeApprovals() — layer user
+// hasil approve panel probe. Diekstrak asli supaya sanitizer yang salah
+// (safeRange terbalik lolos, role bocor) tidak bisa lolos suite.
+const normProbeSrc = extractFn(appSrc, 'normalizeProbeApprovals');
 const resolveGroupSrc = extractFn(appSrc, 'resolveParamGroup');
 const resolvePresetsSrc = extractFn(appSrc, 'resolvePresets');
 // Gesture-namespace collision guards. migrateSheet() now calls
@@ -79,6 +83,8 @@ ok('USER_AUTHORED_FIELDS lists userNote',
   /const USER_AUTHORED_FIELDS\s*=\s*\[[^\]]*'userNote'/.test(appSrc));
 ok('USER_AUTHORED_FIELDS lists config',
   /const USER_AUTHORED_FIELDS\s*=\s*\[[^\]]*'config'/.test(appSrc));
+ok('USER_AUTHORED_FIELDS lists probeApprovals (layer user hasil approve probe)',
+  /const USER_AUTHORED_FIELDS\s*=\s*\[[^\]]*'probeApprovals'/.test(appSrc));
 ok('inspectModel stamps schemaVersion into new sheets',
   /schemaVersion:\s*SHEET_SCHEMA_VERSION/.test(appSrc));
 ok('new sheets carry a userNote field', /userNote:\s*''/.test(appSrc));
@@ -122,6 +128,7 @@ vm.runInContext([
   normPresetsSrc || '',
   normGroupMapSrc || '',
   normParamGroupsSrc || '',
+  normProbeSrc || '',
   resolveGroupSrc || '',
   resolvePresetsSrc || '',
   reservedNamesSrc || '',
@@ -342,6 +349,55 @@ ok('bogus framing in a stored sheet is repaired on read',
 const notObj = migrateSheet({ schemaVersion: 2, modelName: 'e', config: 'broken' });
 ok('non-object config is replaced with defaults',
   notObj.config && notObj.config.blink === DEFAULTS.blink);
+
+section('5b. v5 probeApprovals — layer user hasil approve probe');
+const v4sheet = migrateSheet({ schemaVersion: 4, modelName: 'f' });
+ok('v4 sheet gains an empty probeApprovals.user on migration',
+  v4sheet.probeApprovals && typeof v4sheet.probeApprovals.user === 'object'
+  && Object.keys(v4sheet.probeApprovals.user).length === 0,
+  JSON.stringify(v4sheet.probeApprovals));
+ok('v5 is the current schema version', CURRENT === 5, 'got v' + CURRENT);
+
+const probeSheet = migrateSheet({
+  schemaVersion: 5, modelName: 'g',
+  probeApprovals: { user: {
+    ParamHairSway: { role: null, label: 'Goyang Rambut', region: 'rambut', sign: 1, safeRange: [-15, 15], confidence: 0.8, modelHash: 'ab12cd', approvedAt: 1700000000 },
+    ParamHeadRotY: { role: 'angleY', label: 'Nunduk', region: 'kepala', sign: -1 },
+  } },
+});
+ok('approved entries survive migration (role override)',
+  probeSheet.probeApprovals.user.ParamHeadRotY.role === 'angleY');
+ok('approved entries survive migration (param ekstra + safeRange)',
+  probeSheet.probeApprovals.user.ParamHairSway.safeRange[0] === -15
+  && probeSheet.probeApprovals.user.ParamHairSway.safeRange[1] === 15);
+
+// Sheet yang di-hand-edit tidak boleh lolos mentah: safeRange terbalik dibuang,
+// confidence di-clamp, entri bukan-objek dibuang, role string kosong jadi null.
+const dirtyProbe = migrateSheet({
+  schemaVersion: 5, modelName: 'h',
+  probeApprovals: { user: {
+    A: { role: 'angleY', safeRange: [5, -5], confidence: 7 },
+    B: 'bukan objek',
+    C: { role: '' },
+  } },
+});
+ok('reversed safeRange is dropped, not passed through',
+  dirtyProbe.probeApprovals.user.A.safeRange === undefined);
+ok('out-of-range confidence is clamped to 1',
+  dirtyProbe.probeApprovals.user.A.confidence === 1);
+ok('non-object entry is dropped',
+  dirtyProbe.probeApprovals.user.B === undefined);
+ok('empty role string becomes null (param ekstra)',
+  dirtyProbe.probeApprovals.user.C.role === null);
+ok('ai layer in probeApprovals is stripped (user only, mutlak)',
+  Object.keys(migrateSheet({
+    schemaVersion: 5, modelName: 'i',
+    probeApprovals: { user: {}, ai: { X: { role: 'angleY' } } },
+  }).probeApprovals).indexOf('ai') === -1);
+ok('one-door approve function exists in app.js',
+  /async function approveProbeParams\(/.test(appSrc));
+ok('role override extraction exists in app.js',
+  /function roleOverridesFromSheet\(/.test(appSrc));
 
 section('6. config wiring in the app');
 ok('TTS reads pitch from the model config, not a literal',

@@ -20,6 +20,9 @@ import * as MotionDSL from "./animation/motion-dsl";
 import { toMotion3, motion3ToAsset } from "./animation/motion-io";
 import { MotionRegistry } from "./animation/motion-registry";
 import { MotionRuntime } from "./animation/motion-runtime";
+import * as MotionCompilerMod from "./animation/motion-compiler";
+import * as MotionCriticMod from "./animation/motion-critic";
+import * as MotionProbeMod from "./animation/motion-probe";
 import * as MotionTaxonomy from "./engine/motion-taxonomy";
 import * as Framing from "./engine/framing";
 import * as RoleMapping from "./engine/role-mapping";
@@ -45,6 +48,9 @@ if (typeof window !== "undefined") {
   window.MotionDSL = MotionDSL;
   window.MotionRegistry = MotionRegistry;
   window.MotionRuntime = MotionRuntime;
+  window.MotionCompiler = MotionCompilerMod;
+  window.MotionCritic = MotionCriticMod;
+  window.MotionProbe = MotionProbeMod;
   window.MotionTaxonomy = MotionTaxonomy;
   window.LipSync = LipSync;
   // Policy/kepemilikan speech (boundary §15–16): producer menyebut kelas,

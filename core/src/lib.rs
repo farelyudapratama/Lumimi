@@ -35,6 +35,8 @@ pub mod motions;
 pub mod paths;
 pub mod pet;
 pub mod rescue;
+pub mod rig_report;
+pub mod motion_probe;
 pub mod sheet;
 pub mod sheet_ai;
 pub mod speech_lang;
@@ -175,6 +177,8 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/model/expressions", get(get_expressions))
         .route("/api/model/motions", get(get_motions))
         .route("/api/model/motion-analysis", get(get_motion_analysis))
+        .route("/api/model/rig-report", get(get_rig_report))
+        .route("/api/model/probe", axum::routing::post(post_model_probe))
         .route(
             "/api/model/expressions-adoption",
             get(get_adoption).post(post_adoption),
@@ -1386,7 +1390,26 @@ async fn get_motion_analysis(
     }
 }
 
-/// GET /api/model/expressions-adoption?name=X — ekspresi + flag enabled.
+/// GET /api/model/rig-report?name=X — TAMBahan: rig report ringan (provenance + model hash + unclassified).
+async fn get_rig_report(
+    State(paths): State<AppPaths>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let name = q.get("name").map(String::as_str).unwrap_or("");
+    match rig_report::analyze(&paths.model_dir, &paths.data_dir, name) {
+        Ok(v) => json_status(StatusCode::OK, v),
+        Err(e) => json_status(StatusCode::NOT_FOUND, json!({ "error": e })),
+    }
+}
+
+/// POST /api/model/probe {model, params?: [id]} — sweep param di harness
+/// (settle physics + capture + metrik diff) + cross-check VLM per param.
+async fn post_model_probe(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or(json!({}));
+    let (status, out) = motion_probe::probe(&paths.data_dir.join("config.json"), &paths.root, &v).await;
+    json_raw(status, out)
+}
+
 async fn get_adoption(
     State(paths): State<AppPaths>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,

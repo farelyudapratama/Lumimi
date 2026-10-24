@@ -1,7 +1,8 @@
 # SPECIFICATION — Motion Studio & AI Motion System
 
 > Spesifikasi mengikat sistem motion di repo ini. Sistemnya sudah terbangun
-> penuh (7 fase selesai) — dokumen ini menjelaskan makna setiap keputusan dan
+> penuh (7 fase selesai; jalur beats + instrumen rig ditambah 2026-10-24,
+> §17c–§17d) — dokumen ini menjelaskan makna setiap keputusan dan
 > pagar yang tidak boleh dilanggar saat mengubah sistem motion.
 
 ## 0. Peta implementasi
@@ -11,6 +12,9 @@ src/client/animation/motion-dsl.ts        Format Motion Asset + evaluator keyfra
 src/client/animation/motion-io.ts         Konversi dua arah Motion Asset ↔ .motion3.json (ekspor/impor)
 src/client/animation/motion-registry.ts   Registry 2 sumber gerakan
 src/client/animation/motion-runtime.ts    Satu-satunya pemutar animasi (scheduler + blending)
+src/client/animation/motion-compiler.ts   Beat storyboard → keyframe deterministik (§17c)
+src/client/animation/motion-critic.ts     Critic numerik read-only: skor + temuan (§17c)
+src/client/animation/motion-probe.ts      Metrik diff piksel probe (logika murni, §17d)
 src/client/engine/motion-taxonomy.ts      Klasifikasi klip .motion3.json (dipakai server & bundle)
 src/client/engine/native-clips.ts         Daftar klip native per-file + overlay alias rename
 src/client/engine/role-mapping.ts         Inferensi role → parameter id milik model
@@ -18,11 +22,12 @@ src/client/agent/brain.ts                 AI Motion Director (prompt, directive,
 static/js/motion-editor.js                UI Motion Studio (timeline, metadata, preview)
 static/js/app.js                          Bridge runtime ↔ render loop ↔ state.aiPose
 POST /api/motions (+ /native-alias), /api/motions/analyze, /api/motions/generate, /api/motions/validate, /api/motions/verify
-GET /api/model/motions, /api/model/motion-analysis, /api/model/motion-taxonomy   (core/src/motions.rs + motion_ai.rs + motion_files.rs + motion_analysis.rs + motion_validation.rs + motion_vision.rs + motion_dsl.rs + motion_taxonomy.rs)
+GET /api/model/motions, /api/model/motion-analysis, /api/model/rig-report, /api/model/motion-taxonomy; POST /api/model/probe   (core/src/motions.rs + motion_ai.rs + motion_files.rs + motion_analysis.rs + motion_validation.rs + motion_vision.rs + motion_dsl.rs + motion_taxonomy.rs + rig_report.rs + motion_probe.rs)
 ```
 
 Semua di-bundle/di-bridge lewat `window.MotionDSL / MotionRegistry /
-MotionRuntime` + `window.__agent` (lihat `src/client/bundle-entry.ts`).
+MotionRuntime / MotionCompiler / MotionCritic / MotionProbe` + `window.__agent`
+(lihat `src/client/bundle-entry.ts`).
 
 # 1. Main Goal
 
@@ -283,6 +288,12 @@ browLY/browRY/browLF/browRF`). Karena `roleMap` klien dibangun dari iterasi
 `ROLE_FOR_FIELD`, konteks amplitudo per field baru ikut terisi otomatis dari
 analisis disk — tanpa perubahan `motion_analysis`.
 
+**Jalur beats (revisi 2026-10-24).** `POST /api/motions/generate` menerima
+`mode:"beats"`: LLM hanya menulis storyboard beat (pose semantik + timing +
+intensitas), keyframe dirakit compiler deterministik di klien lewat panel
+Terima Batch. Kontrak lengkap di §17c; jalur tracks lama di atas tetap ada
+sebagai fallback.
+
 # 17a. Analisis Model & Validasi Independen (revisi 2026-09-26)
 
 Pola dari referensi live2d-add-motion-sample-web-ui: **loop analisis →
@@ -339,6 +350,134 @@ Implementasi Fase 4d `PLAN-MOTION-PIPELINE.md`. Agent/studio bisa meminta
   user), BUKAN frame webcam — aturan "webcam tak pernah di-upload" tidak
   tersentuh (amanat PLAN 2d).
 
+# 17c. Pipeline Beats — Planner → Storyboard → Compiler → Critic (revisi 2026-10-24)
+
+Implementasi Fase 4a–4e `PLAN-MOTION-PIPELINE.md`. Jalur kedua generate yang
+menjaga prinsip §3 lebih ketat: LLM tidak pernah menyentuh angka keyframe —
+dia hanya menulis **storyboard beat**, dan **compiler deterministik** yang
+merakit keyframe.
+
+- **Planner 2-langkah** (`core/src/motion_ai.rs::plan_roles`): langkah A
+  memilih role yang relevan (maks 4, dari 16 role canonical `KNOWN_ROLES`
+  yang sama dengan kosakata §17), langkah B prompt generate dibatasi ke role
+  terpilih. Fail-soft: planner gagal/kosong → prompt penuh seperti semula.
+- **Storyboard beat** (`mode:"beats"` di `POST /api/motions/generate`): LLM
+  mengembalikan `{id, name, duration, beats:[{beatId, role, start, duration,
+  intensity, sign, holdEnd, easing}]}` — satu beat = satu role. Server
+  memvalidasi bentuk (`parse_beats`: role harus `KNOWN_ROLES`, maks 8 beat,
+  start dalam durasi, beat 0.05..3 s, intensitas 0..1, sign ±1), menormalkan
+  id, membuang kunci emosi di luar daftar emosi yang diizinkan, dan melepas
+  field `tracks` bila LLM mencoba menyelundupkannya. Balasan yang mengulang
+  instruksi di-retry sekali (echo-retry); gagal parse → fallback ke jalur
+  tracks lama (§17).
+- **Panel Terima Batch** (`static/js/motion-editor.js`): hasil beats TIDAK
+  langsung mengganti draft — staging per-beat (sertakan/hapus, slider
+  intensitas, tanda ±) dan menunggu persetujuan user. Baru setelah itu
+  `compileMotion` dijalankan dan critic numerik berjalan otomatis. Refine
+  user per-beat bersifat deterministik (ubah beat → recompile):
+  **keyframe tetap tulisan compiler, bukan LLM.**
+- **Compiler** (`src/client/animation/motion-compiler.ts`) — jaminan yang
+  tidak boleh dilemahkan: loop selalu tertutup (nilai akhir = nilai awal)
+  dan pulang ke base pose (`returnToDefault`); amplitudo dari statistik
+  native rig (fallback default bila tidak ada); clamp ke `safeRange`;
+  track ke output physics DITOLAK (fisika mengikuti penyebabnya, aturan
+  §17a); gate capability model (role/param yang tidak dimiliki model →
+  skip); `beatId` disematkan di tiap track hasil compile (bekal refine
+  terpetaan); durasi beat ada lantai 0.05 s (stretch penuh belum dibangun).
+  Catatan gap konsep: `holdEnd` beat hanya tercatat di meta — keyframe
+  terakhir TETAP pulang ke base pose (`returnToDefault` selalu aktif di
+  compiler sekarang), padahal prompt beats menyuruh LLM memakai holdEnd
+  untuk "berakhir di pose". holdEnd sungguhan = backlog.
+- **Critic numerik** (`src/client/animation/motion-critic.ts`) — read-only,
+  tidak mengubah asset. Sampling kurva tiap ~25 ms; skor 0..100 (makin
+  tinggi makin baik) plus temuan: jerk (p90 distribusi native bila
+  tersedia, fallback heuristik), endStuck (akhir ≠ awal tanpa holdEnd),
+  diskontinuitas antar-keyframe bersebelahan, contention (dua track
+  merebut target sama), physics-output gate. Tombol "Cek Kurva" di Motion
+  Studio memicunya manual.
+- **Refine loop server** (`motion_ai.rs::refine_with_validator`): maks 3
+  iterasi memakai validator independen (§17a); hasil perbaikan hanya dipakai
+  bila jumlah issue signifikan MENURUN — kalau tidak, draft terbaik
+  dipertahankan. Refine LLM per-`beatId` belum dibangun (backlog,
+  `ARSITEKTUR-GAP.md`).
+- **Beat kind param (revisi 2026-10-24, Fase 3 jalur B)**: beat boleh memakai
+  field `param` (paramId hasil approve user, §17d) alih-alih `role`. Prompt
+  beats menambahkan daftar param approve (`probeParams` dari klien — server
+  TIDAK membaca sheet); `parse_beats` menerima `param` HANYA bila paramId ada
+  di daftar itu (param asing tetap ditolak — kosakata role kanonik tetap
+  terkunci). Compiler mengubah beat param → track `kind:"param"` (didukung
+  sanitize `motion_dsl` sejak awal): amplitudo/base dari `safeRange` approve
+  (fallback statistik paramId rig report), clamp safeRange, `min`/`max`
+  tersemat, physics gate `physicsParamIds`, capability gate `ownedParams`,
+  loop closure + `beatId` tetap berlaku. safeRange datang dari layer user,
+  BUKAN dari LLM — angka tetap bukan milik LLM.
+
+Bukan engine motion kedua (§31): hasil compiler tetap Motion Asset biasa —
+jalurnya tetap Registry → Scheduler → Runtime.
+
+# 17d. Rig Report & Probe Param (revisi 2026-10-24)
+
+Implementasi Fase 1–2 `PLAN-MOTION-PIPELINE.md` — instrumen rig dari disk
+yang memberi EVIDENSA tambahan. **Bukan pengganti role-mapping**: makna
+tetap satu sumber di `role-mapping.ts` (klien); Rust tidak menebak role
+(aturan §17a).
+
+- **Rig report** — `GET /api/model/rig-report?name=<folder>`
+  (`core/src/rig_report.rs`): membungkus `motion_analysis` (§17a) dan
+  menambahkan daftar parameter lengkap dari `cdi3.json` (termasuk yang tak
+  terobservasi di motion native) dengan **provenance** per param —
+  `curveClassified` / `unclassified` / `displayLabel` / `physicsOutput` —
+  plus `modelHash` ringkas (path + ukuran file model) untuk invalidasi
+  cache klien, dan daftar `unclassified` siap pakai. Provenance hanya
+  menyatakan "dari mana angka ini berasal", bukan makna semantik.
+- **Probe param** — `POST /api/model/probe {model, params?}`
+  (`core/src/motion_probe.rs`): jalur CDP yang sama dengan critic visual
+  (§17b) lewat harness `__motionHarness.probe()`. Per param: drive patch
+  default → min → mid → max (TANPA asset — pose murni dari drive) → settle
+  physics → capture sinkron → metrik diff piksel (`changedPixels`,
+  `diffRatio`, `bbox`, `centroid`; logika murni di
+  `src/client/animation/motion-probe.ts`). Param mati (piksel tak berubah)
+  dilaporkan `dead`. Param hidup dikirim frame sweep-nya ke LLM role
+  `motion-vision` (koneksi eksplisit, aturan §17b) untuk cross-check
+  region/sign/safeRange/confidence — parser loose, jawaban sampah
+  diawetkan ke `raw`. Tanpa koneksi vision → `skipped` per param (degrade
+  anggun; metrik piksel tetap hasil). Default `params` = daftar
+  `unclassified` rig report, cap 6 per panggilan.
+- **UI**: tombol "Probe Param", "Setujui Param", dan "Cek Kurva" di footer
+  Motion Studio; hasil probe satu param tampil sebagai lint ringan (metrik
+  piksel + region VLM).
+- **Panel Approve Batch (revisi 2026-10-24, Fase 3 bentuk asli)**: tombol
+  "Setujui Param" mem-probe batch param `unclassified` (6/panggilan,
+  sekuensial) lalu menampilkan baris per param **urut kebutuhan mata
+  manusia**: `conflict` (cross-check VLM ↔ piksel, `motion-probe.ts::
+  crossCheck` — akhirnya ter-wire) → `dead`/gagal → tanpa vision → percaya
+  rendah (<0.6) → konsisten. Per baris: pilih role kanonik (25 role
+  `ROLE_KEYWORDS`) atau "param ekstra", label (prefill cdi), evidensa
+  (region/sign/confidence/piksel/safeRange). Approve → entri promosi ke
+  **layer `user`** sheet (`probeApprovals.user`, schema v5 — `user` > `ai`
+  mutlak, selamat re-inspeksi via `USER_AUTHORED_FIELDS`); tolak = uncheck.
+  Entri tersimpan ditampilkan dengan badge **stale** bila `modelHash` berubah
+  (konsumen `modelHash` yang pertama) + tombol hapus.
+- **Konsumsi hasil approve** — dua jalur:
+  - **Override role-mapping (jalur A)**: entri ber-role jadi tier 0
+    `mapRoles(paramSet, official, overrides)` — dicek SEBELUM grup resmi,
+    divalidasi `paramId ∈ paramSet` (id basi ditolak senyap), invariant
+    mouthOpenY≠mouthForm tetap dijaga. Diterapkan di `state.caps.ids`
+    (app.js `applyRoleOverrides` — roleMap/roleIdFor/generate ikut otomatis)
+    DAN runtime renderer (`Live2DRenderer.setRoleOverrides` → rebuild
+    RoleController + refresh look/breath/blink-fallback; batas: updater
+    lipsync memegang id load-time, override mouthOpenY baru mengikat penuh
+    setelah reload model).
+  - **Beat kind param (jalur B)**: entri role=null dikirim klien sebagai
+    `probeParams` di `POST /api/motions/generate` → lihat §17c.
+- **Privasi**: sama dengan §17b — yang keluar hanya render canvas model
+  milik user, bukan frame webcam.
+- **Backlog terbuka** (dicatat di `ARSITEKTUR-GAP.md`): cache-hash → stale
+  UI untuk RIG REPORT itu sendiri (approvals sudah divalidasi modelHash);
+  retry bersyarat `coupled_with`; atribusi per mesh/drawable; penanda
+  kiri/kanan frame untuk `side` (cross-check side menunggu ini); holdEnd
+  sungguhan di compiler.
+
 # 18–19. LLM Integration & Catalog
 
 Format lama (`{text, emotion, gesture, intensity}`) dan format baru
@@ -359,7 +498,9 @@ ID motion yang tidak ada → **ditolak server, dibuang runtime, jatuh ke preset
 gerak biasa**. Validasi: motion exists, enabled, model support, intensity dalam
 range, duration valid, target valid, nilai keyframe dalam batas aman
 (`sanitizeMotionAsset`). Cegah NaN/Infinity/timestamp invalid/duration
-negatif/target asing.
+negatif/target asing. Jalur beats: bentuk storyboard divalidasi server
+(`parse_beats`), angka keyframe di-clamp compiler, critic numerik advisory
+(§17c).
 
 # 21. Context-aware Selection
 
@@ -410,6 +551,7 @@ GET    /api/motions/native-alias       POST   /api/motions/native-alias
 POST   /api/motions/analyze            POST   /api/motions/generate
 POST   /api/motions/validate           POST   /api/motions/verify
 GET    /api/model/motions              GET    /api/model/motion-analysis
+GET    /api/model/rig-report           POST   /api/model/probe
 GET    /api/model/motion-taxonomy
 ```
 
@@ -427,11 +569,13 @@ Minimal: registry (register/get/remove/search/duplicate), parser (valid,
 invalid, missing fields, keyframe invalid, target asing), runtime
 (play/stop/blend/intensity/cooldown/priority/ownership), LLM (motion valid,
 ID asing, intensity invalid, format lama + baru), capability (full model,
-head-only, tanpa mata, tanpa body). Status: `bun run test` — unit TS
-(`test/motion-{dsl,registry,runtime,taxonomy,io}.test.ts`, directive parser,
-voice-input), guard legacy `test/legacy/` (api-origin, core6-compat,
-exp3-adoption, fase1-sheet-schema, param-notes-ui), dan guard invarian nama
-di `test/role-mapping.test.ts`.
+head-only, tanpa mata, tanpa body), compiler/critic/probe (§17c–§17d:
+`test/motion-{compiler,critic,probe,fixture-refine}.test.ts`). Status:
+`bun run test` — unit TS
+(`test/motion-{dsl,registry,runtime,taxonomy,io,compiler,critic,probe,fixture-refine}.test.ts`,
+directive parser, voice-input), guard legacy `test/legacy/` (api-origin,
+core6-compat, exp3-adoption, fase1-sheet-schema, param-notes-ui), dan guard
+invarian nama di `test/role-mapping.test.ts`.
 
 # 30. Implementation Strategy (status)
 
@@ -439,6 +583,8 @@ Fase 1 (core tanpa UI) — ✅. Fase 2 (sambungkan preset/native/taxonomy) — �
 Fase 3 (Motion Studio UI) — ✅. Fase 4 (metadata editor) — ✅.
 Fase 5 (integrasi LLM, dua format) — ✅. Fase 6 (AI analyze) — ✅.
 Fase 7 (AI generation) — ✅ (`/api/motions/generate`).
+Jalur beats (planner → storyboard → compiler → critic, §17c) dan instrumen
+rig (rig report + probe, §17d) — ✅ (revisi 2026-10-24).
 
 # 31. Architectural Rule
 

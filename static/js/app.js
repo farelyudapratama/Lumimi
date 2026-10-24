@@ -1860,8 +1860,8 @@
     return null;
   }
 
-  function mapRoles(paramSet, official) {
-    if (RM) return RM.mapRoles(paramSet, official);
+  function mapRoles(paramSet, official, overrides) {
+    if (RM) return RM.mapRoles(paramSet, official, overrides);
     // Fallback lengkap bila bundle belum termuat (test harness vm tanpa
     // bundle) — logika sama, tapi sumber kebenaran tetap modul TS.
     const ids = {};
@@ -1872,6 +1872,12 @@
       lowerToReal[list[i]] = id;
     });
     for (const role in ROLE_KEYWORDS) {
+      // Tier 0: override user (sheet probeApprovals) — paramId wajib dimiliki model.
+      const ov = overrides && overrides[role];
+      if (ov && paramSet.has(ov)) {
+        ids[role] = ov;
+        continue;
+      }
       if (official && GROUP_PATTERNS[role]) {
         const pool =
           role === "mouthOpenY" ? official.lipSyncIds : official.eyeBlinkIds;
@@ -7875,9 +7881,9 @@
 
   }
 
-  const SHEET_SCHEMA_VERSION = 4;
+  const SHEET_SCHEMA_VERSION = 5;
 
-  const USER_AUTHORED_FIELDS = ['userNote', 'config', 'paramGroups', 'presets'];
+  const USER_AUTHORED_FIELDS = ['userNote', 'config', 'paramGroups', 'presets', 'probeApprovals'];
 
   const PRESET_CATEGORIES = ["emosi", "properti", "aksesoris", "gerak"];
 
@@ -9425,6 +9431,11 @@
 
       classifyParams: triggerAIParamClassification,
 
+      approveProbe: approveProbeParams,
+      removeProbeApproval,
+      getProbeApprovals,
+      roleOverridesFromSheet,
+
       analyzePresets: analyzeSheetPresets,
     },
   };
@@ -9614,6 +9625,38 @@
     return out;
   }
 
+  // Normalisasi probeApprovals (v5): {user: {paramId: entri}}. Layer user =
+  // hasil approve panel probe — mutlak, tidak pernah ditimpa scan/AI.
+  // Entri diawetkan selama bentuknya objek; field numerik di-clamp,
+  // string di-trim/cap supaya sheet tidak membesar tanpa batas.
+  function normalizeProbeApprovals(raw) {
+    const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const userSrc = src.user && typeof src.user === "object" && !Array.isArray(src.user) ? src.user : {};
+    const user = {};
+    for (const pid of Object.keys(userSrc)) {
+      const e = userSrc[pid];
+      if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+      const id = String(pid).slice(0, 120);
+      const out = {};
+      if (typeof e.role === "string" && e.role) out.role = e.role.slice(0, 40);
+      else out.role = null;
+      out.label = typeof e.label === "string" ? e.label.trim().slice(0, 80) : "";
+      out.region = typeof e.region === "string" ? e.region.trim().slice(0, 40) : "";
+      if (e.sign === 1 || e.sign === -1 || e.sign === 0) out.sign = e.sign;
+      if (Array.isArray(e.safeRange) && e.safeRange.length === 2
+        && Number.isFinite(e.safeRange[0]) && Number.isFinite(e.safeRange[1])
+        && e.safeRange[0] <= e.safeRange[1]) {
+        out.safeRange = [Number(e.safeRange[0]), Number(e.safeRange[1])];
+      }
+      if (Number.isFinite(e.confidence)) out.confidence = Math.max(0, Math.min(1, Number(e.confidence)));
+      if (typeof e.modelHash === "string") out.modelHash = e.modelHash.slice(0, 32);
+      if (Number.isFinite(e.approvedAt)) out.approvedAt = Number(e.approvedAt);
+      if (typeof e.notes === "string") out.notes = e.notes.trim().slice(0, 300);
+      user[id] = out;
+    }
+    return { user };
+  }
+
   function normalizeParamGroups(raw) {
     const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     return { user: normalizeGroupMap(r.user), ai: normalizeGroupMap(r.ai) };
@@ -9719,6 +9762,13 @@
         sheet.modelName || "(unnamed)",
       );
     }
+    if (v < 5) {
+      sheet.schemaVersion = 5;
+      console.log(
+        "[sheet] migrated v4 -> v5 for",
+        sheet.modelName || "(unnamed)",
+      );
+    }
 
     if (typeof sheet.userNote !== "string") sheet.userNote = "";
 
@@ -9732,6 +9782,7 @@
     }
 
     sheet.paramGroups = normalizeParamGroups(sheet.paramGroups);
+    sheet.probeApprovals = normalizeProbeApprovals(sheet.probeApprovals);
     sheet.presets = normalizePresets(sheet.presets);
     if (!Array.isArray(sheet.parts)) sheet.parts = [];
     if (!Array.isArray(sheet.accessories)) sheet.accessories = [];
@@ -10154,6 +10205,143 @@
       (p) => p && p.id === paramId,
     );
     return p && typeof p.userNote === "string" ? p.userNote : "";
+  }
+
+  // ── Probe approvals (sheet v5, layer user) ────────────────────────
+  // Satu pintu promosi hasil probe panel → layer `user`. Entri:
+  // {paramId, role|null, label, region, sign, safeRange, confidence,
+  //  modelHash, notes}. role diisi = override role kanonik (jalur A);
+  // role null = param ekstra untuk beat planner (jalur B).
+  // Sekalian menulis label kategori ke paramGroups.user supaya slider
+  // param berkategori benar (resolveParamGroup: user ?? ai ?? heuristik).
+  async function approveProbeParams(entries) {
+    if (!Array.isArray(entries) || !entries.length)
+      throw new Error("entries kosong");
+    const sheet = await sheetForWrite();
+    if (!sheet.probeApprovals || typeof sheet.probeApprovals !== "object")
+      sheet.probeApprovals = { user: {} };
+    if (!sheet.probeApprovals.user || typeof sheet.probeApprovals.user !== "object")
+      sheet.probeApprovals.user = {};
+    if (!sheet.paramGroups) sheet.paramGroups = { user: {}, ai: {} };
+    if (!sheet.paramGroups.user || typeof sheet.paramGroups.user !== "object")
+      sheet.paramGroups.user = {};
+
+    const saved = [];
+    for (const raw of entries) {
+      if (!raw || typeof raw !== "object") continue;
+      const pid = String(raw.paramId || "").trim().slice(0, 120);
+      if (!pid) continue;
+      const entry = {
+        role: (typeof raw.role === "string" && raw.role) ? raw.role.slice(0, 40) : null,
+        label: String(raw.label || "").trim().slice(0, 80),
+        region: String(raw.region || "").trim().slice(0, 40),
+      };
+      if (raw.sign === 1 || raw.sign === -1 || raw.sign === 0) entry.sign = raw.sign;
+      if (Array.isArray(raw.safeRange) && raw.safeRange.length === 2
+        && Number.isFinite(raw.safeRange[0]) && Number.isFinite(raw.safeRange[1])
+        && raw.safeRange[0] <= raw.safeRange[1]) {
+        entry.safeRange = [Number(raw.safeRange[0]), Number(raw.safeRange[1])];
+      }
+      if (Number.isFinite(raw.confidence))
+        entry.confidence = Math.max(0, Math.min(1, Number(raw.confidence)));
+      if (typeof raw.modelHash === "string") entry.modelHash = raw.modelHash.slice(0, 32);
+      entry.approvedAt = Date.now();
+      if (typeof raw.notes === "string" && raw.notes.trim())
+        entry.notes = raw.notes.trim().slice(0, 300);
+
+      sheet.probeApprovals.user[pid] = entry;
+      // Label kategori slider: label user > region evidensa.
+      const cat = entry.label || entry.region;
+      if (cat) sheet.paramGroups.user[pid] = cat;
+      saved.push({ paramId: pid, ...entry });
+    }
+
+    if (!saved.length) throw new Error("tidak ada entri valid");
+    sheet.schemaVersion = SHEET_SCHEMA_VERSION;
+    await persistSheet(sheet);
+    // Override role baru harus terlihat runtime + roleMap tanpa reload.
+    try { applyRoleOverrides(); } catch (e) { console.warn("[sheet] applyRoleOverrides gagal:", e); }
+    return saved;
+  }
+
+  async function removeProbeApproval(paramId) {
+    const pid = String(paramId || "").trim();
+    if (!pid) return false;
+    const sheet = await sheetForWrite();
+    if (!sheet.probeApprovals || !sheet.probeApprovals.user || !(pid in sheet.probeApprovals.user))
+      return false;
+    delete sheet.probeApprovals.user[pid];
+    if (sheet.paramGroups && sheet.paramGroups.user) delete sheet.paramGroups.user[pid];
+    sheet.schemaVersion = SHEET_SCHEMA_VERSION;
+    await persistSheet(sheet);
+    try { applyRoleOverrides(); } catch (e) { console.warn("[sheet] applyRoleOverrides gagal:", e); }
+    return true;
+  }
+
+  function getProbeApprovals() {
+    const sheet = state.lastSheet || loadCharacterSheet();
+    const pa = sheet && sheet.probeApprovals;
+    return (pa && pa.user && typeof pa.user === "object") ? pa.user : {};
+  }
+
+  // Override role dari layer user: {role: paramId} untuk entri ber-role.
+  // Validasi keanggotaan paramSet dilakukan di konsumen (mapRoles /
+  // applyRoleOverrides) — sumber di sini murni ekstraksi sheet.
+  function roleOverridesFromSheet(sheet) {
+    const out = {};
+    const pa = sheet && sheet.probeApprovals;
+    const user = pa && pa.user && typeof pa.user === "object" ? pa.user : {};
+    for (const pid of Object.keys(user)) {
+      const e = user[pid];
+      if (e && typeof e === "object" && typeof e.role === "string" && e.role)
+        out[e.role] = pid;
+    }
+    return out;
+  }
+
+  // Terapkan override role user (sheet v5) di atas peta role aktif. Dipanggil
+  // dari getCapabilityProfile (setelah sheet model ini termuat — jangan dari
+  // buildCaps: state.lastSheet bisa masih sheet model LAMA) dan dari
+  // approveProbeParams setelah simpan. Override diverifikasi ulang terhadap
+  // paramSet model aktif — id basi dari model lain tidak pernah bocor.
+  // Invariant mouthOpenY !== mouthForm dijaga ulang setelah merge (murah).
+  function applyRoleOverrides() {
+    const ov = roleOverridesFromSheet(state.lastSheet || loadCharacterSheet());
+    const valid = {};
+    if (state.modelParams instanceof Set) {
+      for (const role of Object.keys(ov)) {
+        if (state.modelParams.has(ov[role])) valid[role] = ov[role];
+        else
+          console.warn(
+            "[roles] override user ditolak (param tak dimiliki model):",
+            role,
+            "->",
+            ov[role],
+          );
+      }
+    }
+    if (Object.keys(valid).length) {
+      state.caps.ids = Object.assign({}, state.caps.ids, valid);
+      if (
+        state.caps.ids.mouthOpenY &&
+        state.caps.ids.mouthOpenY === state.caps.ids.mouthForm
+      ) {
+        delete state.caps.ids.mouthOpenY;
+        console.warn(
+          "[roles] override membuat mouthOpenY alias mouthForm — mouthOpenY dilepas",
+        );
+      }
+    }
+    // Runtime renderer membangun peta role sendiri (RoleController) — dorong
+    // subset yang tervalidasi; setRoleOverrides menangani rebuild murah.
+    try {
+      const v = window.__live2dView;
+      if (v && typeof v.setRoleOverrides === "function")
+        v.setRoleOverrides(valid);
+    } catch (e) {
+      console.warn("[roles] setRoleOverrides gagal:", e);
+    }
+    return Object.keys(valid).length;
   }
 
   async function refreshUserNoteUI() {
@@ -10860,6 +11048,9 @@
 
     hydrateCaps(sheet);
     state.lastSheet = sheet;
+    // Override role user (probeApprovals) di atas cache scan roleIds —
+    // setelah state.lastSheet terisi supaya sumbernya sheet model INI.
+    try { applyRoleOverrides(); } catch (e) {}
 
     projectEmotionPresets(sheet);
 

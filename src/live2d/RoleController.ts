@@ -12,9 +12,10 @@ export class RoleController {
     private model: CubismModel,
     paramSet: Set<string>,
     official?: { eyeBlinkIds: string[]; lipSyncIds: string[] },
+    overrides?: Record<string, string> | null,
   ) {
     this.paramCtrl = new ParameterController(model);
-    this.roleToId = mapRoles(paramSet, official);
+    this.roleToId = mapRoles(paramSet, official, overrides);
     // bangun range per role
     for (const role in this.roleToId) {
       const id = this.roleToId[role];

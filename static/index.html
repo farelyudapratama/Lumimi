@@ -1114,12 +1114,17 @@
     <div class="ms-footer">
       <button id="ms-analyze" class="mini-btn ms-small" data-i18n="sheet.analyze">Analisa AI</button>
       <button id="ms-verify" class="mini-btn ms-small" data-i18n="ms.verify.button">Cek Visual</button>
+      <button id="ms-critic" class="mini-btn ms-small" data-i18n="ms.critic.button">Cek Kurva</button>
+      <button id="ms-probe" class="mini-btn ms-small" data-i18n="ms.probe.button">Probe Param</button>
+      <button id="ms-approve" class="mini-btn ms-small" data-i18n="ms.approve.button">Setujui Param</button>
       <button id="ms-generate" class="mini-btn ms-small" data-i18n="ms.generate">Buat dari Teks</button>
       <button id="ms-save" class="mini-btn ms-small" data-i18n="ms.save">Simpan</button>
       <span id="ms-status" class="note-status" role="status" aria-live="polite"></span>
       <!-- Lint independen (analisis model dari disk): hasil /api/motions/validate.
            Advisory — tidak memblokir Simpan; sanitize server tetap gerbang akhir. -->
       <div id="ms-lint" class="ms-lint hidden"></div>
+      <div id="ms-stage" class="ms-stage hidden" role="region"></div>
+      <div id="ms-approve-panel" class="ms-stage hidden" role="region"></div>
       <div id="ms-gen-box" class="ms-gen-box hidden">
         <input id="ms-gen-input" type="text" maxlength="200"
           data-i18n-ph="ms.genPh" placeholder="mis. senang, badan bergoyang kanan-kiri + senyum lebar" />

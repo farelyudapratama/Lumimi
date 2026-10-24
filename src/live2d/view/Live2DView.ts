@@ -172,6 +172,12 @@ export class Live2DView {
     this.renderer?.setGazeGain(gain);
   }
 
+  /** Override role user (sheet v5 probeApprovals): rebuild peta role runtime
+   * tanpa re-load model — dipanggil app.js saat sheet termuat / approval baru. */
+  setRoleOverrides(overrides: Record<string, string> | null | undefined): void {
+    this.renderer?.setRoleOverrides(overrides);
+  }
+
   /** Pasang penyedia lipsync 0..1 (sumber audio tetap di app.js). */
   setLipsyncProvider(fn: (() => number | null) | null): void {
     const um = (this.renderer as any)?.userModel as Live2DUserModel | undefined;

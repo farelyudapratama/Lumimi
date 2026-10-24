@@ -50,11 +50,11 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 457 unit (bun, 28 file) + 302 guard (5 suite)
+bun run test           # SEMUA TS: 641 unit (bun, 41 file) + 338 guard (6 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)
-cargo test --workspace # backend Rust (179 test: 173 core + 6 engine), bagian gate
+cargo test --workspace # backend Rust (282 test: 274 core + 8 engine), bagian gate
 ```
 
 **Selesai** = build bersih + `tsc` bersih + `bun run test` hijau + `cargo test
@@ -192,6 +192,16 @@ core/                        backend Rust (axum, loopback), SATU-SATUNYA backend
   motion_vision.rs           critic visual: harness render → filmstrip 8 frame
                              → LLM role `motion-vision` (koneksi HARUS
                              ditandai eksplisit; model harus menerima gambar)
+  rig_report.rs              laporan rig per model dari disk: provenance per
+                             param (cdi3 + observasi + physics), modelHash,
+                             daftar unclassified → GET /api/model/rig-report
+  motion_probe.rs            probe canvas runtime: sweep param di harness
+                             (settle physics + capture sinkron + metrik diff
+                             piksel) + cross-check VLM → POST /api/model/probe
+  (sheet v5)                 probeApprovals.user: hasil approve panel probe
+                             ("Setujui Param" di Motion Studio) — override
+                             role-mapping tier 0 (mapRoles) + param ekstra
+                             untuk beat planner; lihat MOTION-SYSTEM-SPEC §17d
   companion_memory.rs        memory jangka panjang companion (data/
                              companion-memory.json) + keputusan latar role
                              "memory": intent chat→agent, ringkas sesi,
@@ -219,7 +229,10 @@ src/client/transport/        seam transport: HTTP (apiBase/apiUrl/apiFetch/getJs
                              coreVersion/modelImportDialog/initLoopback)
 src/shared/                  types, config, llm-client (role routing)
 src/client/animation/        easing, motion-dsl, motion-io (dua arah .motion3.json),
-                             motion-registry, motion-runtime
+                             motion-registry, motion-runtime, motion-compiler
+                             (beat → keyframe deterministik), motion-critic
+                             (critic numerik kurva), motion-probe (metrik
+                             diff piksel probe)
 src/client/engine/           motion-taxonomy (klasifikasi klip .motion3.json),
                              native-clips (daftar per-file + alias rename),
                              role-mapping (inferensi role), native-expressions

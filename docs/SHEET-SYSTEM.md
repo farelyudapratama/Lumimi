@@ -66,6 +66,9 @@ v1  + schemaVersion, userNote
 v2  + config{}          (blink, idle, framing, TTS pitch/rate/lang per model)
 v3  + rangeSource       (sheet pra-v3 mengaku "measured" padahal tebakan)
 v4  + params[].userNote, paramGroups{user,ai}, presets{user,ai}
+v5  + probeApprovals{user}  (hasil approve panel probe — override role-mapping
+                            + param ekstra untuk beat planner; lihat
+                            MOTION-SYSTEM-SPEC §17d. Hanya layer user, mutlak)
 ```
 
 Preset punya 4 kategori: `emosi`, `properti`, `aksesoris`, `gerak`.
@@ -98,6 +101,9 @@ lama (`sheets/*.json` dari arsip) kompatibel: cukup copy ke `data/sheets/`.
 | `deleteUserPreset(category, name)` | hapus satu preset user |
 | `applyAISuggestion(category, name)` | promosikan satu entri `.ai` → `.user` (butuh klik user) |
 | `triggerAIParamClassification()` | tulis `paramGroups.ai`, tidak menimpa heuristik |
+| `approveProbeParams(entries)` | satu pintu promosi hasil probe panel → `probeApprovals.user` (+ label kategori `paramGroups.user`); sekalian re-apply override role ke runtime (`applyRoleOverrides`) |
+| `removeProbeApproval(paramId)` / `getProbeApprovals()` | hapus / baca kembali entri approve |
+| `roleOverridesFromSheet(sheet)` | ekstrak `{role: paramId}` dari entri ber-role — tier 0 `mapRoles` (di atas grup resmi; `USER_AUTHORED_FIELDS` menjaga kekalnya) |
 
 Endpoint analisa: `POST /api/model/analyze-sheet` lewat `llmWithFallback()`
 (`src/shared/llm-client.ts`). Nol kebocoran `min`/`max`/`def`/`steps` ke LLM,

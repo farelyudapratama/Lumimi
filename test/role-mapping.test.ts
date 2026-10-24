@@ -175,6 +175,53 @@ describe("role mapping — model-agnostic", () => {
     const kwCode = kwBlock.split("\n").map((l) => l.replace(/\r$/, "").replace(/\/\/.*$/, "")).join("\n");
     expect(kwCode.match(/'Param\d+'/g) || []).toEqual([]);
   });
+
+  // ── J. Override user (sheet v5 probeApprovals): tier 0 di atas semua ──
+  test("override user menang atas keyword dan id kanonik", () => {
+    // ParamHeadRotY tidak kena keyword apapun; user approve: itu angleY.
+    const params = new Set(["ParamAngleX", "ParamHeadRotY"]);
+    const r = mapRoles(params, null, { angleY: "ParamHeadRotY" });
+    expect(r.angleY).toBe("ParamHeadRotY");
+    expect(r.angleX).toBe("ParamAngleX"); // role tanpa override: jalur biasa
+  });
+
+  test("override user menang atas grup resmi (otoritas tertinggi)", () => {
+    const params = new Set(["EyeBlinkL", "EyeBlinkR", "BukaMata"]);
+    const official = { eyeBlinkIds: ["EyeBlinkL", "EyeBlinkR"], lipSyncIds: [] };
+    const r = mapRoles(params, official, { eyeLOpen: "BukaMata" });
+    expect(r.eyeLOpen).toBe("BukaMata");
+  });
+
+  test("override paramId yang tidak dimiliki model DITOLAK senyap", () => {
+    const params = new Set(["ParamAngleX"]);
+    const r = mapRoles(params, null, { angleY: "ParamGhost" });
+    expect(r.angleY).toBeUndefined();
+    expect(r.angleX).toBe("ParamAngleX");
+  });
+
+  test("override tidak boleh membuat mouthOpenY alias mouthForm (invarian tetap)", () => {
+    const params = new Set(["ParamMouthForm", "ParamMulutBuka"]);
+    const r = mapRoles(params, null, {
+      mouthForm: "ParamMouthForm",
+      mouthOpenY: "ParamMouthForm", // user salah pilih param yang sama
+    });
+    expect(r.mouthOpenY).toBeUndefined(); // dilepas, bukan ditebak
+    expect(r.mouthForm).toBe("ParamMouthForm");
+  });
+
+  test("rig opaque tanpa override tetap nol role (invariansi nama utuh)", () => {
+    const params = new Set(["m_001", "m_002", "m_003"]);
+    const r0 = mapRoles(params, null);
+    const r1 = mapRoles(params, null, {});
+    expect(Object.keys(r0).length).toBe(0);
+    expect(r1).toEqual(r0);
+  });
+
+  test("override role tak dikenal diabaikan (kosakata tetap ROLE_KEYWORDS)", () => {
+    const params = new Set(["ParamAngleX"]);
+    const r = mapRoles(params, null, { roleKarangan: "ParamAngleX" });
+    expect((r as Record<string, string>).roleKarangan).toBeUndefined();
+  });
 });
 
 describe("param scaling — skala referensi tidak bocor asumsi model", () => {
