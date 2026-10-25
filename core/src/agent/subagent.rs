@@ -11,12 +11,20 @@
 //! lokal sendiri (loop mini di sini), jadi tak menyentuh state global.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::agent::{bus, loop_};
 use crate::llm::{self, ChatMessage};
 
 const MAX_PARALLEL: usize = 4;
 const SUB_MAX_ITERATIONS: usize = 12;
+/// Anggaran panggilan LLM gabungan untuk SATU batch subagent (dibagi semua
+/// subagent paralel). Dulu 4 subagent × 12 iterasi = 48 dari anggaran tugas
+/// 60 panggilan — satu delegasi besar melapiskan budget orchestrator dan
+/// tugas utama mati "anggaran habis" justru karena anak-anaknya. Cap 24
+/// menyisakan ≥36 panggilan untuk orchestrator.
+const SUB_MAX_LLM_CALLS: usize = 24;
 
 fn lang_of(config_path: &Path) -> String {
     let cfg = crate::config::load(config_path);
@@ -51,12 +59,14 @@ fn clip(s: &str, max: usize) -> String {
 /// Satu subagent: loop mini read-only sampai final / batas iterasi.
 /// `cancel_rx` = sinyal batal tugas orchestrator (dicek antar-langkah dan
 /// diteruskan ke panggilan LLM agar LLM yang menggantung ikut berhenti).
+/// `budget` = penghitung panggilan LLM gabungan batch (dibagi antar subagent).
 async fn run_sub_loop(
     config_path: &Path,
     root: &Path,
     work_dir: &str,
     task: &str,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    budget: &AtomicUsize,
 ) -> Result<String, String> {
     let wd = PathBuf::from(work_dir);
     let lang = lang_of(config_path);
@@ -73,6 +83,11 @@ async fn run_sub_loop(
     for _ in 0..SUB_MAX_ITERATIONS {
         if crate::agent::assistant::is_cancelled().await {
             return Ok("(subagent dibatalkan oleh user)".into());
+        }
+        // Anggaran gabungan batch dulu — habis → berhenti SEBELUM menghabiskan
+        // anggaran tugas bersama, supaya orchestrator tetap punya sisa.
+        if budget.fetch_add(1, Ordering::Relaxed) >= SUB_MAX_LLM_CALLS {
+            return Ok("(anggaran subagent habis — subagent dihentikan agar tugas utama tetap punya budget)".into());
         }
         if !crate::agent::assistant::spend_llm_call().await {
             return Ok("(anggaran tugas habis — subagent dihentikan)".into());
@@ -93,7 +108,7 @@ async fn run_sub_loop(
             .reply;
 
         let detected = loop_::detect_tool_call(&reply);
-        let (name, args) = match detected {
+        let (name, args, _truncated) = match detected {
             None => return Ok(strip_tool_directive(&reply)),
             Some(d) => d,
         };
@@ -135,6 +150,8 @@ pub async fn run_batch(
     let total = tasks.len();
     let batch: Vec<String> = tasks.into_iter().take(MAX_PARALLEL).collect();
     let skipped = total.saturating_sub(batch.len());
+    // Anggaran LLM gabungan batch — dishare semua subagent paralel.
+    let budget = Arc::new(AtomicUsize::new(0));
 
     let mut futs = Vec::new();
     for (i, task) in batch.into_iter().enumerate() {
@@ -144,8 +161,9 @@ pub async fn run_batch(
         let rt = root.to_path_buf();
         let wd = work_dir.to_string();
         let sub_cancel = cancel_rx.clone();
+        let sub_budget = Arc::clone(&budget);
         futs.push(async move {
-            let out = match run_sub_loop(&cp, &rt, &wd, &task, sub_cancel).await {
+            let out = match run_sub_loop(&cp, &rt, &wd, &task, sub_cancel, &sub_budget).await {
                 Ok(s) if !s.is_empty() => clip(&s, 2000),
                 Ok(_) => "(kosong)".into(),
                 Err(e) => format!("ERROR: {}", clip(&e, 200)),

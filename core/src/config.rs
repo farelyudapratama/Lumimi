@@ -191,6 +191,20 @@ fn read_raw(path: &Path) -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
+/// Kunci tulis config.json global. Semua `save_*` melakukan
+/// read-modify-write; tanpa kunci ini dua penulis konkuren (mis. status
+/// koneksi yang disimpan dua panggilan LLM paralel — agent + chat) saling
+/// menimpa: yang terakhir menulis menang dan tulisan sisi lain hilang.
+/// Reader (load) aman tanpa kunci — penulisan atomik tmp+rename, jadi pembaca
+/// melihat versi lama atau baru utuh, tidak pernah setengah jadi.
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    // Mutex poisoned (panic di penulis lain) tidak boleh mengunci config
+    // selamanya — lanjutkan dengan guard yang tersisa.
+    CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// `{...base, ...over}` untuk objek (over menang). Non-objek → over.
 fn merge_obj(base: &Value, over: &Value) -> Value {
     match (base.as_object(), over.as_object()) {
@@ -249,6 +263,7 @@ fn now_ms() -> u128 {
 
 /// Tulis {...prev, activeId, connections} atomik (padanan saveConnections).
 pub fn save_connections(path: &Path, conns: Vec<Value>, active_id: Value) -> std::io::Result<()> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let active = if active_id.is_null() {
         conns.first().and_then(|c| c.get("id").cloned()).unwrap_or(Value::Null)
@@ -263,6 +278,7 @@ pub fn save_connections(path: &Path, conns: Vec<Value>, active_id: Value) -> std
 
 /// Simpan events (mergeEventsIntoConfig: hanya KNOWN_EVENT_KEYS).
 pub fn save_events(path: &Path, events: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let prev_events = prev.get("events").cloned().unwrap_or_else(|| json!({}));
     let merged = merge_obj(&prev_events, events);
@@ -281,6 +297,7 @@ pub fn save_events(path: &Path, events: &Value) -> std::io::Result<Value> {
 
 /// Simpan tts ({...prev.tts, ...tts}).
 pub fn save_tts(path: &Path, tts: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let merged = merge_obj(&prev.get("tts").cloned().unwrap_or_else(|| json!({})), tts);
     let data = merge_obj(&prev, &json!({ "tts": merged.clone() }));
@@ -290,6 +307,7 @@ pub fn save_tts(path: &Path, tts: &Value) -> std::io::Result<Value> {
 
 /// Simpan i18n ({...prev.i18n, ...i18n}).
 pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let merged = merge_obj(&prev.get("i18n").cloned().unwrap_or_else(|| json!({})), i18n);
     let data = merge_obj(&prev, &json!({ "i18n": merged.clone() }));
@@ -300,6 +318,7 @@ pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
 /// Simpan chatFilter ({...prev.chatFilter, ...filter}; whitelist key +
 /// sanitasi: words bersih/unik/cap 200×100 char, extraRules cap 600 char).
 pub fn save_chat_filter(path: &Path, filter: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let mut next = prev.get("chatFilter").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     if let Some(obj) = filter.as_object() {
@@ -338,6 +357,7 @@ pub fn save_chat_filter(path: &Path, filter: &Value) -> std::io::Result<Value> {
 /// Simpan browser ({...prev.browser, ...browser}); hanya engine yang dikenal
 /// yang diterima (auto|edge|chrome). Engine dipilih untuk browser terkontrol.
 pub fn save_browser(path: &Path, browser: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let mut next = prev.get("browser").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     if let Some(e) = browser.get("engine").and_then(|v| v.as_str()) {
@@ -361,6 +381,7 @@ const VTUBER_KEYS: &[&str] = &[
 
 /// Simpan koneksi stream VTuber (merge per-field, apiKey aman). Return vtuber.
 pub fn save_vtuber_conn(path: &Path, conn: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let mut next = prev.get("vtuber").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     if let Some(obj) = conn.as_object() {

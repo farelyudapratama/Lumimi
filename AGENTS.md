@@ -30,7 +30,7 @@ dobel-klik menyalakan server dan jendela sekaligus). Inti logika **TypeScript**
 jalur: **Pixi 8 + Cubism SDK Framework 5-r.5** (teruji dengan Core 6.0.1) di
 `src/live2d/view/`; stack lama (Pixi 6 + pixi-live2d) sudah dipensiunkan.
 
-Produk ini juga membawa **agent-nya sendiri** sebagai fitur (loop, 25 tool,
+Produk ini juga membawa **agent-nya sendiri** sebagai fitur (loop, 29 tool,
 dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, bukan instruksi untukmu.
 
 ## Urutan baca wajib (mengikat)
@@ -50,7 +50,7 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 641 unit (bun, 41 file) + 338 guard (6 suite)
+bun run test           # SEMUA TS: 643 unit (bun, 41 file) + 338 guard (6 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)

@@ -9,6 +9,14 @@ use serde_json::{json, Value};
 use crate::config;
 
 const DEFAULT_TIMEOUT_S: u64 = 60;
+/// Timeout TOTAL per percobaan untuk role `assistant` (loop agent). Dulu 60s
+/// flat: model reasoning yang lama berpikir (atau draft JSON tool panjang)
+/// selalu mati timeout lalu di-retry scheduler — membakar anggaran panggilan
+/// tanpa hasil. 300s masih di bawah deadline per-panggilan agent (10 menit).
+const AGENT_TIMEOUT_S: u64 = 300;
+/// Deadline keseluruhan (semua percobaan + tunggu) untuk role `assistant` —
+/// longgar untuk satu percobaan 300s + sisa waktu fallback/retry koneksi lain.
+const AGENT_DEADLINE_MS: u64 = 10 * 60 * 1000;
 
 /// Pesan chat sederhana.
 #[derive(Clone)]
@@ -262,7 +270,7 @@ pub(crate) fn effective_max_tokens(conn: &Value, min: u64) -> u64 {
 /// `images` (opsional) ditempel ke pesan user terakhir — kosong = jalur teks
 /// murni byte-identical dengan sebelumnya.
 pub async fn call_llm(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage]) -> Result<String, LlmError> {
-    call_llm_tools(conn, messages, client_system, images, &[], 0).await
+    call_llm_tools(conn, messages, client_system, images, &[], 0, DEFAULT_TIMEOUT_S).await
 }
 
 /// Koneksi yang pernah MENOLAK param `tools` (server OpenAI-shape tanpa
@@ -387,8 +395,9 @@ pub(crate) fn salvage_tool_call_from_error(body: &str) -> Option<String> {
 /// `TOOL: …` di content. Provider yang menolak param `tools` dicoba ulang
 /// tanpa `tools` sekali lalu diingat (kompatibilitas universal).
 /// `min_max_tokens` = floor budget output (0 = default 2048; role assistant
-/// memakai 8192 — lihat `effective_max_tokens`).
-pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage], tools: &[Value], min_max_tokens: u64) -> Result<String, LlmError> {
+/// memakai 8192 — lihat `effective_max_tokens`). `timeout_s` = timeout TOTAL
+/// per percobaan (pemanggil memilih: 60s jalur biasa, 300s loop agent).
+pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage], tools: &[Value], min_max_tokens: u64, timeout_s: u64) -> Result<String, LlmError> {
     let provider = conn.get("provider").and_then(|v| v.as_str()).unwrap_or("openai-compatible").to_lowercase();
     let api_key = clean_key(conn.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""));
     let model = {
@@ -413,7 +422,7 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_S))
+        .timeout(std::time::Duration::from_secs(timeout_s.max(1)))
         .build()
         .map_err(|e| LlmError::new(0, e.to_string()))?;
 
@@ -914,6 +923,7 @@ async fn retry_call(
     client_system: &str,
     tools: &[Value],
     min_max_tokens: u64,
+    timeout_s: u64,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
     attempt: &mut u32,
     deadline: std::time::Instant,
@@ -928,7 +938,7 @@ async fn retry_call(
             Admit::Cancelled => return Err(LlmError::new(499, "dibatalkan".into())),
         };
         *attempt += 1;
-        let res = call_llm_tools(conn, messages, client_system, &[], tools, min_max_tokens).await;
+        let res = call_llm_tools(conn, messages, client_system, &[], tools, min_max_tokens, timeout_s).await;
         drop(permit);
         let err = match res {
             Ok(reply) => return Ok(reply),
@@ -1000,8 +1010,15 @@ pub async fn llm_for_role_cancelable(
     // reasoning model murah gampang melampaui default 2048 → JSON tool call
     // terpotong → gagal parse (penyebab utama "tool gagal" di model kecil).
     let min_max_tokens = if role == "assistant" { 8192 } else { 0 };
+    // Role assistant (loop agent): timeout + deadline longgar — model reasoning
+    // lambat & draft JSON panjang tidak boleh mati di timeout 60s flat.
+    let (timeout_s, deadline_ms) = if role == "assistant" {
+        (AGENT_TIMEOUT_S, AGENT_DEADLINE_MS)
+    } else {
+        (DEFAULT_TIMEOUT_S, crate::llm_sched::DEFAULT_DEADLINE_MS)
+    };
     let deadline = std::time::Instant::now()
-        + std::time::Duration::from_millis(crate::llm_sched::DEFAULT_DEADLINE_MS);
+        + std::time::Duration::from_millis(deadline_ms);
     for &i in &order {
         let conn_id = conns[i].get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         // skip bila masih rate-limited.
@@ -1016,7 +1033,7 @@ pub async fn llm_for_role_cancelable(
             reasons.push(format!("{conn_id}: dilewati, budget {} percobaan habis", crate::llm_sched::MAX_ATTEMPTS));
             break;
         }
-        let outcome = retry_call(&conns[i], &conn_id, messages, client_system, tools, min_max_tokens, cancel, &mut attempts_used, deadline).await;
+        let outcome = retry_call(&conns[i], &conn_id, messages, client_system, tools, min_max_tokens, timeout_s, cancel, &mut attempts_used, deadline).await;
         match outcome {
             Ok(reply) => {
                 let id = conns[i].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();

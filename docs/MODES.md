@@ -185,28 +185,41 @@ catatan throttled di feed, blocklist lokal tetap jalan.
   (aktif → cancel kooperatif + pendingReplacement; paused → langsung;
   antrean → in-place). Slot kosong → drain otomatis (replacement dulu,
   lalu antrean FIFO). Status mengekspos `activeTask`/`parkedTasks`.
-- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **25 tool**; level = data,
-  bukan if-else di loop): 12 tool coding (`list_dir`, `read_file`, `search_code`,
+- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **29 tool**; level = data,
+  bukan if-else di loop): 14 tool coding (`list_dir`, `read_file`, `search_code`,
   `git_diff`, `write_file`, `edit_file`, `delete_file`, `run_command`,
-  `update_plan`, `remember`, `recall`, `spawn_subagent`) + 9 tool browser CDP
-  (`browser_status/open/navigate/inspect/click/type/history/close/grant_private`)
+  `update_plan`, `remember`, `recall`, `memory_recall`, `run_history`,
+  `spawn_subagent`) + 11 tool browser CDP
+  (`browser_status/open/navigate/inspect/click/type/history/screenshot/tabs/close/grant_private`)
   + 4 tool motion (`motion_analyze/validate/save/verify`).
   Level `safe` jalan otomatis; `mutating` ditahan server sampai approval user.
 - Protokol LLM: system prompt memerintahkan tool call; balasan model dideteksi
   dengan `detect()` — cari **nama tool yang dikenal** di teks (model memformat
   bebas: `TOOL: nama {json}`, `**Tool: nama**` + fence json, atau `nama {json}`),
-  lalu ambil `{...}` pertama dalam jendela 160 char; JSON longgar (key tanpa
-  kutip, kutip tunggal) ditoleransi.
+  lalu ambil `{...}` pertama dalam jendela 64.000 char (JSON terpotong
+  diselamatkan dan DITANDAI ke model — isi write_file bisa setengah);
+  JSON longgar (key tanpa kutip, kutip tunggal) ditoleransi.
 - Setelah tool aman dieksekusi, hasil dimasukkan sebagai pesan `[hasil tool]`
   dan loop lanjut (maks 6 turn) sampai jawaban final.
-- Approval: `POST /api/assistant/approve {id, approve}` — mengeksekusi tool
-  lalu melanjutkan reasoning; menolak memasukkan pesan "User MENOLAK".
+- Approval: `POST /api/assistant/approve {id, approve, always}` — mengeksekusi
+  tool lalu melanjutkan reasoning; menolak memasukkan pesan "User MENOLAK".
   Varian streaming `POST /api/assistant/approve-stream` (SSE) mengalirkan
-  hasil tool + lanjutan reasoning — dipakai panel browser.
+  hasil tool + lanjutan reasoning — dipakai panel browser. Opsi `always` =
+  allowlist SESI (kosong lagi di `stop()`), dengan kunci yang TIDAK seragam:
+  tool lain per nama tool, `run_command` per **perintah persis**, dan
+  `write_file`/`edit_file`/`delete_file` per **folder induk path** —
+  menyetujui satu file bukan berarti seluruh workdir terbuka sesi ini
+  (label kartu izin menyebut foldernya).
 - Sandbox: `safePath` mengunci path di dalam folder kerja; `run_command`
-  asinkron dengan timeout 30 dtk, output dipangkas 12 KB (server tetap
-  responsif selama perintah jalan). Tetap: shell = akses penuh mesin — hanya
-  izinkan perintah yang kamu pahami.
+  asinkron dengan timeout **per panggilan** (arg `timeout`, 1–600 dtk,
+  default 120 — naikkan untuk build/test), output dipangkas 12 KB (server
+  tetap responsif selama perintah jalan; pembatalan user meng-kill child
+  seketika). Command line yang dicatat ke store observability dimasked pola
+  rahasianya (token panjang, `--api-key=…`). Tetap: shell = akses penuh
+  mesin — hanya izinkan perintah yang kamu pahami.
+- Anggaran LLM per tugas 60 panggilan (termasuk subagent); batch
+  `spawn_subagent` sendiri di-cap **24 panggilan gabungan** supaya
+  delegasi besar tidak melapiskan budget orchestrator.
 
 ### Panel agent (remake ala ZCode, 2026-09-07)
 
@@ -226,6 +239,12 @@ actor / view / panel) di-bundle ke `bundle.js` sebagai `window.__agentPanel`;
   (SSE) vs `follow` (bus `/events?since=`, untuk pantau CLI/klien lain).
   Bus `thinking/tool_call/permission/final/error` disupresi dari transcript
   saat live (padanannya dari SSE); `verification/subagent` selalu dirender.
+- **Keyboard approval hanya kartu teratas** — Tab/tombol angka/Enter memandu
+  kartu terlama yang pending; kartu lain diklik langsung (dulu satu Enter
+  menyetujui SEMUA kartu sekaligus). Transcript panel berkapasitas 600 blok
+  (lama diganti penanda; log lengkap tetap di sesi tersimpan), render delta
+  SSE dikoalesce via rAF, dan dedupe hydrate memakai teks penuh (bukan
+  160 char pertama — dua pesan berawalan sama tidak saling menelan).
 - **Protokol putus-koneksi dua-kasus** (`decideFallback`): SSE gagal sebelum
   event pertama → cek status fresh, resend `POST /ask` sekali bila tidak busy;
   putus setelah ≥1 event → tidak pernah resend, lanjut follow dari bus

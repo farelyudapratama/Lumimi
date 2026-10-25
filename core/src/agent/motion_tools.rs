@@ -20,13 +20,15 @@ use crate::motion_validation::validate_asset;
 /// Eksekusi tool motion. `model`/`role_map` = state runtime agent (dikirim
 /// panel saat start dari model aktif — peta role tetap sumber tunggal di
 /// role-mapping.ts klien; Rust hanya melipat). `root` = app root (harness
-/// browser). Kontrak loop: selalu return String, error diawali "ERROR: ".
-pub async fn exec(config_path: &Path, root: &Path, name: &str, args: &Value, model: &str, role_map: &Value) -> String {
+/// browser). `cancel` = sinyal batal tugas (motion_verify meneruskannya ke
+/// panggilan VLM supaya Stop terasa real-time). Kontrak loop: selalu return
+/// String, error diawali "ERROR: ".
+pub async fn exec(config_path: &Path, root: &Path, name: &str, args: &Value, model: &str, role_map: &Value, cancel: &tokio::sync::watch::Receiver<bool>) -> String {
     match name {
         "motion_analyze" => analyze(config_path, args, model, role_map),
         "motion_validate" => validate(config_path, args, model, role_map),
         "motion_save" => save(config_path, args, model, role_map),
-        "motion_verify" => verify(config_path, root, args, model, role_map).await,
+        "motion_verify" => verify(config_path, root, args, model, role_map, Some(cancel)).await,
         other => format!("ERROR: tool motion tidak dikenal: {other}"),
     }
 }
@@ -149,7 +151,9 @@ fn save(config_path: &Path, args: &Value, model: &str, _role_map: &Value) -> Str
 /// di harness → VLM role `motion-vision` menilai kecocokan intent + artefak.
 /// Tanpa koneksi vision → verdict `{skipped:true}` (bukan gagal) berisi cara
 /// mengaktifkan. Draft dari arg `motion` atau `motionId` (tersimpan).
-async fn verify(config_path: &Path, root: &Path, args: &Value, model: &str, role_map: &Value) -> String {
+/// `cancel` = Some untuk jalur agent (Stop menghentikan VLM seketika);
+/// None untuk endpoint HTTP langsung.
+async fn verify(config_path: &Path, root: &Path, args: &Value, model: &str, role_map: &Value, cancel: Option<&tokio::sync::watch::Receiver<bool>>) -> String {
     let m = match resolve_model(config_path, args, model) {
         Ok(m) => m,
         Err(e) => return format!("ERROR: {e}"),
@@ -173,7 +177,7 @@ async fn verify(config_path: &Path, root: &Path, args: &Value, model: &str, role
         return "ERROR: kirim draft di arg \"motion\" atau id tersimpan di \"motionId\"".into();
     };
     let intent = s_arg(args, "intent").unwrap_or("").to_string();
-    match crate::motion_vision::verify(config_path, root, &m, role_map, &draft, &intent).await {
+    match crate::motion_vision::verify(config_path, root, &m, role_map, &draft, &intent, cancel).await {
         Ok(v) => v.to_string(),
         Err(e) => format!("ERROR: {e}"),
     }
@@ -213,16 +217,21 @@ mod tests {
 
     const ROLE_MAP: &str = r#"{"ax":"ParamAngleX"}"#;
 
+    /// Receiver batal netral untuk test (sinyal tak pernah menyala).
+    fn no_cancel() -> tokio::sync::watch::Receiver<bool> {
+        tokio::sync::watch::channel(false).1
+    }
+
     #[tokio::test]
     async fn analyze_melaporkan_role_dan_physics() {
         let (cfg, data) = fixture("analyze");
         let args = json!({});
-        let out = exec(&cfg, &data, "motion_analyze", &args, "hana", &serde_json::from_str(ROLE_MAP).unwrap()).await;
+        let out = exec(&cfg, &data, "motion_analyze", &args, "hana", &serde_json::from_str(ROLE_MAP).unwrap(), &no_cancel()).await;
         assert!(out.contains("\"hasReference\":true"), "{out}");
         assert!(out.contains("ParamAngleX"), "{out}");
         assert!(out.contains("\"param\":\"ParamAngleX\""), "{out}");
         // Tanpa model dikenal → ERROR (bukan panic).
-        let out2 = exec(&cfg, &data, "motion_analyze", &json!({}), "", &Value::Null).await;
+        let out2 = exec(&cfg, &data, "motion_analyze", &json!({}), "", &Value::Null, &no_cancel()).await;
         assert!(out2.starts_with("ERROR"), "{out2}");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -236,13 +245,13 @@ mod tests {
                 { "t": 0, "v": 0 }, { "t": 0.5, "v": 40 }, { "t": 1.0, "v": 8 }
             ]}]
         });
-        let out = exec(&cfg, &data, "motion_validate", &json!({ "motion": draft }), "hana", &serde_json::from_str(ROLE_MAP).unwrap()).await;
+        let out = exec(&cfg, &data, "motion_validate", &json!({ "motion": draft }), "hana", &serde_json::from_str(ROLE_MAP).unwrap(), &no_cancel()).await;
         // 40 > 30 → clamp; 8 ≠ 0 di keyframe terakhir → base_return; range model ini kecil.
         assert!(out.contains("role_clamp"), "{out}");
         assert!(out.contains("base_return"), "{out}");
         assert!(out.contains("out_of_observed_range"), "{out}");
         // Draft kosong → ERROR.
-        let out2 = exec(&cfg, &data, "motion_validate", &json!({}), "hana", &Value::Null).await;
+        let out2 = exec(&cfg, &data, "motion_validate", &json!({}), "hana", &Value::Null, &no_cancel()).await;
         assert!(out2.starts_with("ERROR"), "{out2}");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -254,15 +263,15 @@ mod tests {
             "id": "angguk", "name": "Angguk", "duration": 1.0,
             "tracks": [{ "target": "ay", "keys": [{ "t": 0, "v": 0 }, { "t": 0.4, "v": 10 }, { "t": 1.0, "v": 0 }] }]
         });
-        let out = exec(&cfg, &data, "motion_save", &json!({ "motion": draft }), "hana", &Value::Null).await;
+        let out = exec(&cfg, &data, "motion_save", &json!({ "motion": draft }), "hana", &Value::Null, &no_cancel()).await;
         assert!(out.starts_with("OK"), "{out}");
         // File benar-benar ada di data/motions/hana/.
         assert!(data.join("motions").join("hana").join("angguk.motion.json").exists());
         // Duplikat → 409 → ERROR dengan arahan id lain.
-        let out2 = exec(&cfg, &data, "motion_save", &json!({ "motion": draft }), "hana", &Value::Null).await;
+        let out2 = exec(&cfg, &data, "motion_save", &json!({ "motion": draft }), "hana", &Value::Null, &no_cancel()).await;
         assert!(out2.contains("sudah dipakai"), "{out2}");
         // Draft invalid (tanpa track) → ditolak sanitize.
-        let out3 = exec(&cfg, &data, "motion_save", &json!({ "motion": { "id": "kosong", "duration": 1.0, "tracks": [] } }), "hana", &Value::Null).await;
+        let out3 = exec(&cfg, &data, "motion_save", &json!({ "motion": { "id": "kosong", "duration": 1.0, "tracks": [] } }), "hana", &Value::Null, &no_cancel()).await;
         assert!(out3.starts_with("ERROR"), "{out3}");
         let _ = std::fs::remove_dir_all(&data);
     }
@@ -271,10 +280,10 @@ mod tests {
     async fn verify_tanpa_draft_dan_model_tidak_kenal() {
         let (cfg, data) = fixture("verify");
         // Tanpa motion/motionId → ERROR.
-        let out = exec(&cfg, &data, "motion_verify", &json!({}), "hana", &Value::Null).await;
+        let out = exec(&cfg, &data, "motion_verify", &json!({}), "hana", &Value::Null, &no_cancel()).await;
         assert!(out.starts_with("ERROR"), "{out}");
         // Model tidak dikenal → ERROR (sebelum menyentuh browser).
-        let out2 = exec(&cfg, &data, "motion_verify", &json!({ "motion": { "id": "x", "duration": 1.0, "tracks": [] } }), "tidak_ada", &Value::Null).await;
+        let out2 = exec(&cfg, &data, "motion_verify", &json!({ "motion": { "id": "x", "duration": 1.0, "tracks": [] } }), "tidak_ada", &Value::Null, &no_cancel()).await;
         assert!(out2.starts_with("ERROR"), "{out2}");
         let _ = std::fs::remove_dir_all(&data);
     }

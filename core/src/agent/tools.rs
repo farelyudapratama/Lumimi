@@ -329,14 +329,17 @@ fn format_command_output(o: &std::process::Output) -> String {
     }
 }
 
-/// run_command {command} — jalankan perintah di workDir (shell), timeout 30s.
-/// ASYNC + cancel-aware: dulu versi sinkron memblokir satu worker tokio
-/// penuh (hingga 30 detik) dan permintaan batal hanya terbaca di giliran
-/// loop berikutnya — kini pembatalan meng-kill child seketika. Exit non-zero
-/// / timeout / batal → "ERROR: …". Padanan toolRunCommand.
+/// run_command {command, timeout?} — jalankan perintah di workDir (shell).
+/// `timeout_secs` per panggilan (default 120, cap 600 di exec_tool) — dulu 30s
+/// flat membuat rule "verifikasi dengan build/test" mustahil: cargo build
+/// pertama selalu lebih dari 30 detik. ASYNC + cancel-aware: dulu versi
+/// sinkron memblokir satu worker tokio penuh dan permintaan batal hanya
+/// terbaca di giliran loop berikutnya — kini pembatalan meng-kill child
+/// seketika. Exit non-zero / timeout / batal → "ERROR: …". Padanan toolRunCommand.
 pub async fn run_command_async(
     work_dir: &Path,
     command: &str,
+    timeout_secs: u64,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> String {
     let cmd = command.trim();
@@ -371,7 +374,9 @@ pub async fn run_command_async(
             Ok(o) => format_command_output(&o),
             Err(e) => format!("ERROR: {e}"),
         },
-        _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => "ERROR: timeout 30s".to_string(),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs.max(1))) => {
+            format!("ERROR: timeout {timeout_secs}s — naikkan arg 'timeout' bila perintahnya memang lama (build/test)")
+        }
         _ = crate::llm_sched::wait_cancel(cancel) => "ERROR: dibatalkan oleh user".to_string(),
     };
     clip(&out, 12000)
@@ -488,7 +493,7 @@ mod tests {
         assert!(command_escape(&d, "echo %USERPROFILE%").is_some());
         assert!(command_escape(&d, "cat $HOME/.ssh/id_rsa").is_some());
         assert!(command_escape(&d, "cat ~/x").is_some());
-        let r = run_command_async(&d, "type ..\\..\\secret.txt", &mut rx).await;
+        let r = run_command_async(&d, "type ..\\..\\secret.txt", 30, &mut rx).await;
         assert!(r.starts_with("ERROR: perintah ditolak"), "{r}");
         // Perintah wajar di dalam workdir tetap lolos.
         assert!(command_escape(&d, "cargo test -p live2d-core").is_none());
@@ -500,13 +505,13 @@ mod tests {
     async fn run_command_async_jalan_dan_bisa_dibatalkan() {
         let d = tmp();
         let (_tx, mut rx) = tokio::sync::watch::channel(false);
-        let out = run_command_async(&d, "echo halo", &mut rx).await;
+        let out = run_command_async(&d, "echo halo", 30, &mut rx).await;
         assert!(out.to_lowercase().contains("halo"), "{out}");
-        assert!(run_command_async(&d, "", &mut rx).await.starts_with("ERROR"));
+        assert!(run_command_async(&d, "", 30, &mut rx).await.starts_with("ERROR"));
         // Cancel yang SUDAH menyala → perintah tidak dieksekusi (dibatalkan).
         let (ctx, mut crx) = tokio::sync::watch::channel(false);
         ctx.send(true).unwrap();
-        let out2 = run_command_async(&d, "echo jangan", &mut crx).await;
+        let out2 = run_command_async(&d, "echo jangan", 30, &mut crx).await;
         assert!(out2.contains("dibatalkan"), "{out2}");
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -28,7 +28,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef { name: "write_file", params: "path: string, content: string", level: "mutating" },
     ToolDef { name: "edit_file", params: "path: string, old: string, new: string", level: "mutating" },
     ToolDef { name: "delete_file", params: "path: string", level: "mutating" },
-    ToolDef { name: "run_command", params: "command: string", level: "mutating" },
+    ToolDef { name: "run_command", params: "command: string, timeout: number opsional (detik, 1–600, default 120 — naikkan untuk build/test panjang)", level: "mutating" },
     ToolDef { name: "remember", params: "key: string, value: string", level: "safe" },
     ToolDef { name: "recall", params: "key: string opsional", level: "safe" },
     ToolDef { name: "memory_recall", params: "query: string, limit: number opsional — cari MEMORI USER lintas sesi (fakta/preferensi/keputusan companion; beda store dgn recall)", level: "safe" },
@@ -157,6 +157,7 @@ pub fn optional_args(name: &str) -> &'static [(&'static str, &'static str)] {
         "browser_open" => &[("url", "string")],
         "browser_inspect" => &[("cursor", "number"), ("maxChars", "number"), ("snapshotId", "string")],
         "browser_type" => &[("submit", "boolean")],
+        "run_command" => &[("timeout", "number")],
         "motion_analyze" => &[("model", "string")],
         _ => &[],
     }
@@ -253,11 +254,17 @@ pub fn build_system(lang: &str, work_dir: &str, model: &str) -> String {
 /// {json}` DAN format native `<tool_call>{"name","arguments"}</tool_call>`
 /// (Qwen/Hermes/GLM). Blok penalaran `<think>…</think>` dibuang dulu supaya
 /// nama tool yang cuma DISEBUT saat berpikir tak salah terdeteksi.
-pub fn detect_tool_call(reply: &str) -> Option<(String, Value)> {
+///
+/// Return `(nama, args, argumen_terpotong)`. `argumen_terpotong` = true bila
+/// JSON argumen TIDAK seimbang di teks aslinya (kehabisan budget output /
+/// terpotong) dan hanya bisa diselamatkan dengan perbaikan — pemanggil wajib
+/// memberi tahu model bahwa isi write_file/edit_file mungkin tidak lengkap.
+pub fn detect_tool_call(reply: &str) -> Option<(String, Value, bool)> {
     let no_think = strip_block(reply, "<think>", "</think>");
     // 1) Native <tool_call>{"name","arguments"}</tool_call> — eksplisit, diutamakan.
-    if let Some(call) = detect_native_tool_call(&no_think) {
-        return Some(call);
+    //    Parse-nya menuntut objek ber-imbangan → tidak mungkin terpotong.
+    if let Some((n, a)) = detect_native_tool_call(&no_think) {
+        return Some((n, a, false));
     }
     // 2) Format kami: `TOOL: <nama> {json}`.
     let clean = no_think.replace("```", "\n").replace("**", "");
@@ -271,20 +278,25 @@ pub fn detect_tool_call(reply: &str) -> Option<(String, Value)> {
             // Draft motion dkk. membawa JSON BERSARANG yang panjang (tracks/
             // keys) — window kecil + kurung-pertama memotong di `}` dalam dan
             // parse selalu gagal. Ambil objek ber-imbangan (string-aware)
-            // dari window besar (16k char — draft multi-track bisa melewati 8k).
-            let window: String = clean[after_start..].chars().take(16000).collect();
+            // dari window besar (64k char — draft multi-track + write_file
+            // berisi file besar bisa melewati 16k; window ketinggalan = konten
+            // terpotong tanpa jejak).
+            const ARG_WINDOW_CHARS: usize = 64_000;
+            let window: String = clean[after_start..].chars().take(ARG_WINDOW_CHARS).collect();
             // Objek seimbang utama; bila tidak ada (output model terpotong di
             // tengah JSON), rescue: perbaiki kurung/string menggantung dari
             // '{' pertama. Tanpa ini panggilan yang 95% benar dibuang utuh.
-            let candidate = first_brace_obj(&window).or_else(|| repair_truncated_json(&window));
+            let balanced = first_brace_obj(&window);
+            let truncated = balanced.is_none();
+            let candidate = balanced.or_else(|| repair_truncated_json(&window));
             if let Some(obj) = candidate {
                 if let Ok(v) = serde_json::from_str::<Value>(&obj) {
-                    return Some((name.to_string(), v));
+                    return Some((name.to_string(), v, truncated));
                 }
                 // loose: kunci tanpa quote + kutip tunggal
                 let loose = looseify(&obj);
                 if let Ok(v) = serde_json::from_str::<Value>(&loose) {
-                    return Some((name.to_string(), v));
+                    return Some((name.to_string(), v, truncated));
                 }
             }
         }
@@ -559,7 +571,15 @@ pub async fn exec_tool(
         "write_file" => tools::write_file(work_dir, &s(args, "path"), &s(args, "content")),
         "edit_file" => tools::edit_file(work_dir, &s(args, "path"), &s(args, "old"), &s(args, "new")),
         "delete_file" => tools::delete_file(work_dir, &s(args, "path")),
-        "run_command" => Ok(tools::run_command_async(work_dir, &s(args, "command"), cancel).await),
+        "run_command" => {
+            // Timeout opsional per panggilan (detik) — build/test panjang butuh
+            // lebih dari default; di-cap 600s supaya tugas 15 menit tetap bermakna.
+            let timeout = args.get("timeout")
+                .and_then(|v| v.as_f64())
+                .map(|s| s.clamp(1.0, 600.0) as u64)
+                .unwrap_or(120);
+            Ok(tools::run_command_async(work_dir, &s(args, "command"), timeout, cancel).await)
+        }
         "remember" => Ok(memory::remember(root, &s(args, "key"), &s(args, "value"))),
         "recall" => {
             let key = args.get("key").and_then(|x| x.as_str());
@@ -612,11 +632,12 @@ mod tests {
 
     #[test]
     fn detect_berbagai_format() {
-        let (n, a) = detect_tool_call("baiklah. TOOL: read_file {\"path\": \"a.txt\"}").unwrap();
+        let (n, a, tr) = detect_tool_call("baiklah. TOOL: read_file {\"path\": \"a.txt\"}").unwrap();
         assert_eq!(n, "read_file");
         assert_eq!(a["path"], "a.txt");
+        assert!(!tr, "JSON utuh tidak dianggap terpotong");
         // loose: kunci tanpa quote
-        let (n2, a2) = detect_tool_call("list_dir {path: 'src'}").unwrap();
+        let (n2, a2, _) = detect_tool_call("list_dir {path: 'src'}").unwrap();
         assert_eq!(n2, "list_dir");
         assert_eq!(a2["path"], "src");
         // tanpa tool
@@ -674,12 +695,22 @@ mod tests {
     #[test]
     fn detect_tool_call_terpotong_diselamatkan() {
         // Output model kehabisan budget di tengah argumen — dulu dibuang utuh
-        // dan tugas berakhir senyap; kini subset validnya diselamatkan.
+        // dan tugas berakhir senyap; kini subset validnya diselamatkan DAN
+        // pemanggil diberi tahu (flag terpotong) supaya write_file tidak
+        // senyap menulis isi setengah.
         let reply = r#"Oke. TOOL: write_file {"path": "catatan.txt", "content": "baris satu"#;
-        let (n, a) = detect_tool_call(reply).unwrap();
+        let (n, a, tr) = detect_tool_call(reply).unwrap();
         assert_eq!(n, "write_file");
         assert_eq!(a["path"], "catatan.txt");
         assert_eq!(a["content"], "baris satu");
+        assert!(tr, "JSON tidak seimbang harus ditandai terpotong");
+        // write_file dengan konten besar (mengandung kurung) tetap utuh —
+        // flag hanya menyala bila JSON-nya benar-benar tidak seimbang.
+        let besar = "x".repeat(20_000);
+        let reply2 = format!(r#"TOOL: write_file {{"path": "besar.txt", "content": "mulai{besar}selesai"}}"#);
+        let (_, a2, tr2) = detect_tool_call(&reply2).unwrap();
+        assert!(!tr2, "konten 20k char harus utuh (window 64k)");
+        assert_eq!(a2["content"].as_str().unwrap().len(), besar.len() + "mulai".len() + "selesai".len());
     }
 
     #[test]
@@ -720,13 +751,13 @@ mod tests {
         // Draft motion = JSON bersarang (tracks → keys) — dulu terpotong di
         // `}` keyframe pertama dan tool call tidak pernah terdeteksi.
         let reply = r#"Saya validasi dulu. TOOL: motion_validate {"motion": {"id": "shy_look", "duration": 4.0, "tracks": [{"target": "ay", "keys": [{"t": 0, "v": 0}, {"t": 1.5, "v": -12}, {"t": 4.0, "v": 0}]}, {"target": "ex", "keys": [{"t": 0, "v": 0}, {"t": 2.0, "v": -0.6}, {"t": 4.0, "v": 0}]}]}}"#;
-        let (n, a) = detect_tool_call(reply).unwrap();
+        let (n, a, _) = detect_tool_call(reply).unwrap();
         assert_eq!(n, "motion_validate");
         assert_eq!(a["motion"]["id"], "shy_look");
         assert_eq!(a["motion"]["tracks"].as_array().unwrap().len(), 2);
         assert_eq!(a["motion"]["tracks"][0]["keys"].as_array().unwrap().len(), 3);
         // Konten write_file dengan kurung di dalam string juga aman.
-        let (n2, a2) = detect_tool_call(r#"TOOL: write_file {"path": "a.rs", "content": "fn main() { println!(\"}{\"); }"}"#).unwrap();
+        let (n2, a2, _) = detect_tool_call(r#"TOOL: write_file {"path": "a.rs", "content": "fn main() { println!(\"}{\"); }"}"#).unwrap();
         assert_eq!(n2, "write_file");
         assert!(a2["content"].as_str().unwrap().contains("println"));
     }
@@ -766,13 +797,13 @@ mod tests {
     fn detect_native_tool_call_dan_buang_think() {
         // Format native <tool_call>{name,arguments}</tool_call> (Qwen/GLM).
         let reply = "<think>saya perlu analisa dulu, mungkin read_file</think>\n<tool_call>\n{\"name\": \"motion_analyze\", \"arguments\": {\"model\": \"Mao\"}}\n</tool_call>";
-        let (n, a) = detect_tool_call(reply).unwrap();
+        let (n, a, _) = detect_tool_call(reply).unwrap();
         assert_eq!(n, "motion_analyze");
         assert_eq!(a["model"], "Mao");
 
         // arguments sebagai STRING JSON juga diterima.
         let reply2 = "<tool_call>{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\"src\\\"}\"}</tool_call>";
-        let (n2, a2) = detect_tool_call(reply2).unwrap();
+        let (n2, a2, _) = detect_tool_call(reply2).unwrap();
         assert_eq!(n2, "list_dir");
         assert_eq!(a2["path"], "src");
 

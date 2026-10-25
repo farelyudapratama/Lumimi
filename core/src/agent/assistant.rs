@@ -228,14 +228,27 @@ fn pause_run(r: &Runtime) {
 }
 
 /// Kunci allowlist sesi: per-tool, KECUALI run_command yang dikelompokkan
-/// per perintah — menyetujui "cargo test" bukan berarti mengizinkan
-/// perintah arbitrer lain dengan nama tool yang sama.
+/// per perintah dan write/edit/delete_file yang dikelompokkan per FOLDER
+/// induk path — "selalu izinkan" pada satu file bukan berarti path apa pun
+/// di workdir ikut terbuka selama sesi (dulu kunci hanya nama tool: satu
+/// persetujuan membuka seluruh workdir). Eksekusi tetap lewat safe_path,
+/// jadi path di luar workdir tetap ditolak apa pun kuncinya.
 fn allow_key(name: &str, args: &Value) -> String {
     if name == "run_command" {
         let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
         if !cmd.is_empty() {
             return format!("run_command:{cmd}");
         }
+    }
+    if matches!(name, "write_file" | "edit_file" | "delete_file") {
+        let p = args.get("path").and_then(|v| v.as_str()).unwrap_or("").trim().replace('\\', "/");
+        // "sub/a.txt" → "sub"; "a.txt" → "." (akar workdir). Path ".." lolos
+        // di kunci tapi tetap ditolak safe_path saat eksekusi.
+        let dir = match p.rfind('/') {
+            Some(i) if i > 0 => p[..i].to_string(),
+            _ => ".".to_string(),
+        };
+        return format!("{name}:{dir}");
     }
     name.to_string()
 }
@@ -659,7 +672,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         };
 
         let detected = loop_::detect_tool_call(&reply);
-        let (name, args) = match detected {
+        let (name, args, args_truncated) = match detected {
             None => {
                 // Model mendeskripsikan "sudah kusimpan" tapi tak pernah memanggil
                 // motion_save. Bila draft sudah tervalidasi, JANGAN cuma berhenti:
@@ -794,10 +807,19 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         };
         // Sufiks yang menempel di hasil tool (catatan multi-call + peringatan
         // pengulangan) supaya model membacanya bersama hasilnya.
+        // Peringatan JSON terpotong: subset argumen yang diselamatkan BISA
+        // tidak lengkap — write_file/edit_file jangan dianggap utuh. Dulu
+        // file setengah jadi tertulis tanpa jejak apa pun.
+        let trunc_note = if args_truncated {
+            "\n(peringatan sistem: JSON panggilan tool terpotong di tengah transmisi — hanya sebagian argumen yang bisa diselamatkan. Bila ini write_file/edit_file, isi yang tertulis KEMUNGKINAN TIDAK LENGKAP: baca ulang file dan tulis ulang utuh sebelum melanjutkan.)"
+        } else {
+            ""
+        };
         let result_suffix = format!(
-            "{}{}",
+            "{}{}{}",
             multi_note.as_deref().unwrap_or(""),
-            repeat_note.as_deref().unwrap_or("")
+            repeat_note.as_deref().unwrap_or(""),
+            trunc_note
         );
 
         // Macet berbasis pola: tool yang sama dipanggil berulang tanpa henti
@@ -935,7 +957,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 let r = rt().lock().await;
                 (r.model.clone(), r.role_map.clone())
             };
-            crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map).await
+            crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map, &cancel_rx).await
         } else {
             loop_::exec_tool(root, &wd, &name, &args, &mut cancel_rx).await
         };
@@ -1337,7 +1359,7 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
                 let r = rt().lock().await;
                 (r.model.clone(), r.role_map.clone())
             };
-            crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map).await
+            crate::agent::motion_tools::exec(config_path, root, &name, &args, &model, &role_map, &cancel_rx).await
         } else {
             loop_::exec_tool(root, &wd, &name, &args, &mut cancel_rx).await
         };
@@ -1584,9 +1606,12 @@ mod tests {
     #[tokio::test]
     async fn izin_sesi_allowlist_dan_stop_mengosongkan() {
         let _g = bus::BUS_TEST_LOCK.lock().unwrap();
-        // Kunci allowlist: tool lain per nama, run_command per perintah —
-        // menyetujui satu perintah tidak mengizinkan perintah arbitrer lain.
-        assert_eq!(allow_key("edit_file", &json!({})), "edit_file");
+        // Kunci allowlist: tool lain per nama, run_command per perintah,
+        // write/edit/delete_file per folder induk — menyetujui satu perintah
+        // / satu file tidak mengizinkan arbitrer lain dengan tool yang sama.
+        assert_eq!(allow_key("edit_file", &json!({})), "edit_file:.");
+        assert_eq!(allow_key("edit_file", &json!({ "path": "src/a.txt" })), "edit_file:src");
+        assert_eq!(allow_key("edit_file", &json!({ "path": "b.txt" })), "edit_file:.");
         assert_eq!(allow_key("run_command", &json!({ "command": "  cargo test  " })), "run_command:cargo test");
         assert_eq!(allow_key("run_command", &json!({})), "run_command");
 
@@ -1603,9 +1628,9 @@ mod tests {
         let cfg = mock_config(&wd);
         let res = approve(&cfg, &wd, &wd.join("data"), &id, true, true).await;
         assert!(res.ok);
-        assert!(rt().lock().await.allowed.contains("edit_file"), "approve + always harus memasukkan allowlist");
+        assert!(rt().lock().await.allowed.contains("edit_file:."), "approve + always harus memasukkan allowlist (kunci per folder)");
         let st = status().await;
-        assert!(st["allowlist"].as_array().unwrap().iter().any(|v| v == "edit_file"), "status mengekspos allowlist");
+        assert!(st["allowlist"].as_array().unwrap().iter().any(|v| v == "edit_file:."), "status mengekspos allowlist");
 
         stop().await;
         assert!(rt().lock().await.allowed.is_empty(), "stop() = batas sesi, allowlist kosong lagi");

@@ -185,6 +185,7 @@ pub async fn verify(
     role_map: &Value,
     motion: &Value,
     intent: &str,
+    cancel: Option<&tokio::sync::watch::Receiver<bool>>,
 ) -> Result<Value, String> {
     if model.is_empty() {
         return Err("model tidak diketahui — buka model dulu atau kirim arg \"model\"".into());
@@ -229,9 +230,23 @@ pub async fn verify(
     }
 
     // 4) VLM (role motion-vision; tanpa koneksi → skipped, bukan gagal).
+    //    Cancel-aware: jalur agent meneruskan sinyal Stop — future yang kalah
+    //    select! ter-drop = request HTTP ikut dibatalkan seketika (dulu VLM
+    //    jalan sampai selesai walau user sudah menekan Stop). None = endpoint
+    //    HTTP langsung (pembatalan = disconnect klien, di luar cakupan ini).
     let prompt = build_judge_prompt(intent, &detail_times, &full_times, duration);
     let system = "Kamu penilai visual motion karakter Live2D. Balas HANYA objek JSON tanpa penjelasan lain.";
-    match llm::llm_for_vision(config_path, system, &prompt, &images).await {
+    let vis = match cancel {
+        Some(sig) => {
+            let mut c = sig.clone();
+            tokio::select! {
+                r = llm::llm_for_vision(config_path, system, &prompt, &images) => r,
+                _ = crate::llm_sched::wait_cancel(&mut c) => Err((499, "dibatalkan oleh user".into())),
+            }
+        }
+        None => llm::llm_for_vision(config_path, system, &prompt, &images).await,
+    };
+    match vis {
         Ok(ok) => {
             let mut verdict = parse_verdict(&ok.reply);
             verdict["model"] = json!(model);
@@ -241,6 +256,7 @@ pub async fn verify(
             verdict["skipped"] = json!(false);
             Ok(verdict)
         }
+        Err((499, _)) => Err("dibatalkan oleh user".into()),
         Err((400, msg)) => Ok(json!({
             "skipped": true,
             "reason": msg,

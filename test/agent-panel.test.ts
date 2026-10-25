@@ -75,6 +75,37 @@ describe("hidrasi kartu menunggu izin", () => {
 
 
 // ═══════════════════════════════════════════════════════════════
+// Kapasitas transcript + dedupe history (regresi kunci 160-char)
+// ═══════════════════════════════════════════════════════════════
+
+describe("transcript cap & dedupe", () => {
+  it("dedupe history pakai teks penuh — dua pesan berawalan sama tetap dua-duanya", () => {
+    // Dulu key = role + 160 char pertama: dua pesan berbeda yang berawalan
+    // identik saling dianggap duplikat saat hydrate → pesan lenyap.
+    const prefix = "perbaiki bug di modul transport ini. " + "konteks panjang ".repeat(15);
+    expect(prefix.length).toBeGreaterThan(160);
+    const tr = new Transcript();
+    const added = tr.syncFromHistory([
+      { role: "user", content: prefix + "versi satu" },
+      { role: "assistant", content: "sudah diperiksa" },
+      { role: "user", content: prefix + "versi dua" },
+    ]);
+    const users = tr.blocks.filter((b) => b.kind === "user");
+    expect(users.length).toBe(2);
+    expect(added).toBe(3);
+  });
+
+  it("blocks di-cap — sesi panjang memangkas yang lama + penanda, bukan tumbuh tanpa batas", () => {
+    const tr = new Transcript();
+    tr.appendUser("tugas panjang");
+    for (let i = 0; i < 700; i++) tr.status("langkah " + i);
+    expect(tr.blocks.length).toBeLessThanOrEqual(600);
+    expect(tr.blocks[0].kind).toBe("status"); // penanda pemangkasan di depan
+  });
+});
+
+
+// ═══════════════════════════════════════════════════════════════
 // Hierarki activity — grup selesai otomatis collapse
 // ═══════════════════════════════════════════════════════════════
 

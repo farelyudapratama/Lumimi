@@ -90,9 +90,23 @@ export class Transcript {
   /** Tugas berjalan = pesan user terakhir (pusat perhatian kartu TASK). */
   private task = "";
 
+  /** Cap blok transcript: sesi sangat panjang tidak boleh tumbuh tanpa batas
+   *  (setiap event SSE memicu render). Blok terlama dibuang dan diganti
+   *  penanda; msgKeys TIDAK ikut dibuang supaya syncFromHistory tidak
+   *  membangkitkan kembali riwayat yang sudah dipangkas. */
+  private static readonly MAX_BLOCKS = 600;
+
   private push(b: any): any {
     const blk: any = { id: nextId++, rev: 1, at: Date.now(), ...b };
     this.blocks.push(blk);
+    const over = this.blocks.length - Transcript.MAX_BLOCKS;
+    if (over > 0) {
+      this.blocks.splice(0, over);
+      const first = this.blocks[0] as any;
+      if (!first || first.kind !== "status") {
+        this.blocks.unshift({ id: nextId++, rev: 1, at: Date.now(), kind: "status", text: t("wb.trim.older") });
+      }
+    }
     return blk;
   }
 
@@ -109,13 +123,20 @@ export class Transcript {
   }
 
   private registerMsgKey(role: string, content: string): string {
-    const key = role + ":" + String(content || "").slice(0, 160);
+    const key = this.msgKey(role, content);
     this.msgKeys.add(key);
     return key;
   }
 
   private hasMsgKey(role: string, content: string): boolean {
-    return this.msgKeys.has(role + ":" + String(content || "").slice(0, 160));
+    return this.msgKeys.has(this.msgKey(role, content));
+  }
+
+  /** Key dedupe = role + TEKS PENUH. Dulu 160 char pertama: pesan berbeda
+   *  yang berawalan sama (atau user mengirim teks yang sama dua kali) bisa
+   *  saling dianggap duplikat saat hydrate — buang pesan yang nyata. */
+  private msgKey(role: string, content: string): string {
+    return role + ":" + String(content || "");
   }
 
   // ── Input dari user (panel) ─────────────────────────────────────

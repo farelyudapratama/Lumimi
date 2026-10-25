@@ -1619,7 +1619,7 @@ async fn post_motions_verify(State(paths): State<AppPaths>, body: axum::body::By
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     let intent = v.get("intent").and_then(|x| x.as_str()).unwrap_or("");
-    match motion_vision::verify(&paths.data_dir.join("config.json"), &paths.root, &model, &role_map, motion, intent).await {
+    match motion_vision::verify(&paths.data_dir.join("config.json"), &paths.root, &model, &role_map, motion, intent, None).await {
         Ok(v) => json_status(StatusCode::OK, v),
         Err(e) => json_status(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": e })),
     }

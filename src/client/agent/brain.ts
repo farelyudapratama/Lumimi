@@ -27,6 +27,7 @@ import {
   deriveReplyActions,
 } from "./directive-parser";
 import { httpBase, transport } from "../transport";
+import { t } from "../i18n/index";
 import { readSseStream } from "./panel/stream";
 import { dropApertureParamCtx, directorToIntents } from "../character/adapters";
 import { estimateSpeechMs as estimateSpeechMsShared } from "../../shared/speech-timing";
@@ -139,11 +140,11 @@ function thinkingBase(el: HTMLElement): string {
     el.getAttribute("data-i18n-text") ||
     el.dataset.base ||
     el.textContent ||
-    "Mikir...";
+    t("brain.thinking");
   // Buang sisa timer sebelumnya (" 3s", " 3s 5s") — on bisa dipanggil
   // berulang tanpa off dulu (merge chat saat masih mikir), dan off lama
   // tidak mereset textContent sehingga base ikut tercemar.
-  return raw.replace(/(\s+\d+s)+\s*$/, "").trim() || "Mikir...";
+  return raw.replace(/(\s+\d+s)+\s*$/, "").trim() || t("brain.thinking");
 }
 function setThinking(on: boolean): void {
   try {
@@ -562,7 +563,7 @@ bila memang pas.
         this.playSegments(segments, "companion", { chatFull: true });
         this.afterReplyHousekeeping();
       } else {
-        const msg = "Hmm, aku bingung jawabnya...";
+        const msg = t("brain.confused");
         this.ctx.pushAssistant(msg);
         l2d()?.speak?.(msg, undefined, { cls: "companion" });
         addChat("agent", msg);
@@ -570,8 +571,7 @@ bila memang pas.
     } catch (err: any) {
       if (this.gen !== myGen || ctrl.signal.aborted) return; // merge/Stop = senyap, bukan error
       console.error("[agent]", err);
-      const msg =
-        "Maaf, aku lagi gak bisa mikir sekarang. Cek koneksi atau api key ya.";
+      const msg = t("brain.offline");
       this.ctx.pushAssistant(msg);
       l2d()?.speak?.(msg, undefined, { cls: "companion" });
       addChat("agent", msg);

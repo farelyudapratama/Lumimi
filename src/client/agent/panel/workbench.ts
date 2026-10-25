@@ -334,6 +334,18 @@ export function startWorkbench(): () => void {
     renderHeader();
   }
 
+  // Delta SSE bisa datang puluhan kali per detik dan render penuh per delta
+  // O(n) terhadap panjang sesi — koalescing via rAF: maksimal sekali render
+  // per frame. Fallback timer untuk lingkungan tanpa rAF (test/worker).
+  let renderQueued = false;
+  function scheduleRender(): void {
+    if (renderQueued) return;
+    renderQueued = true;
+    const run = () => { renderQueued = false; render(); renderDock(); };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else setTimeout(run, 32);
+  }
+
   function isBusy(): boolean {
     return !!lastSv && (lastSv.state === "thinking" || lastSv.state === "executing");
   }
@@ -389,8 +401,7 @@ export function startWorkbench(): () => void {
       }
     }
     transcript.applySse(ev);
-    render();
-    renderDock();
+    scheduleRender();
   }
 
   function finishLive(): void {

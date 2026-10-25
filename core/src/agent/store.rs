@@ -287,9 +287,46 @@ pub fn end_run(run_id: i64, status: &str, error: Option<&str>, llm_calls: u64) {
     with_conn(|c| end_run_conn(c, run_id, status, error, llm_calls));
 }
 
+/// Sembunyikan bagian command yang berpotensi rahasia sebelum dicatat ke
+/// store observability. Pola yang dimasked: segmen mirip token (≥24 char
+/// base64/hex) dan `kunci=nilai` dengan kunci mengandung kata rahasia
+/// (key/token/secret/password/bearer). Perintah biasa (cargo test, dir src)
+/// tetap terbaca — nilai observability-nya justru di situ.
+fn mask_command_secrets(cmd: &str) -> String {
+    let secret_key = |k: &str| {
+        let k = k.to_lowercase();
+        ["key", "token", "secret", "password", "passwd", "authorization", "bearer"]
+            .iter()
+            .any(|w| k.contains(w))
+    };
+    cmd.split_whitespace()
+        .map(|tok| {
+            let len = tok.chars().count();
+            // kunci=nilai / kunci:nilai (kunci di awal token).
+            if let Some(eq) = tok.find(['=', ':']) {
+                let (k, v) = tok.split_at(eq);
+                let v = &v[1..];
+                if secret_key(k) && !v.is_empty() && len < 200 {
+                    return format!("{k}=***");
+                }
+            }
+            // Segmen mirip token panjang (bukan path/flag biasa).
+            let looks_token = len >= 24
+                && tok.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '/' | '=' | '.'))
+                && tok.chars().any(|c| c.is_ascii_digit());
+            if looks_token {
+                "***".to_string()
+            } else {
+                tok.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Argumen aman utk disimpan: isi berkas TIDAK disimpan (bisa memuat rahasia
 /// atau sekadar besar) — cukup path + panjang. browser_type sudah diredaksi
-/// public_tool_args; lapisan ini tambahan khusus tool file.
+/// public_tool_args; lapisan ini tambahan khusus tool file + run_command.
 pub fn redact_args(name: &str, args: &Value) -> Value {
     let mut v = args.clone();
     if let Some(obj) = v.as_object_mut() {
@@ -306,6 +343,13 @@ pub fn redact_args(name: &str, args: &Value) -> Value {
                 obj.insert("new_len".into(), json!(n_new));
                 obj.remove("old");
                 obj.remove("new");
+            }
+            "run_command" => {
+                // Command line bisa membawa rahasia (token CI, header auth) —
+                // mask pola rahasia, sisanya tetap terbaca untuk debugging.
+                if let Some(cmd) = obj.get("command").and_then(|c| c.as_str()) {
+                    obj.insert("command".into(), json!(mask_command_secrets(cmd)));
+                }
             }
             _ => {}
         }
@@ -446,6 +490,20 @@ mod tests {
         assert_eq!(r2["old_len"], 4);
         // Tool lain lolos utuh.
         assert_eq!(redact_args("read_file", &json!({ "path": "x" })), json!({ "path": "x" }));
+
+        // run_command: perintah biasa tetap terbaca (nilai observability
+        // utamanya justru di sini), pola rahasia dimasked.
+        let rc = redact_args("run_command", &json!({ "command": "cargo test -p live2d-core" }));
+        assert_eq!(rc["command"], "cargo test -p live2d-core");
+        let rc2 = redact_args("run_command", &json!({ "command": "deploy --api-key=abc12345" }));
+        assert_eq!(rc2["command"], "deploy --api-key=***", "{}", rc2["command"]);
+        let tok = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let rc3 = redact_args("run_command", &json!({ "command": format!("curl {tok} https://x") }));
+        let s3 = rc3["command"].as_str().unwrap();
+        assert!(!s3.contains(tok), "token panjang harus lenyap: {s3}");
+        assert!(s3.contains("***"));
+        let rc4 = redact_args("run_command", &json!({ "command": "git diff -- src/lib.rs" }));
+        assert_eq!(rc4["command"], "git diff -- src/lib.rs");
     }
 
     #[test]
