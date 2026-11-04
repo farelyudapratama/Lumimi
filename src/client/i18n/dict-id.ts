@@ -875,6 +875,12 @@ export const DICT_ID: Record<string, string> = {
   "pet.touch.pat": "Nyaman banget dipuus… 🥰",
   "petWindow.doze": "zzz… 💤",
 
+  // ── pet.voice — press-to-talk desktop pet ──────────────────────
+  "pet.voice.listening": "🎤 mendengarkan… (lepas untuk kirim)",
+  "pet.voice.think": "🤔 mikir…",
+  "pet.voice.empty": "Kayaknya kamu nggak ngomong apa-apa deh 🙃",
+  "pet.voice.fail": "Hmm, telingaku error — coba lagi ya.",
+
   // ── audit localization 2026-09-29 — string yang tadinya hardcode di JS ──
   // sys
   "sys.noModelInstalled": "Belum ada model terpasang. Upload model lewat tab Karakter.",

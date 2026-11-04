@@ -31,8 +31,25 @@ import {
   requestDecision,
   type DecideRequest,
 } from "./brain";
-import { createBudget, fetchProactiveLine } from "./proactive";
+import { createBudget, fetchProactiveLine, PET_SYSTEM_PROMPT } from "./proactive";
 import { buildRoleWriter, type RoleWriter } from "./roles";
+import { AudioLipSync } from "../speech/lip-sync";
+import {
+  chatReply,
+  directorSegments,
+  sttText,
+  ttsBlob,
+  type ChatTurn,
+  type DirectorCapabilities,
+} from "./chat";
+import { createRecorder, type Recorder } from "./voice";
+
+/** Sistem prompt percakapan pet (lebih longgar dari komentar proaktif). */
+const PET_CHAT_SYSTEM =
+  "Kamu adalah pet desktop kecil yang tinggal di layar pemakai — hangat, " +
+  "playful, dan ringkas. Balas 1–2 kalimat pendek tanpa format. " +
+  "Jika user meminta tugas berat (coding, riset panjang), sarankan lembut " +
+  "untuk memakai mode Assistant di app utama.";
 
 const w = window as any;
 const t = (k: string, v?: Record<string, unknown>) =>
@@ -88,6 +105,13 @@ const state = {
   brainIter: 0,
   nextDecideAt: 0,
   lateNightShown: "",
+  // ── fase 3: suara ──
+  recorder: null as Recorder | null,
+  speaking: false,
+  history: [] as ChatTurn[],
+  /** Audio aktif + lip-sync (untuk provider mulut framework). */
+  ttsAudio: null as HTMLAudioElement | null,
+  lip: null as AudioLipSync | null,
 };
 
 // ── Indra ────────────────────────────────────────────────────────────────
@@ -411,6 +435,8 @@ async function boot(): Promise<void> {
       m.internalModel?.coreModel,
     );
   } catch {}
+  // Sumber mulut: framework menulis param dari provider ini (role-resolved).
+  w.__live2dView?.setLipsyncProvider?.(lipsyncProvider);
   startFrameLoop();
   startBrainLoop();
   startDozeLoop();
@@ -451,8 +477,129 @@ function busyNow(): boolean {
   return (
     touch.isGrabbing() ||
     performance.now() - state.lastTouchT < 5000 || // baru saja digodain
-    state.doze === "doze"
+    state.doze === "doze" ||
+    state.speaking ||
+    (state.recorder?.isOn() ?? false)
   );
+}
+
+// ── fase 3: bicara (TTS + lip-sync) & dengar (press-to-talk) ────────────
+function lipsyncProvider(): number | null {
+  const a = state.ttsAudio;
+  if (a && state.lip && !a.paused && !a.ended) return state.lip.sample();
+  return null;
+}
+
+/** Mainkan satu segmen: bubble caption + TTS + mulut. Resolve saat selesai. */
+function speakSegment(seg: { text: string; actions: { motion?: string | null } }): Promise<void> {
+  return new Promise((resolve) => {
+    const m = state.model;
+    if (!m) return resolve();
+    bubble(seg.text, Math.max(4000, seg.text.length * 180));
+    if (seg.actions.motion) m.motion(seg.actions.motion, -1, 2);
+    void (async () => {
+      const blob = await ttsBlob(transport.fetch, seg.text);
+      if (!blob) return resolve(); // TTS gagal — caption bubble tetap tampil
+      const audio = state.ttsAudio ?? new Audio();
+      if (audio.src.startsWith("blob:")) URL.revokeObjectURL(audio.src);
+      audio.src = URL.createObjectURL(blob);
+      state.ttsAudio = audio;
+      state.lip = state.lip ?? new AudioLipSync();
+      state.lip.reset();
+      if (!state.lip.attach(audio)) state.lip = null;
+      audio.onended = () => resolve();
+      audio.onerror = () => resolve();
+      try { await audio.play(); } catch { resolve(); }
+    })();
+  });
+}
+
+async function speakSegments(segs: { text: string; actions: { motion?: string | null } }[]): Promise<void> {
+  state.speaking = true;
+  try {
+    for (const s of segs) await speakSegment(s);
+  } finally {
+    state.speaking = false;
+  }
+}
+
+async function extractMemoryTurn(): Promise<void> {
+  // Fail-soft: ekstraksi memori jangka panjang dari giliran ini.
+  try {
+    await transport.postJson("/api/companion/memory/extract", { turns: state.history.slice(-6) });
+  } catch {}
+}
+
+async function memoryContext(q: string): Promise<string> {
+  try {
+    const m = await transport.getJson<{ entries?: { text?: string }[] }>(
+      "/api/companion/memory?limit=3&q=" + encodeURIComponent(q),
+    );
+    const lines = (m?.entries ?? []).map((e) => String(e.text ?? "")).filter(Boolean);
+    return lines.length ? "Konteks kenangan: " + lines.join("; ") : "";
+  } catch {
+    return "";
+  }
+}
+
+function directorCaps(): DirectorCapabilities {
+  const m = state.model;
+  const defs = (m?.internalModel?.motionManager?.definitions ?? {}) as Record<string, unknown[]>;
+  return {
+    emotions: ["senang", "sedih", "malu", "kaget", "normal"],
+    motions: Object.keys(defs)
+      .filter((g) => (defs[g] || []).length > 0)
+      .map((id) => ({ id, description: "" })),
+  };
+}
+
+async function runVoiceTurn(): Promise<void> {
+  const rec = state.recorder;
+  if (!rec || state.speaking) return;
+  bubble(t("pet.voice.think"), 15000);
+  const out = await rec.stop();
+  const text = out ? await sttText(transport.fetch, out.wav) : null;
+  if (!text) {
+    bubble(t("pet.voice.empty"), 3500);
+    return;
+  }
+  state.history.push({ role: "user", content: text });
+  if (state.history.length > 12) state.history = state.history.slice(-12);
+  const mem = await memoryContext(text);
+  const system = PET_CHAT_SYSTEM + (mem ? "\n" + mem : "");
+  const reply = await chatReply(transport.fetch, system, state.history.slice(-12), mem);
+  if (!reply) {
+    state.history.pop(); // giliran gagal — jangan tinggalkan user turn yatim
+    bubble(t("pet.voice.fail"), 4000);
+    return;
+  }
+  state.history.push({ role: "assistant", content: reply });
+  const segs = await directorSegments(transport.postJson.bind(transport), reply, directorCaps());
+  await speakSegments(segs);
+  void extractMemoryTurn();
+}
+
+function wireVoiceButton(): void {
+  const b = el("b-talk");
+  if (!b) return;
+  const start = async (): Promise<void> => {
+    if (state.speaking || state.doze === "doze") return;
+    if (!state.recorder) state.recorder = createRecorder();
+    try {
+      await state.recorder.start();
+      state.lastTouchT = performance.now();
+      bubble(t("pet.voice.listening"), 30000);
+    } catch {
+      bubble(t("pet.voice.fail"), 4000);
+    }
+  };
+  const stop = (): void => {
+    if (state.recorder?.isOn()) void runVoiceTurn();
+  };
+  // Tahan tombol untuk bicara (press-to-talk); tekan mouse/sentuh sama.
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); void start(); });
+  b.addEventListener("pointerup", stop);
+  b.addEventListener("pointerleave", stop);
 }
 
 function startBrainLoop(): void {
@@ -582,12 +729,8 @@ async function closePet(): Promise<void> {
 
 function wireButtons(): void {
   el("b-wave")?.addEventListener("click", () => reactTo("greet"));
-  el("b-talk")?.addEventListener("click", () => {
-    const lines = [t("petWindow.talk1"), t("petWindow.talk2"), t("petWindow.talk3")]
-      .filter((l) => l && !l.startsWith("petWindow."));
-    const line = pickLine(lines);
-    if (line) bubble(line);
-  });
+  // Bicara = press-to-talk (fase 3) — tekan tahan, lepas kirim.
+  wireVoiceButton();
   const bThrough = el("b-through");
   bThrough?.addEventListener("click", async () => {
     try {
