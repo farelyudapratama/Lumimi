@@ -32,7 +32,7 @@ export interface Kinematics {
   /** px/s², EMA dari perubahan kecepatan. */
   ax: number;
   ay: number;
-  /** ms sejak input terakhir (klik/gerak/tombol). */
+  /** ms sejak sampel terakhir (dihitung saat state(now) dipanggil). */
   sinceInputMs: number;
 }
 
@@ -50,10 +50,14 @@ export interface SensesOptions extends Partial<typeof SENSES_DEFAULTS> {}
 export interface Senses {
   /** Suntik sampel baru (CSS px). */
   feed(s: CursorSample): Kinematics;
-  /** Keadaan terkini (tanpa sampel baru). */
-  state(): Kinematics;
-  /** Tandai ada input non-kursor (keyboard dsb.) — reset idle. */
-  markInput(nowMs: number): void;
+  /**
+   * Keadaan terkini. `nowMs` (opsional) menghitung sinceInputMs TERKINI —
+   * penting saat kursor berhenti total (tidak ada sampel baru masuk):
+   * waktu-idle harus tetap tumbuh, bukan beku di nilai feed terakhir.
+   */
+  state(nowMs?: number): Kinematics;
+  /** Waktu (ms sampel) sampel terakhir; null bila belum ada. */
+  lastSampleMs(): number | null;
 }
 
 export function createSenses(opts: SensesOptions = {}): Senses {
@@ -84,12 +88,13 @@ export function createSenses(opts: SensesOptions = {}): Senses {
       cur.sinceInputMs = 0;
       return { ...cur };
     },
-    state() {
-      return { ...cur };
+    state(nowMs?: number) {
+      const k = { ...cur };
+      if (nowMs != null && last) k.sinceInputMs = Math.max(0, nowMs - last.t);
+      return k;
     },
-    markInput(nowMs: number) {
-      void nowMs; // idle dihitung relatif per feed — mark hanya reset via feed
-      cur.sinceInputMs = 0;
+    lastSampleMs() {
+      return last ? last.t : null;
     },
   };
 }

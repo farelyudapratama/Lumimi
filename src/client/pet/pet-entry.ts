@@ -23,6 +23,16 @@ import { createPunchController } from "./punch";
 import { createTouchDetector, type TouchEvent } from "./touch";
 import { initialSwingState, swingStep } from "./swing";
 import { REACTION_VERBS, pickLine, resolveExpressionForVerb, resolveMotionForVerb } from "./react";
+import {
+  IDLE_ACTIONS,
+  IDLE_EMOTIONS,
+  createDozeGovernor,
+  localDecision,
+  requestDecision,
+  type DecideRequest,
+} from "./brain";
+import { createBudget, fetchProactiveLine } from "./proactive";
+import { buildRoleWriter, type RoleWriter } from "./roles";
 
 const w = window as any;
 const t = (k: string, v?: Record<string, unknown>) =>
@@ -70,6 +80,14 @@ const state = {
   dragPhys: null as { x: number; y: number } | null,
   /** Native stream hidup? (fallback DOM bila tidak). */
   nativeSeen: 0,
+  // ── fase 2: otak ──
+  /** Timestamp sampel sentuh terakhir (grab/boop/pat/klik tombol). */
+  lastTouchT: 0,
+  doze: "awake" as "awake" | "doze",
+  roleWriter: null as RoleWriter | null,
+  brainIter: 0,
+  nextDecideAt: 0,
+  lateNightShown: "",
 };
 
 // ── Indra ────────────────────────────────────────────────────────────────
@@ -203,6 +221,7 @@ async function moveWindowByCursor(phys: { x: number; y: number }): Promise<void>
 // ── Event sentuh → reaksi / drag jendela ────────────────────────────────
 function handleTouchEvents(events: TouchEvent[], phys: { x: number; y: number } | null): void {
   for (const ev of events) {
+    state.lastTouchT = performance.now();
     switch (ev.kind) {
       case "grab":
         state.dragPhys = phys;
@@ -384,25 +403,169 @@ async function boot(): Promise<void> {
   m.x = (window.innerWidth - natW * s) / 2;
   m.y = (window.innerHeight - natH * s) / 2 - window.innerHeight * 0.03;
   if (status) status.textContent = t("petWindow.active");
+  // Role writer (doze/mata) — baca param + rentang MILIK model (role space).
+  try {
+    state.roleWriter = buildRoleWriter(
+      (m.getParameterIds?.() ?? []) as string[],
+      m.internalModel?.coreModel?.getModel?.(),
+      m.internalModel?.coreModel,
+    );
+  } catch {}
   startFrameLoop();
-  startIdleChatter();
+  startBrainLoop();
+  startDozeLoop();
+  startProactiveLoop();
 }
 
-// Sapa berkala kecil (fase 1; fase 2 menggantinya otak ber-budget).
-function startIdleChatter(): void {
-  const lines = [
-    t("petWindow.idle1"), t("petWindow.idle2"), t("petWindow.idle3"),
-    t("petWindow.idle4"), t("petWindow.idle5"), t("petWindow.idle6"),
-  ].filter((l) => l && !l.startsWith("petWindow."));
+// ── fase 2: otak idle (behavior/decide + siklus lokal) ──────────────────
+const DECIDE_EVERY_MS = 6000;
+const GAZE_DEFAULTS = ["face-user", "glance", "think", "lookaway-down", "up"];
+
+/** Gaze target dari nama intent (normalisasi −1..1). */
+function applyGaze(name: string | null | undefined): void {
+  switch (name) {
+    case "face-user":
+      w.__live2dView?.setLookTarget?.(0, 0);
+      break;
+    case "glance": {
+      const r = Math.random();
+      w.__live2dView?.setLookTarget?.((r - 0.5) * 1.4, (Math.random() - 0.5) * 0.8);
+      break;
+    }
+    case "think":
+      w.__live2dView?.setLookTarget?.(-0.5, 0.35);
+      break;
+    case "lookaway-down":
+      w.__live2dView?.setLookTarget?.(0.55, -0.5);
+      break;
+    case "up":
+      w.__live2dView?.setLookTarget?.(0, 0.8);
+      break;
+    default:
+      break;
+  }
+  void GAZE_DEFAULTS; // kosakata iklankan di capabilities, di sini hanya subset umum
+}
+
+function busyNow(): boolean {
+  return (
+    touch.isGrabbing() ||
+    performance.now() - state.lastTouchT < 5000 || // baru saja digodain
+    state.doze === "doze"
+  );
+}
+
+function startBrainLoop(): void {
+  setInterval(async () => {
+    const m = state.model;
+    if (!m || busyNow()) return;
+    const now = performance.now();
+    if (now < state.nextDecideAt) return;
+    const k = senses.state(now);
+    const defs = (m.internalModel?.motionManager?.definitions ?? {}) as Record<string, unknown[]>;
+    const motions = Object.keys(defs).filter((g) => (defs[g] || []).length > 0);
+    const req: DecideRequest = {
+      state: { idleMs: Math.round(k.sinceInputMs) },
+      capabilities: {
+        actions: [...IDLE_ACTIONS],
+        emotions: [...IDLE_EMOTIONS],
+        gazes: GAZE_DEFAULTS,
+        motions: motions.map((id) => ({ id, description: "" })),
+      },
+    };
+    let d = await requestDecision(transport.postJson.bind(transport), req);
+    const usedEngine = !!d;
+    if (!d) d = localDecision(state.brainIter++);
+    // Terapkan (semua lokal — framework yang mengeksekusi).
+    applyGaze(d.gaze ?? (d.action === "settle" ? "face-user" : "glance"));
+    if (d.motion && motions.includes(d.motion)) m.motion(d.motion, -1, 1);
+    if (d.emotion && d.emotion !== "normal") {
+      const expr = resolveExpressionForVerb(m.expressions, d.emotion);
+      if (expr) void m.expression(expr);
+    }
+    if (!usedEngine && d.action === "micro-fidget") {
+      // fidget halus tanpa klip: golekan pandang sebentar (gaze framework
+      // yang men-ease; tanpa SET param mentah).
+      applyGaze("glance");
+    }
+    state.nextDecideAt = now + (d.holdMs ?? DECIDE_EVERY_MS);
+  }, DECIDE_EVERY_MS);
+}
+
+// ── fase 2: doze (mata lempem via role space; framework blink digerbangi) ─
+function startDozeLoop(): void {
+  const gov = createDozeGovernor({
+    onEnter: () => {
+      w.__live2dView?.setBlinkGate?.(() => false);
+      bubble(t("petWindow.doze"), 2500);
+    },
+    onExit: () => {
+      w.__live2dView?.setBlinkGate?.(null);
+      // pulihkan mata ke default milik model (dev 0 = pose istirahat).
+      state.roleWriter?.setDev("eyeLOpen", 0);
+      state.roleWriter?.setDev("eyeROpen", 0);
+    },
+  });
   setInterval(() => {
-    if (Math.random() < 0.5) {
-      const line = pickLine(lines, state.lastReaction);
-      if (line) {
-        state.lastReaction = line;
-        bubble(line);
+    const k = senses.state(performance.now());
+    state.doze = gov.update(performance.now(), k.sinceInputMs > 0 ? k.sinceInputMs : null);
+    if (state.doze === "doze") {
+      // tulis ulang tiap frame saat tidur (sticky terhadap framework).
+      state.roleWriter?.setDev("eyeLOpen", -1);
+      state.roleWriter?.setDev("eyeROpen", -1);
+    }
+  }, 1000);
+}
+
+// ── fase 2: komentar proaktif ber-budget ─────────────────────────────────
+const BUDGET_KEY = "lumimi.pet.proactive.stamps";
+
+function startProactiveLoop(): void {
+  const budget = createBudget({
+    now: () => Date.now(),
+    load: () => {
+      try {
+        const raw = localStorage.getItem(BUDGET_KEY);
+        return raw ? JSON.parse(raw) as { stamps: number[] } : null;
+      } catch { return null; }
+    },
+    save: (s) => {
+      try { localStorage.setItem(BUDGET_KEY, JSON.stringify(s)); } catch {}
+    },
+  });
+  setInterval(async () => {
+    if (state.doze === "doze" || busyNow()) return;
+    const now = performance.now();
+    const k = senses.state(now);
+    const sinceTouch = state.lastTouchT ? now - state.lastTouchT : null;
+    if (!budget.canFire(sinceTouch, k.sinceInputMs > 0 ? k.sinceInputMs : null)) return;
+    // Event: larut malam sekali per malam; sisanya idle panjang.
+    const hour = new Date().getHours();
+    let event = "idle_long";
+    if (hour >= 23 || hour < 4) {
+      const today = new Date().toDateString();
+      if (state.lateNightShown === today) return;
+      state.lateNightShown = today;
+      event = "late_night";
+    }
+    budget.record();
+    const line = await fetchProactiveLine(transport.fetch, event);
+    if (line) {
+      bubble(line, 6000);
+      state.lastReaction = line;
+    } else {
+      // LLM gagal → sapa kaleng sebagai fallback (degradasi aman).
+      const lines = [
+        t("petWindow.idle1"), t("petWindow.idle2"), t("petWindow.idle3"),
+        t("petWindow.idle4"), t("petWindow.idle5"), t("petWindow.idle6"),
+      ].filter((l) => l && !l.startsWith("petWindow."));
+      const line2 = pickLine(lines, state.lastReaction);
+      if (line2) {
+        state.lastReaction = line2;
+        bubble(line2);
       }
     }
-  }, 90000);
+  }, 60_000);
 }
 
 // ── Tombol bar ───────────────────────────────────────────────────────────

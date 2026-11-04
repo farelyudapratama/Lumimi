@@ -865,6 +865,7 @@ export const DICT_EN: Record<string, string> = {
   "pet.touch.grab": "Wah— flying!! 😳",
   "pet.touch.boop": "Boop! Hehe~",
   "pet.touch.pat": "Being petted feels so nice… 🥰",
+  "petWindow.doze": "zzz… 💤",
 
   // ── audit localization 2026-09-29 — string yang tadinya hardcode di JS ──
   // sys
