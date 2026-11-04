@@ -26,6 +26,10 @@ w.__live2dView = {
   setLookTarget: (x: number, y: number) => view.setLookTarget(x, y),
   setGazeGain: (g: { head?: number; eyes?: number; body?: number } | null | undefined) =>
     view.setGazeGain(g),
+  // Override role user/preset (sheet) — sudah ada di class (Live2DView.ts)
+  // tapi lama terlewat di bridge ini: panggilan app.js no-op senyap.
+  setRoleOverrides: (o: unknown) =>
+    (view as unknown as { setRoleOverrides?: (v: unknown) => void }).setRoleOverrides?.(o),
   // Sumber audio tetap di app.js; framework menulis param mulut.
   setLipsyncProvider: (fn: (() => number | null) | null) =>
     view.setLipsyncProvider(fn),

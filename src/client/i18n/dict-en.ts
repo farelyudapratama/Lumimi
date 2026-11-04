@@ -861,6 +861,11 @@ export const DICT_EN: Record<string, string> = {
   "petWindow.talk2": "Need help? Open Assistant mode in the main app.",
   "petWindow.talk3": "I'm just a tiny pet, but I'm loyal 🐾",
 
+  // ── pet.touch — desktop pet touch reactions (grab/boop/pat) ────
+  "pet.touch.grab": "Wah— flying!! 😳",
+  "pet.touch.boop": "Boop! Hehe~",
+  "pet.touch.pat": "Being petted feels so nice… 🥰",
+
   // ── audit localization 2026-09-29 — string yang tadinya hardcode di JS ──
   // sys
   "sys.noModelInstalled": "No model installed yet. Upload a model via the Character tab.",
