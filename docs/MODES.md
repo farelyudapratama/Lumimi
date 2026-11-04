@@ -341,13 +341,19 @@ tutup-oleh-user disinkronkan via `notify_closed`). Tak ada proses kedua,
 tak ada mode CLI `pet` lagi.
 
 1. **Window pet in-process** — WebView2 transparan melayang di desktop,
-   always-on-top native, tanpa frame, tanpa taskbar. Jendela utama
-   (`Lumimi.exe [main <url>]`) berdekorasi normal dan
+   always-on-top native, tanpa frame, tanpa taskbar, **tak mencuri fokus**
+   (`set_focusable(false)` — backend WS_EX_NOACTIVATE; menyentuh pet tidak
+   memindah fokus keyboard; Esc nonaktif tanpa fokus, tombol Tutup tetap
+   hidup). Jendela utama (`Lumimi.exe [main <url>]`) berdekorasi normal dan
    menunggu server bind (maks 15 dtk) sebelum membuat jendela.
-    - Klik-tembus: toggle "Klik Tembus" di panel Pet (atau tombol di bar pet)
+    - Klik-tembus + punch-through: toggle "Klik Tembus" di panel Pet
       → `POST /api/pet/clickthrough {on}` → pet page memanggil Tauri
-      `setIgnoreCursorEvents`. Saat menyala, klik menembus ke desktop; satu-
-      satunya jalan keluar adalah toggle yang sama di app utama.
+      `setIgnoreCursorEvents`. Saat menyala, klik menembus ke desktop
+      KECUALI di atas model — thread indra native (`agent-shell/src/
+      pet_native.rs`, GetCursorPos + GetAsyncKeyState, ~25 Hz, event push
+      `pet://cursor` — BUKAN polling IPC per-frame) memberi tahu pet.js
+      di mana kursor berada; punch controller (`src/client/pet/punch.ts`)
+      membolongkan klik dengan histeresis (enter 4 px / exit 24 px).
 2. **Fallback (hanya bila core jalan TANPA shell — dev `cargo run -p
    live2d-core`)**: spawn `Lumimi.exe` + Chrome/Edge `--app` (opaque,
    always-on-top via PowerShell `SetWindowPos`, tanpa klik-tembus).
@@ -355,14 +361,35 @@ tak ada mode CLI `pet` lagi.
    `agent-shell/src/main.rs`) — exe yang di-spawn membuka jendela UTAMA
    kedua (`index.html`), BUKAN overlay pet transparan. Jadi fallback ini
    dev-only, bukan jalur produksi.
-3. `pet.html` — adapter view stack baru (importmap pixi8.mjs +
-   `js/live2d-view.mjs`; model lewat `__live2dView.loadModel`). Blink/breath
-   diputar framework; gaze kursor via `setLookTarget(±1)` — semua sendi
-   (kepala/mata/badan) ikut, ter-skala range model, tanpa id param hardcode.
-   Sapaan berkala, tombol Sapa/Bicara/Klik-tembus/Tutup (`POST /api/pet/close`
-   menutup jendela; di jalur fallback mematikan proses yang di-spawn).
-   Esc juga menutup. Bar bawah memakai
-   `data-tauri-drag-region` (bisa dipindah di shell Tauri).
+3. **Logika pet = TS** (`src/client/pet/` → entry build ke-5 `js/pet.js`;
+   `pet.html` tinggal markup). Modul murni teruji bun test:
+    - `senses.ts` — kinematika kursor (EMA) + waktu-idle;
+    - `hit.ts` — hit-area AABB facade + konversi kursor fisik→CSS px;
+    - `punch.ts` — punch-through (di atas);
+    - `touch.ts` — detektor grab (geser ≥10 px) / boop (tap) / pat
+      (wiggle ≥3 balikan arah);
+    - `swing.ts` — pendulum teredam (zeta 0.14, sudut tampil tanh 38°)
+      saat digrab-digotog (jendela mengikuti kursor via `setPosition`);
+    - `react.ts` — resolusi reaksi SEMANTIK (verb → grup motion/ekspresi
+      yang dimiliki model — model-agnostic, tanpa id hardcode);
+    - `roles.ts` — tulis param HANYA lewat role space (`mapRoles` +
+      rentang milik model) — doze menutup mata via role eyeLOpen/eyeROpen
+      + `setBlinkGate(false)`;
+    - `brain.ts` — otak idle: POST `/api/behavior/decide` (kosakata =
+      kemampuan nyata model) tiap ~6 dtk → gaze/motion/ekspresi;
+      `engine=false` → siklus deterministik lokal. Governor doze
+      histeresis: idle 10 menit → tidur, input apa pun bangun;
+    - `proactive.ts` — komentar unprompted ber-budget (maks 3/jam
+      bergulir, tenang 30 menit pasca-sentuh, syarat user hadir) dari
+      `/api/chat-stream` + konteks memori companion; persist localStorage;
+    - `voice.ts` + `wav.ts` + `chat.ts` — press-to-talk (tahan tombol
+      Bicara): mic → AudioWorklet → WAV PCM16 → `POST /api/stt` (whisper
+      in-process loopback, TANPA cloud) → `/api/chat-stream` → director
+      `/api/animate-text` → per segmen `POST /api/tts` → playback +
+      lip-sync (`AudioLipSync` modul yang sama dengan app.js, provider ke
+      `setLipsyncProvider`). Ekstraksi memori pasca-turn fail-soft.
+   Semua reaksi/gerak dieksekusi lokal (framework); IPC hanya event input
+   + command, render loop tidak pernah lewat IPC.
 4. Pindah mode dari app utama otomatis menutup jendela pet (`petClose()` di
    teardown).
 
