@@ -2,11 +2,12 @@
 node_modules/
 
 # build output — static/js/app.js (driver karakter) TETAP di-track (parity
-# guard); bundle + i18n + live2d-view adalah hasil build dari src/ (bun run build)
+# guard); bundle + i18n + live2d-view + pet adalah hasil build dari src/ (bun run build)
 dist/
 static/js/bundle.js
 static/js/i18n.js
 static/js/live2d-view.mjs
+static/js/pet.js
 
 # Cubism Core = proprietary Live2D ("Redistributable Code") — lisensinya
 # melarang Core dipublish berdiri sendiri di repo publik. Diunduh terpisah:

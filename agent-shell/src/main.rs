@@ -40,6 +40,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
+mod pet_native;
+
 /// Perintah IPC — frontend ter-embed (origin lokal) memanggil logika core
 /// LANGSUNG dalam proses yang sama (tanpa HTTP). Tiap command adalah selubung
 /// tipis di atas fungsi `live2d_core` (single source of truth — handler HTTP
@@ -90,6 +92,13 @@ fn set_mode(mode: String) -> Result<serde_json::Value, String> {
             .unwrap_or("gagal ganti mode")
             .to_string())
     }
+}
+
+/// Toggle "tak mencuri fokus" jendela pet (backend set_focusable Tauri =
+/// WS_EX_NOACTIVATE). Default ON sejak jendela dibuat (build_pet_window).
+#[tauri::command]
+fn pet_no_activate(app: tauri::AppHandle, on: bool) -> bool {
+    pet_native::no_activate(&app, on)
 }
 
 /// Import model lewat dialog folder NATIVE (domain model-import). Dialog
@@ -165,6 +174,15 @@ fn build_pet_window(app: &tauri::AppHandle) -> tauri::Result<()> {
         .skip_taskbar(true) // pet bukan aplikasi biasa, jangan isi taskbar
         .resizable(false)
         .build()?;
+    // Desktop-pet sejati: tak mencuri fokus dari app yang sedang dipakai
+    // user (WS_EX_NOACTIVATE via set_focusable). Konsekuensi Esc tak hidup
+    // tanpa fokus — tombol Tutup di bar tetap berfungsi.
+    if let Some(w) = app.get_webview_window("pet") {
+        let _ = w.set_focusable(false);
+    }
+    // Indra kursor native (thread push-event `pet://cursor`) — hidup selama
+    // jendela pet ada, mati sendiri saat ditutup (pet_native.rs).
+    pet_native::ensure_sense_thread(app.clone());
     Ok(())
 }
 
@@ -323,6 +341,7 @@ fn main() {
             pet_model,
             get_mode,
             set_mode,
+            pet_no_activate,
             import_model_dialog
         ])
         .setup(move |app| {
