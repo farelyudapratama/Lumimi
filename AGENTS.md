@@ -17,7 +17,7 @@
 
 ## Ringkasan proyek
 
-Aplikasi Live2D yang dikendalikan AI: karakter Cubism 4/5 **apa pun** di
+Aplikasi Live2D yang dikendalikan oleh AI: karakter Cubism 4/5 **apa pun** di
 `data/model/<nama>/` dianimasikan oleh agent. Dia ngobrol (teks atau STT),
 bergerak (directive → MotionRuntime), bersuara (TTS), proaktif saat idle, membaca
 mood dari webcam, dan punya mode dasar `stage` plus 3 mode (VTuber, Assistant,
