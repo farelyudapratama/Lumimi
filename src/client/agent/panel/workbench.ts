@@ -65,11 +65,32 @@ function getT() {
 
 /** Suara sebagai karakter — kelas speech menentukan hak preempt/queue
  *  (policy §15–16): narasi hasil akhir = konten (tier 1), quip/filler
- *  actor = dekoratif (tier 0). */
+ *  actor = dekoratif (tier 0).
+ *  Semua teks melewati sanitizeSpeech (aturan alur respons #4): versi lisan
+ *  companion bebas markdown/kode/path panjang — versi teknis lengkap tetap
+ *  di kartu tugas panel, tidak dibacakan. Narasi server sudah tersanitasi;
+ *  pembersihan di sini jaring terakhir untuk quip/filler jalur lain. */
+function sanitizeSpeech(text: string): string {
+  let s = String(text || "");
+  // Blok kode dibuang; inline code tanpa backtick.
+  s = s.replace(/```[\s\S]*?(```|$)/g, " ").replace(/`([^`]*)`/g, "$1");
+  // Link → teksnya; penanda markdown dibuang (~ dipertahankan — gaya bicara).
+  s = s.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1");
+  s = s.replace(/(^|\n)\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+)/g, "$1");
+  s = s.replace(/[*#|]+/g, "");
+  // Path panjang → basename; pendek dibiarkan.
+  s = s.replace(/[\w.@-]+[\/\\][\w./\\-]{10,}/g, (m) => m.split(/[\/\\]/).pop() || m);
+  // Emoji & simbol tak alami diucapkan.
+  s = s.replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{2300}-\u{23FF}\u{FE0F}]/gu, "");
+  s = s.replace(/\s+/g, " ").trim();
+  return s;
+}
+
 function speakAsCharacter(text: string, cls: string = "worker_actor"): void {
-  if (!text) return;
-  try { window.__addChat?.("agent", text); } catch {}
-  try { window.__live2dAgent?.speak?.(text, undefined, { cls }); } catch {}
+  const clean = sanitizeSpeech(text);
+  if (!clean) return;
+  try { window.__addChat?.("agent", clean); } catch {}
+  try { window.__live2dAgent?.speak?.(clean, undefined, { cls }); } catch {}
 }
 
 export function startWorkbench(): () => void {
@@ -510,6 +531,9 @@ export function startWorkbench(): () => void {
     if (!txt || liveAsk) return;
     snapshotPlan();
     transcript.appendUser(txt);
+    // Konteks input user untuk ack companion (aturan alur respons #2) —
+    // dikonsumsi saat event task_classified tiba dari bus.
+    actor.setTaskInput(txt);
     // Tugas baru: buka giliran (auto-collapse grup selesai sudah di model).
     render();
     view.scrollToBottom();

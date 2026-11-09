@@ -1736,7 +1736,7 @@
     if (vis.skipped) {
       rows.push('<div class="ms-lint-item"><span class="lv warn">vision</span><span class="msg">' + esc(vis.reason || 'skipped') + '</span></div>');
     } else if (vis.region) {
-      rows.push('<div class="ms-lint-item"><span class="lv info">region</span><span class="msg">' + esc(vis.region) + (vis.sign != null ? ' · sign ' + esc(vis.sign) : '') + (vis.confidence != null ? ' · ' + Math.round(vis.confidence * 100) + '%' : '') + '</span></div>');
+      rows.push('<div class="ms-lint-item"><span class="lv info">region</span><span class="msg">' + esc(vis.region) + (vis.sign != null ? ' · sign ' + esc(vis.sign) : '') + (vis.side ? ' · side ' + esc(vis.side) : '') + (vis.confidence != null ? ' · ' + Math.round(vis.confidence * 100) + '%' : '') + '</span></div>');
     }
     host.innerHTML = rows.join('');
     host.classList.remove('hidden');
@@ -1775,10 +1775,13 @@
     const MP = window.MotionProbe;
     if (MP && typeof MP.crossCheck === 'function' && !vis.skipped && vis.ok !== false
       && vis.region && vis.region !== 'tidak_terlihat') {
+      // Cross-check lengkap (Fase 2e): region vs pita vertikal bbox konten +
+      // side layar vs garis tengah konten — `content` disediakan harness di
+      // tiap metrik frame (fraksi konten, bukan piksel model).
       const cc = MP.crossCheck(
-        { region: vis.region, sign: vis.sign, confidence: vis.confidence, notes: vis.notes },
+        { region: vis.region, sign: vis.sign, side: vis.side, confidence: vis.confidence, notes: vis.notes },
         { bbox: worst.bbox || null, centroid: worst.centroid || null, changedPixels: worst.changedPixels || 0, diffRatio: worst.diffRatio || 0 },
-        0, 0,
+        worst.content || null,
       );
       conflict = !!cc.conflict;
       reasons = cc.reasons || [];
@@ -1791,6 +1794,7 @@
       conflict, reasons,
       region: vis.region || '',
       sign: vis.sign,
+      side: vis.side || '',
       confidence: vis.confidence,
       safeRange: vis.safeRange || null,
       notes: vis.notes || '',
@@ -1851,7 +1855,7 @@
           if (item.error) {
             rows.push({
               paramId: item.paramId, label: cdi || item.paramId, error: item.error,
-              dead: false, conflict: false, reasons: [], region: '', sign: null,
+              dead: false, conflict: false, reasons: [], region: '', sign: null, side: '',
               confidence: null, safeRange: null, notes: '', range: null, worst: null,
               visionSkipped: true, roleChoice: '', include: false,
             });
@@ -1918,6 +1922,7 @@
         const ev = [];
         if (r.region) ev.push(esc(r.region));
         if (r.sign != null) ev.push('sign ' + esc(r.sign));
+        if (r.side) ev.push('side ' + esc(r.side));
         if (r.confidence != null) ev.push(Math.round(r.confidence * 100) + '%');
         if (r.worst && r.worst.changedPixels != null) ev.push(esc(r.worst.changedPixels) + ' px');
         if (r.safeRange) ev.push('[' + esc(r.safeRange[0]) + ', ' + esc(r.safeRange[1]) + ']');

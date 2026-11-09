@@ -5,19 +5,19 @@
 > **kode yang benar, perbaiki dokumennya**. Fase di bawah dipelihara sebagai
 > referensi desain; status aktual (diverifikasi terhadap kode):
 
-## Status implementasi (2026-10-17; re-verifikasi 2026-10-24; Fase 3 dibangun 2026-10-24)
+## Status implementasi (2026-10-17; re-verifikasi 2026-10-24; Fase 3 dibangun 2026-10-24; perbaikan harness probe 2026-10-25)
 
 | Bagian | Status | Di kode + catatan |
 |---|---|---|
 | Fondasi analisis & validasi | ✅ | `core/src/motion_analysis.rs`, `motion_validation.rs`, endpoint `/api/model/motion-analysis` + `/api/motions/validate`. |
 | Image parts + role `motion-vision` | ✅ | `core/src/llm.rs` (OpenAI `image_url` / Gemini `inline_data` / Anthropic image block). |
 | **Fase 1** rig report | ✅ (ringan) | `core/src/rig_report.rs` → `GET /api/model/rig-report`: provenance per param (`curveClassified`/`unclassified`/`physicsOutput`/`displayLabel`) + `modelHash` + daftar `unclassified`. Belum: cache-hash → stale UI (laporan di-fetch ulang tiap buka studio). |
-| **Fase 2** probe visual | ✅ (dasar) | Harness `__motionHarness.probe()`: sweep `default→min→mid→max`, **physics settle** (render sinkron N frame), capture, metrik diff piksel (`changedPixels`/`diffRatio`/`bbox`/`centroid` via `motion-probe.ts`), deteksi **param mati**. Endpoint `POST /api/model/probe` (`core/src/motion_probe.rs`): daftar default = param `unclassified` rig report (cap 6) + **cross-check VLM** role `motion-vision` (region/sign/safeRange/confidence, parser loose). UI: tombol "Probe Param" di Motion Studio. ❌ belum: retry bersyarat `coupled_with`, atribusi per mesh/drawable, penanda kiri/kanan frame untuk `side`. |
-| **Fase 3** panel approve batch | ✅ (2026-10-24) | Tombol "Setujui Param" di Motion Studio: probe batch `unclassified` (6/panggilan) → baris urut conflict→dead→gagal/tanpa vision→low-conf→konsisten, dropdown role kanonik (25) / param ekstra, evidensa per baris, **crossCheck ter-wire** (region-vs-bbox; side menunggu penanda frame), approve massal hanya baris konsisten → `probeApprovals.user` sheet v5 (`user`>`ai` mutlak) + badge stale `modelHash` + hapus. Detail: `MOTION-SYSTEM-SPEC.md` §17d. |
+| **Fase 2** probe visual | ✅ (diperkuat 2026-10-25) | Harness `__motionHarness.probe()`: sweep `default→min→mid→max`, **drive patch re-enqueue tiap frame** (`reapplyDrive` — dulu hanya frame pertama yang membawa nilai → semua param salah dianggap mati), **settle adaptif konvergen** (signature grayscale 48×27, cap 150), **noise floor** (dua capture basis; `classifyDeadWithFloor` k=3), metrik diff piksel + `content` bbox konten. Endpoint `POST /api/model/probe`: default = `unclassified` (cap 6) + cross-check VLM (region/sign/**side layar_***/safeRange/confidence, parser loose) + **kunci `harness_lock`** (tak tumpang tindih dengan verify). UI: tombol "Probe Param". ❌ belum: retry bersyarat `coupled_with`, atribusi per mesh/drawable, side sisi KARAKTER (butuh info arah hadap). |
+| **Fase 3** panel approve batch | ✅ (2026-10-24) | Tombol "Setujui Param" di Motion Studio: probe batch `unclassified` (6/panggilan) → baris urut conflict→dead→gagal/tanpa vision→low-conf→konsisten, dropdown role kanonik (25) / param ekstra, evidensa per baris (region/sign/side), **crossCheck lengkap** (bbox-kosong + region-vs-pita-vertikal-konten + side-layar-vs-tengah-konten; `content` dari harness), approve massal hanya baris konsisten → `probeApprovals.user` sheet v5 (`user`>`ai` mutlak) + badge stale `modelHash` + hapus. Detail: `MOTION-SYSTEM-SPEC.md` §17d. |
 | **Fase 4a** planner 2-langkah | ✅ | `motion_ai.rs::plan_roles`: langkah 1 pilih role → langkah 2 prompt generate dibatasi role terpilih (echo-retry + fallback tetap). Kosakata = 16 role canonical (`KNOWN_ROLES`) + **param ekstra hasil approve user** via `probeParams` (beat kind param, `parse_beats` hanya menerima param terdaftar) — dibangun 2026-10-24. |
 | **Fase 4b** compiler | ✅ | `src/client/animation/motion-compiler.ts`: `returnToDefault` (holdEnd beat HANYA tercatat di meta — keyframe akhir tetap pulang; holdEnd sungguhan backlog), **loop closure tanpa kecuali**, clamp ke `safe_range` rig, amplitudo dari statistik native, physics gate + capability gate, `beatId` disematkan, lantai durasi 0.05 s (stretch penuh backlog), easing. |
 | **Fase 4c** critic numerik | ✅ | `src/client/animation/motion-critic.ts`: jerk (p90 native + fallback `heuristic`), endStuck, diskontinuitas, contention, physics-gate. Bound `safe_range` ditangkap compiler (critic belum membaca meta); distribusi jerk native belum di-feed dari disk (UI masih heuristic). |
-| **Fase 4d** critic visual | ✅ | `core/src/motion_vision.rs` + harness + tool agent `motion_verify` (filmstrip 8 frame; capture WAJIB sinkron karena rAF mati di jendela ter-occlude). |
+| **Fase 4d** critic visual | ✅ (diperkuat 2026-10-25) | `core/src/motion_vision.rs` + harness + tool agent `motion_verify` (filmstrip 8 frame; capture WAJIB sinkron karena rAF mati di jendela ter-occlude). 2026-10-25: filmstrip **batch satu evaluate** (`__motionHarness.filmstrip`, dulu 11 round-trip CDP) + `harness_lock` + error migrasi role load jadi error keras (dulu ditelan → verdict palsu). |
 | **Fase 4e** refine terpetakan | ⚠️ sebagian | Server: `refine_with_validator` kini loop maks 3 iterasi dan memilih draft terbaik (validator generik, belum terpetaan beatId). Klien: **refine per-beat deterministik** di panel Terima Batch (slider intensitas / tanda ± / sertakan-beat) → recompile; fixture menjamin invariant-nya. LLM merevisi beat-per-beat via `beatId` belum dibangun. |
 | **Fase 4f** layering | 🔀 sebagian (metode lain) | Pemenang per param + tie deterministik SUDAH ada lewat `ParameterArbiter` (render-side, `src/live2d/ParameterArbiter.ts`) + `hasConflict`; additive lewat updater ber-gate (blink/breath/look/lipsync) + `pokeAddParam`. Belum: log pemenang per field, test kebijakan eksplisit, penyatuan tabel prioritas arbiter vs playback runtime. |
 | **Fase 5** ukuran keberhasilan | ✅ (dasar) | `test/motion-fixture-refine.test.ts`: draft freehand buruk < hasil compiler (skor + temuan struktural), invarian refine per-beat (skor tak menurun, loop closure, bounds, `beatId` terpetaan). ❌ belum: fixture multi-model + label manual, pengukuran akurasi probe. |
@@ -25,14 +25,18 @@
 
 **Backlog yang masih terbuka** (dikerjakan hanya bila diminta eksplisit):
 cache-hash/stale UI untuk rig report itu sendiri; retry bersyarat
-`coupled_with` + atribusi mesh + penanda sisi frame (probe); refine LLM
-terpetaan per beatId; feed distribusi jerk native ke critic; holdEnd
-sungguhan di compiler (prompt beats sudah menyuruh LLM memakainya); kebijakan
-layering 4f sisanya (log pemenang + penyatuan tabel prioritas); fixture
-multi-model label manual + pengukuran akurasi probe. Daftar lengkap + bukti
-kode: `ARSITEKTUR-GAP.md` → "Follow-up motion pipeline". Selesai 2026-10-24:
+`coupled_with` + atribusi mesh (probe); refine LLM terpetaan per beatId;
+feed distribusi jerk native ke critic; holdEnd sungguhan di compiler
+(prompt beats sudah menyuruh LLM memakainya); kebijakan layering 4f
+sisanya (log pemenang + penyatuan tabel prioritas); fixture multi-model
+label manual + pengukuran akurasi probe. Daftar lengkap + bukti kode:
+`ARSITEKTUR-GAP.md` → "Follow-up motion pipeline". Selesai 2026-10-24:
 panel approve + persist layer user, wiring crossCheck (region-vs-bbox),
 konsumen modelHash (stale), override role-mapping tier 0, beat kind param.
+Selesai 2026-10-25 (perbaikan harness): drive patch re-enqueue per frame
+(bug "semua param dead"), settle adaptif konvergen + noise floor, crossCheck
+lengkap (pita region + side layar_*), `harness_lock` probe↔verify, filmstrip
+batch satu evaluate, error migrasi role load diteruskan keras.
 
 Detail fase di bawah dipertahankan apa adanya. Baca bersama
 `MOTION-SYSTEM-SPEC.md` (pipeline eksekusi yang aktif) dan

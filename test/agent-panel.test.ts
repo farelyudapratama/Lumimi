@@ -808,8 +808,8 @@ describe("TermLog", () => {
 // ═══════════════════════════════════════════════════════════════
 
 function makeTestActor() {
-  const calls: { gaze: string[]; emotion: string[]; spoke: string[]; quips: string[] } = {
-    gaze: [], emotion: [], spoke: [], quips: [],
+  const calls: { gaze: string[]; emotion: string[]; spoke: string[]; quips: string[]; acks: string[]; inputs: string[] } = {
+    gaze: [], emotion: [], spoke: [], quips: [], acks: [], inputs: [],
   };
   let clock = 100000; // jauh di atas semua cooldown awal (lastQuip/lastMotion = 0)
   const actor = makeActor({
@@ -819,7 +819,8 @@ function makeTestActor() {
     },
     t: (k: string) => k,
     post: async (_p: string, body: any) => {
-      calls.quips.push(String(body?.event));
+      calls.quips.push(String(body?.event ?? body?.ackType ?? ""));
+      if (body?.ackType) { calls.acks.push(String(body.ackType)); calls.inputs.push(String(body.input ?? "")); }
       return { quip: "" };
     },
     speakAsCharacter: (s: string) => calls.spoke.push(s),
@@ -832,9 +833,55 @@ function makeTestActor() {
 
 const waitMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Prasyarat alur respons (#1): tugas harus terklasifikasi dulu. ack bicara
+ *  (quip kosong → template as.ack.*), lalu penanda dibersihkan supaya tes
+ *  hanya mengukur event yang sedang diuji. */
+async function startKnownTask(actor: ReturnType<typeof makeActor>, tick: (ms: number) => void, type = "coding"): Promise<void> {
+  actor.onActivity({ type: "task_classified", label: type });
+  await waitMs(25); // ack fallback bicara
+  tick(16000);      // lepas cooldown quip progres
+}
+
 describe("actor — mapping per-event", () => {
+  it("aturan #1: SEBELUM task_classified companion diam total — tanpa quip, tanpa template", async () => {
+    const { actor, calls } = makeTestActor();
+    actor.onActivity({ type: "thinking_start", label: "mulai" });
+    actor.onActivity({ type: "tool_call_start", label: "read_file x" });
+    actor.onActivity({ type: "plan_revised", label: "ubah" });
+    actor.onActivity({ type: "subagent_spawned", label: "sub1" });
+    await waitMs(60);
+    expect(calls.quips.length).toBe(0);
+    expect(calls.spoke.length).toBe(0);
+  });
+
+  it("aturan #2: ack per jenis tugas — ackType + input user diteruskan ke prompt", async () => {
+    const { actor, calls } = makeTestActor();
+    actor.setTaskInput("cari file konfigurasi di project");
+    actor.onActivity({ type: "task_classified", label: "search" });
+    expect(calls.acks).toEqual(["search"]);
+    expect(calls.inputs).toEqual(["cari file konfigurasi di project"]);
+    await waitMs(25); // quip kosong → template ack per tipe
+    expect(calls.spoke).toEqual(["as.ack.search"]);
+    // Tipe tak dikenal → general (jangan pernah membicarakannya mentah).
+    calls.spoke.length = 0;
+    actor.onActivity({ type: "task_classified", label: "aneh-tipe" });
+    await waitMs(25);
+    expect(calls.spoke).toEqual(["as.ack.general"]);
+  });
+
+  it("ack bukan quip — tidak menyetel cooldown; quip tool pertama tetap jalan", async () => {
+    const { actor, calls } = makeTestActor();
+    actor.onActivity({ type: "task_classified", label: "coding" });
+    await waitMs(25);
+    actor.onActivity({ type: "tool_call_start", label: "read_file x" });
+    await waitMs(35); // grasi + fallback tool
+    expect(calls.quips.length).toBe(2); // ack + quip tool tanpa menunggu 15 dtk
+  });
+
   it("verification gagal → kesal + quip LLM; lolos → senang tanpa komentar", async () => {
     const { actor, calls, tick } = makeTestActor();
+    await startKnownTask(actor, tick);
+    calls.spoke.length = 0;
     actor.onActivity({ type: "verification_result", label: "gagal: build error" });
     expect(calls.emotion).toContain("kesal");
     expect(calls.spoke.length).toBe(0); // LLM dulu — belum ada yang bicara
@@ -852,26 +899,34 @@ describe("actor — mapping per-event", () => {
     let clock = 100000;
     const actor = makeActor({
       t: (k: string) => k,
-      post: async () => ({ quip: "dia lagi baca config nih" }),
+      post: async () => ({ quip: "aku lagi baca config nih" }),
       speakAsCharacter: (s: string) => calls.spoke.push(s),
       now: () => clock,
       fallbackMs: 10,
     });
+    actor.onActivity({ type: "task_classified", label: "coding" });
+    await waitMs(20); // ack: quip datang → template ack dibatalkan
+    expect(calls.spoke).toEqual(["aku lagi baca config nih"]);
+    clock += 16000;
     actor.onActivity({ type: "tool_call_start", label: "read_file package.json" });
-    await waitMs(5);
-    expect(calls.spoke).toEqual(["dia lagi baca config nih"]); // quip saja
+    await waitMs(20); // grasi → quip tool datang
+    expect(calls.spoke.length).toBe(2);
     await waitMs(30);
-    expect(calls.spoke.length).toBe(1); // template DIBATALKAN
+    expect(calls.spoke.length).toBe(2); // template DIBATALKAN
   });
 
   it("label event asli dikirim ke prompt quip — komentar spesifik, bukan generik", async () => {
-    const { actor, calls } = makeTestActor();
+    const { actor, calls, tick } = makeTestActor();
+    await startKnownTask(actor, tick);
     actor.onActivity({ type: "tool_call_start", label: "read_file package.json {}" });
-    expect(calls.quips[0]).toContain("read_file package.json");
+    await waitMs(15); // quip baru diminta setelah masa grasi
+    expect(calls.quips[1]).toContain("read_file package.json");
   });
 
   it("plan_revised → gaze think + quip revised (fallback saat gagal)", async () => {
     const { actor, calls, tick } = makeTestActor();
+    await startKnownTask(actor, tick);
+    calls.spoke.length = 0;
     actor.onActivity({ type: "plan_revised", label: "tambah item" });
     expect(calls.gaze).toContain("think");
     expect(calls.spoke.length).toBe(0);
@@ -880,7 +935,8 @@ describe("actor — mapping per-event", () => {
     tick(16000); // lepas cooldown quip
     calls.spoke.length = 0;
     actor.onActivity({ type: "plan_revised", label: "ubah arah" });
-    expect(calls.quips.length).toBe(2);
+    await waitMs(15);
+    expect(calls.quips.length).toBe(3); // ack + 2 quip revised
   });
 
   it("permission_resolved: disetujui → lega; ditolak → TANPA reaksi", () => {
@@ -897,6 +953,8 @@ describe("actor — mapping per-event", () => {
 
   it("subagent_completed → reaksi ringan; spawned → quip (fallback saat gagal)", async () => {
     const { actor, calls, tick } = makeTestActor();
+    await startKnownTask(actor, tick);
+    calls.spoke.length = 0;
     actor.onActivity({ type: "subagent_spawned", label: "sub1: riset" });
     expect(calls.spoke.length).toBe(0);
     await waitMs(30);
@@ -920,20 +978,36 @@ describe("actor — mapping per-event", () => {
 
   it("cooldown quip 15 dtk: dalam cooldown → DIAM (tanpa template, tanpa quip)", async () => {
     const { actor, calls, tick } = makeTestActor();
-    actor.onActivity({ type: "thinking_start", label: "tugas" });
-    expect(calls.quips.length).toBe(1);
-    await waitMs(30); // fallback pertama bicara
+    await startKnownTask(actor, tick);
+    calls.spoke.length = 0;
+    actor.onActivity({ type: "tool_call_start", label: "tugas" });
+    await waitMs(35); // grasi → quip tool diminta (kosong) → template bicara
+    expect(calls.quips.length).toBe(2); // ack + quip tool
+    expect(calls.spoke.length).toBe(1);
     calls.spoke.length = 0;
     tick(5000);
     actor.onActivity({ type: "tool_call_start", label: "list_dir {}" });
-    expect(calls.quips.length).toBe(1); // masih cooldown — quip tak diminta
+    expect(calls.quips.length).toBe(2); // masih cooldown — quip tak diminta
     expect(calls.spoke.length).toBe(0); // dan BUKAN template juga
     tick(16000); // lepas cooldown
     actor.onActivity({ type: "tool_call_start", label: "read_file {}" });
-    expect(calls.quips.length).toBe(2);
+    await waitMs(15);
+    expect(calls.quips.length).toBe(3);
   });
 
-  it("quip gagal (reject) → template segera, tanpa menunggu timer", async () => {
+  it("tugas singkat dibatalkan sebelum grasi habis — quip progres TIDAK diucapkan", async () => {
+    const { actor, calls } = makeTestActor();
+    actor.setTaskInput("halo");
+    actor.onActivity({ type: "task_classified", label: "greeting" });
+    await waitMs(5); // tugas tuntas cepat → final tiba sebelum fallback ack
+    actor.onActivity({ type: "tool_call_start", label: "read_file x" });
+    actor.onActivity({ type: "final_answer", label: "" });
+    await waitMs(60); // ...grasi & fallback lama pun lewat
+    expect(calls.quips.length).toBe(1); // hanya ack; quip tool tak pernah diminta
+    expect(calls.spoke.length).toBe(0); // fallback ack & tool sama-sama dibatalkan
+  });
+
+  it("quip gagal (reject) → template segera setelah grasi, tanpa menunggu timer fallback", async () => {
     const calls: { spoke: string[] } = { spoke: [] };
     let clock = 100000;
     const actor = makeActor({
@@ -941,11 +1015,37 @@ describe("actor — mapping per-event", () => {
       post: async () => { throw new Error("LLM mati"); },
       speakAsCharacter: (s: string) => calls.spoke.push(s),
       now: () => clock,
-      fallbackMs: 10_000, // timer panjang — template harus datang dari catch
+      graceMs: 10, // grasi cepat; timer fallback panjang — template harus datang dari catch
+      fallbackMs: 10_000,
     });
+    actor.onActivity({ type: "task_classified", label: "coding" });
+    await waitMs(20);
+    expect(calls.spoke).toEqual(["as.ack.coding"]); // ack: template dari catch
+    clock += 16000;
     actor.onActivity({ type: "error", label: "boom" });
-    await waitMs(5);
-    expect(calls.spoke).toEqual(["as.actor.error"]);
+    await waitMs(20);
+    expect(calls.spoke).toEqual(["as.ack.coding", "as.actor.error"]);
+  });
+
+  it("fallback template berotasi (dasar → .v2 → .v3 → dasar) — tak ada kalimat identik beruntun", async () => {
+    const { actor, calls, tick } = makeTestActor();
+    await startKnownTask(actor, tick);
+    calls.spoke.length = 0;
+    actor.onActivity({ type: "plan_revised", label: "gagal" });
+    await waitMs(30);
+    expect(calls.spoke).toEqual(["as.actor.revised"]);
+    tick(16000); // lepas cooldown quip
+    actor.onActivity({ type: "plan_revised", label: "gagal lagi" });
+    await waitMs(30);
+    expect(calls.spoke).toEqual(["as.actor.revised", "as.actor.revised.v2"]);
+    tick(16000);
+    actor.onActivity({ type: "plan_revised", label: "gagal terus" });
+    await waitMs(30);
+    expect(calls.spoke).toEqual(["as.actor.revised", "as.actor.revised.v2", "as.actor.revised.v3"]);
+    tick(16000);
+    actor.onActivity({ type: "plan_revised", label: "gagal melulu" });
+    await waitMs(30);
+    expect(calls.spoke[3]).toBe("as.actor.revised"); // siklus kembali ke dasar
   });
 });
 

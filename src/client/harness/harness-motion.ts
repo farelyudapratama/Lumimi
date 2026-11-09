@@ -8,12 +8,15 @@
  *   __motionHarness.state()                                // {ready, modelOk, …}
  *   __motionHarness.probe(paramId)                         // sweep param + settle physics + capture
  *                                                          // (probe: asset BOLEH kosong — pose murni dari drive)
+ *   __motionHarness.filmstrip([t…], [t…])                  // critic visual: batch U+F dalam SATU evaluate
  *
  * Tulisan parameter lewat backend coreModel facade (antrean `writes` yang
  * di-flush updater order 900 tiap frame) — jalur tulis resmi yang sama
- * dengan app.js. Blink/breath/gaze dimatikan supaya pose murni dari asset
+ * dengan app.js. Antrean itu sekali konsumsi per frame, jadi drive patch
+ * di-re-enqueue tiap frame render (driveLoop rAF + reapplyDrive di settle
+ * sinkron). Blink/breath/gaze dimatikan supaya pose murni dari asset
  * (deterministik untuk screenshot). Physics tetap jalan: sway rambut adalah
- * noise alami, bukan bagian yang dinilai.
+ * noise alami — diukur sebagai NOISE FLOOR probe (bukan bagian yang dinilai).
  *
  * Halaman ini hanya untuk harness internal — bukan permukaan user.
  */
@@ -21,8 +24,14 @@
 type AnyRec = Record<string, any>;
 
 // Metrik diff piksel probe — logika murni di motion-probe.ts (teruji unit),
-// harness hanya menyediakan piksel canvas.
-import { bboxFromDiff, centroidFromDiff, classifyDead } from "../animation/motion-probe";
+// harness hanya menyediakan piksel canvas + antrean tulis resmi.
+import {
+  bboxFromDiff,
+  centroidFromDiff,
+  classifyDeadWithFloor,
+  meanAbsDiff,
+  signatureFromImageData,
+} from "../animation/motion-probe";
 
 interface HarnessState {
   ready: boolean;
@@ -30,6 +39,8 @@ interface HarnessState {
   duration: number;
   uncoveredRoles: number;
   error: string;
+  /** Proses sweep probe yang sedang jalan (untuk overlay status harness). */
+  progress: { label: string; done: number; total: number } | null;
 }
 
 const st: HarnessState = {
@@ -38,6 +49,7 @@ const st: HarnessState = {
   duration: 1,
   uncoveredRoles: 0,
   error: "",
+  progress: null,
 };
 
 let facade: AnyRec | null = null;
@@ -51,8 +63,9 @@ function w(): AnyRec {
 function status(text?: string) {
   const el = document.getElementById("harness-status");
   if (!el) return;
+  const prog = st.progress ? ` · probe ${st.progress.label} ${st.progress.done}/${st.progress.total}` : "";
   el.textContent = text
-    ?? `harness: ${st.ready ? "ready" : "busy"} model=${st.modelOk} dur=${st.duration.toFixed(2)}s${st.error ? " ERR=" + st.error : ""}`;
+    ?? `harness: ${st.ready ? "ready" : "busy"}${prog} model=${st.modelOk} dur=${st.duration.toFixed(2)}s${st.error ? " ERR=" + st.error : ""}`;
 }
 
 function boot() {
@@ -95,6 +108,7 @@ function paramRanges(f: AnyRec): Record<string, { min: number; max: number; def:
 async function load(req: { model: string; asset?: AnyRec | null; roleMap?: AnyRec }): Promise<AnyRec> {
   st.ready = false;
   st.error = "";
+  drivePatch = {}; // sisa drive model/probe sebelumnya tidak boleh bocor
   status("harness: loading model…");
   const v = w().__live2dView;
   const dsl = w().MotionDSL;
@@ -131,7 +145,16 @@ async function load(req: { model: string; asset?: AnyRec | null; roleMap?: AnyRe
   fitToCanvas();
   if (assetCache) seek(0);
   status();
-  return { ok: true, duration: st.duration, uncoveredRoles: st.uncoveredRoles, params: Object.keys(rangesCache || {}).length };
+  // `error` ikut dikirim: gagal migrasi role TIDAK boleh ditelan — verify
+  // akan memutus verdict dari pose kosong (playing:false palsu) kalau
+  // errornya cuma diam di state halaman. Pemanggil core memeriksanya.
+  return {
+    ok: st.error === "",
+    duration: st.duration,
+    uncoveredRoles: st.uncoveredRoles,
+    params: Object.keys(rangesCache || {}).length,
+    error: st.error,
+  };
 }
 
 /** Samakan ukuran/posisi model dengan canvas (fit + center). Framing penuh
@@ -151,10 +174,14 @@ function fitToCanvas() {
   facade.y = facade.y + (ch - b2.height) / 2 - b2.y;
 }
 
-/** Patch drive aktif — di-re-queue TIAP FRAME. Wajib: AppWriteUpdater
- *  mem-flush antrean sekali lalu clear, dan loadParameters() frame berikutnya
- *  memulihkan pose dasar — pola yang sama dipakai app.js (applyRawDrive di
- *  rAF sendiri). Tanpa ini pose kembali ke dasar 1 frame setelah seek. */
+/** Patch drive aktif. Antrean tulis resmi (facade `writes`, flush order 900 /
+ *  pra-physics utk input physics) di-flush lalu DIKOSONGKAN tiap frame, dan
+ *  loadParameters() frame berikutnya memulihkan pose dasar — jadi patch wajib
+ *  di-re-enqueue TIAP frame render (pola app.js `applyRawDrive` di rAF
+ *  sendiri). Re-enqueue terjadi di dua tempat: `driveLoop` (rAF, saat ticker
+ *  halaman hidup) dan `reapplyDrive()` dari `settle()` (loop render sinkron —
+ *  rAF TIDAK jalan di dalam satu task sinkron Runtime.evaluate; tanpa ini
+ *  capture settle membaca pose default dan semua param salah dianggap mati). */
 let drivePatch: Record<string, number> = {};
 let driveLoopRunning = false;
 
@@ -169,13 +196,18 @@ function scratchCtx(w: number, h: number): CanvasRenderingContext2D {
   return ctx;
 }
 
-function driveLoop() {
+/** Enqueue ulang drive patch ke antrean tulis resmi (sekali konsumsi per
+ *  frame — dipanggil sebelum tiap draw di loop settle sinkron). */
+function reapplyDrive() {
   const cm = facade?.internalModel?.coreModel;
-  if (cm) {
-    for (const id of Object.keys(drivePatch)) {
-      cm.setParameterValueById(id, drivePatch[id], 1);
-    }
+  if (!cm) return;
+  for (const id of Object.keys(drivePatch)) {
+    cm.setParameterValueById(id, drivePatch[id], 1);
   }
+}
+
+function driveLoop() {
+  reapplyDrive();
   requestAnimationFrame(driveLoop);
 }
 
@@ -274,6 +306,18 @@ function capture(mode: "upper" | "full", keepPixels = false): AnyRec {
     ctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, out.width, out.height);
     const outRes: AnyRec = { ok: true, dataUrl: out.toDataURL("image/jpeg", 0.72) };
     if (keepPixels) outRes.im = ctx.getImageData(0, 0, out.width, out.height);
+    // Bbox konten dipetakan ke koordinat crop keluaran (diklem ke batas crop):
+    // normalisasi crossCheck region/side pakai fraksi tinggi/lebar KONTEN,
+    // bukan piksel model — konten boleh terpotong di mode "upper" (wajah).
+    const k = scaleUp;
+    const cx0 = Math.max(0, Math.min(out.width, (vx - sx) * k));
+    const cy0 = Math.max(0, Math.min(out.height, (vy - sy) * k));
+    outRes.content = {
+      x: cx0,
+      y: cy0,
+      w: Math.max(0, Math.min(out.width - cx0, vw * k)),
+      h: Math.max(0, Math.min(out.height - cy0, vh * k)),
+    };
     return outRes;
   } catch (e: any) {
     return { ok: false, error: "toDataURL: " + (e?.message || e) };
@@ -299,6 +343,17 @@ function diffImageData(a: ImageData, b: ImageData): AnyRec {
   const bbox = bboxFromDiff(diff, w, h);
   const centroid = centroidFromDiff(diff, w, h);
   return { changedPixels: changed, diffRatio: changed / Math.max(1, w * h), bbox, centroid };
+}
+
+/** Signature frame ringan (grayscale 48×27 dari canvas) — bahan deteksi
+ *  konvergensi settle (meanAbsDiff di motion-probe.ts). */
+function frameSignature(): Uint8Array {
+  const canvas = document.querySelector("#live2d-canvas") as HTMLCanvasElement | null;
+  if (!canvas) return new Uint8Array(0);
+  const x = scratchCtx(48, 27);
+  x.clearRect(0, 0, 48, 27);
+  x.drawImage(canvas, 0, 0, 48, 27);
+  return signatureFromImageData(x.getImageData(0, 0, 48, 27));
 }
 
 w().__motionHarness = {
@@ -334,12 +389,18 @@ w().__motionHarness = {
   },
   /** PROBE RUNTIME (backlog Fase 2): sweep satu parameter ke beberapa nilai,
    *  settle physics sebelum tiap capture, lalu metrik diff piksel vs frame
-   *  default. Asset TIDAK diperlukan — pose murni dari drive patch, jadi
-   *  probe jalan untuk model polos (evidensa role-mapping param unclassified).
+   *  basis (nilai pertama). Asset TIDAK diperlukan — pose murni dari drive
+   *  patch, jadi probe jalan untuk model polos (evidensa role-mapping param
+   *  unclassified).
    *
-   *  Return {ok, paramId, range, dead, frames:[{v, dataUrl, changedPixels,
-   *  diffRatio, bbox, centroid}]}. `dead` = sweep max tak mengubah piksel —
-   *  kandidat param mati (tidak perlu jadi kandidat role).
+   *  NOISE FLOOR: dua capture pose basis setelah settle terpisah → diff
+   *  keduanya = lantai noise (sway physics sisa). Sweep hanya dianggap hidup
+   *  bila melampaui k× lantai (classifyDeadWithFloor) — tanpa ini getar rambut
+   *  sisa membuat klasifikasi mati/hidup jadi tebak-tebakan.
+   *
+   *  Return {ok, paramId, range, dead, noiseFloor, frames:[{v, dataUrl,
+   *  content, changedPixels, diffRatio, bbox, centroid}]}. `dead` = sweep
+   *  terburuk tak melampaui noise — kandidat param mati.
    */
   probe(paramId: string, values?: number[]): AnyRec {
     if (!facade) return { ok: false, error: "model belum dimuat" };
@@ -351,38 +412,63 @@ w().__motionHarness = {
       .map(Number).filter(Number.isFinite)
       .map((v: number) => Math.max(r.min, Math.min(r.max, v)));
     if (vals.length < 2) return { ok: false, error: "butuh >= 2 nilai sweep" };
-    const frames: AnyRec[] = [];
-    for (const v of vals) {
-      const d = this.drive(paramId, v);
-      if (!d.ok) return d;
-      const s = this.settle();
+    try {
+      st.progress = { label: paramId, done: 0, total: vals.length };
+      status();
+      // Basis + noise floor: dua capture pose vals[0] setelah settle terpisah.
+      const d0 = this.drive(paramId, vals[0]);
+      if (!d0.ok) return d0;
+      let s = this.settle();
       if (!s.ok) return s;
-      const c = capture("full", true);
-      if (!c.ok) return c;
-      frames.push({ v, dataUrl: c.dataUrl, im: c.im });
-    }
-    // Metrik diff vs basis (frame pertama = default). `im` TIDAK dikirim keluar
-    // (CDP serialize array piksel = boros) — hanya angka + bbox.
-    const base = frames[0];
-    const out = frames.map((f: AnyRec, i: number) => {
-      if (i === 0) {
-        return { v: f.v, dataUrl: f.dataUrl, changedPixels: 0, diffRatio: 0, bbox: null, centroid: null };
+      const base1 = capture("full", true);
+      if (!base1.ok) return base1;
+      s = this.settle();
+      if (!s.ok) return s;
+      const base2 = capture("full", true);
+      if (!base2.ok) return base2;
+      const noise = diffImageData(base1.im, base2.im);
+      const frames: AnyRec[] = [
+        { v: vals[0], dataUrl: base2.dataUrl, im: base2.im, content: base2.content },
+      ];
+      for (let i = 1; i < vals.length; i++) {
+        st.progress = { label: paramId, done: i, total: vals.length };
+        status();
+        const d = this.drive(paramId, vals[i]);
+        if (!d.ok) return d;
+        const s2 = this.settle();
+        if (!s2.ok) return s2;
+        const c = capture("full", true);
+        if (!c.ok) return c;
+        frames.push({ v: vals[i], dataUrl: c.dataUrl, im: c.im, content: c.content });
       }
-      const m = diffImageData(base.im, f.im);
-      return { v: f.v, dataUrl: f.dataUrl, ...m };
-    });
-    const worst = out.slice(1).reduce(
-      (acc: AnyRec, cur: AnyRec) => ((cur.changedPixels > acc.changedPixels) ? cur : acc),
-      out[1]!
-    );
-    const dead = classifyDead(worst?.changedPixels ?? 0);
-    return {
-      ok: true,
-      paramId,
-      range: r,
-      dead,
-      frames: out.map((f: AnyRec) => { const { im: _im, ...rest } = f; return rest; }),
-    };
+      // Metrik diff vs basis. `im` TIDAK dikirim keluar (CDP serialize array
+      // piksel = boros) — hanya angka + bbox + content.
+      const base = frames[0];
+      const out = frames.map((f: AnyRec, i: number) => {
+        if (i === 0) {
+          return { v: f.v, dataUrl: f.dataUrl, content: f.content, changedPixels: 0, diffRatio: 0, bbox: null, centroid: null };
+        }
+        const m = diffImageData(base.im, f.im);
+        return { v: f.v, dataUrl: f.dataUrl, content: f.content, ...m };
+      });
+      const worst = out.slice(1).reduce(
+        (acc: AnyRec, cur: AnyRec) => ((cur.changedPixels > acc.changedPixels) ? cur : acc),
+        out[1]!
+      );
+      const dead = classifyDeadWithFloor(worst?.changedPixels ?? 0, noise.changedPixels);
+      drivePatch = {}; // sweep selesai — load/probe berikutnya mulai bersih
+      return {
+        ok: true,
+        paramId,
+        range: r,
+        dead,
+        noiseFloor: { changedPixels: noise.changedPixels, diffRatio: noise.diffRatio },
+        frames: out.map((f: AnyRec) => { const { im: _im, ...rest } = f; return rest; }),
+      };
+    } finally {
+      st.progress = null;
+      status();
+    }
   },
   /** Set nilai param via drive patch (di-re-queue tiap frame). Clamp ke range
    *  Core. Tanpa asset — dipakai probe. */
@@ -402,23 +488,60 @@ w().__motionHarness = {
     }
     return { ok: true, v, min: r.min, max: r.max, def: r.def };
   },
-  /** Render N frame satu per satu (physics/pose settle). Tanpa seek — dipakai
-   *  probe setelah drive patch agar sway physics steady-state sebelum capture. */
-  settle(n?: number): AnyRec {
-    const count = Math.max(1, Math.min(120, Number(n) || 24));
+  /** Render hingga pose+physics TENANG (konvergen), atau sampai cap frame.
+   *  Konvergensi: rerata selisih signature grayscale antar frame (48×27,
+   *  meanAbsDiff di motion-probe.ts) di bawah ambang 2× berturut-turut —
+   *  angka adaptif per rig, bukan hitungan frame ajaib (rig physics lambat
+   *  butuh lebih banyak frame; rig tanpa physics konvergen seketika).
+   *
+   *  Drive patch di-re-enqueue TIAP frame via `reapplyDrive()` — antrean
+   *  tulis resmi sekali konsumsi per frame; tanpa re-apply, hanya frame
+   *  pertama yang membawa nilai sweep dan capture akhir membaca pose default
+   *  (bug lama: semua param salah dianggap mati).
+   *  Tanpa seek — dipakai probe setelah drive patch. */
+  settle(maxFrames?: number): AnyRec {
+    const cap = Math.max(2, Math.min(150, Math.floor(Number(maxFrames) || 90)));
     const v = w().__live2dView?.view;
     if (!v?.renderer || !v?.pixiApp) {
       return { ok: false, error: "renderer/pixiApp tidak tersedia" };
     }
+    let prev: Uint8Array | null = null;
+    let calm = 0;
+    let i = 0;
     try {
-      for (let i = 0; i < count; i++) {
+      for (; i < cap; i++) {
+        reapplyDrive();
         v.pixiApp.render();
         v.renderer.draw();
+        const sig = frameSignature();
+        if (prev) {
+          if (meanAbsDiff(sig, prev) < 0.6) {
+            calm++;
+            if (calm >= 2) { i++; break; }
+          } else {
+            calm = 0;
+          }
+        }
+        prev = sig;
       }
     } catch (e: any) {
       return { ok: false, error: "settle: " + (e?.message || e) };
     }
-    return { ok: true, frames: count };
+    return { ok: true, frames: i, converged: calm >= 2 };
+  },
+  /** Filmstrip BATCH untuk critic visual: SEMUA frame (grup U lalu F)
+   *  dirender + dicapture dalam SATU evaluate — satu round-trip CDP untuk
+   *  seluruh filmstrip (dulu 11 evaluate, satu per frame). Per item:
+   *  {g:"U"|"F", t, dataUrl} atau {g, t, error}. */
+  filmstrip(detail: number[], full: number[]): AnyRec {
+    const frames: AnyRec[] = [];
+    const snap = (t: number, mode: "upper" | "full") => {
+      const s = this.snap(t, mode);
+      return s.ok ? { g: mode === "upper" ? "U" : "F", t, dataUrl: s.dataUrl } : { g: mode === "upper" ? "U" : "F", t, error: s.error || "snap gagal" };
+    };
+    for (const t of Array.isArray(detail) ? detail : []) frames.push(snap(Number(t), "upper"));
+    for (const t of Array.isArray(full) ? full : []) frames.push(snap(Number(t), "full"));
+    return { ok: frames.length > 0 && frames.every((f: AnyRec) => typeof f.dataUrl === "string"), frames };
   },
   state(): HarnessState {
     return { ...st };

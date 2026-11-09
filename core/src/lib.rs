@@ -507,7 +507,9 @@ async fn post_assistant_ask(State(paths): State<AppPaths>, body: axum::body::Byt
     let cfg = paths.data_dir.join("config.json");
     let r = agent::assistant::ask(&cfg, &paths.root, &paths.data_dir, text, session).await;
     if r.ok {
-        json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused, "sessionId": agent::assistant::bound_session().await }))
+        // speak = versi tersanitasi untuk diucapkan companion (alur respons
+        // #3–#4); kosong bila tidak perlu diucapkan (mis. tugas greeting).
+        json_status(StatusCode::OK, json!({ "reply": r.reply, "speak": r.speak, "paused": r.paused, "sessionId": agent::assistant::bound_session().await }))
     } else {
         json_status(StatusCode::BAD_GATEWAY, json!({ "error": r.error.unwrap_or_default() }))
     }
@@ -539,6 +541,11 @@ async fn post_assistant_ask_stream(State(paths): State<AppPaths>, body: axum::bo
         // parser panel membuang frame tanpa type, jadi dulu seluruh streaming
         // mati diam-diam dan panel hidup dari hydrate history saja.
         if r.ok {
+            if !r.speak.is_empty() {
+                // Narasi laporan akhir oleh companion (alur respons #3) —
+                // versi tersanitasi; jawaban penuh tetap lewat delta/reply.
+                let _ = tx.send(json!({ "type": "speak", "text": r.speak }).to_string());
+            }
             if !r.reply.is_empty() {
                 let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
@@ -586,6 +593,9 @@ async fn post_assistant_approve_stream(State(paths): State<AppPaths>, body: axum
         let r = agent::assistant::approve(&cfg, &root, &data_dir, &id, approve_it, always).await;
         // Kontrak sama dengan ask-stream: frame ber-type (lihat stream.ts).
         if r.ok {
+            if !r.speak.is_empty() {
+                let _ = tx.send(json!({ "type": "speak", "text": r.speak }).to_string());
+            }
             if !r.reply.is_empty() {
                 let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
@@ -603,12 +613,15 @@ async fn get_assistant_history() -> Json<serde_json::Value> {
     Json(agent::assistant::history().await)
 }
 
-/// POST /api/assistant/quip {persona?, event?} — komentar berkarakter singkat.
+/// POST /api/assistant/quip {persona?, event? | ackType?, input?} — mode
+/// reaksi (label langkah) atau mode ack (konfirmasi pembuka per jenis tugas).
 async fn post_assistant_quip(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let persona = v.get("persona").and_then(|x| x.as_str()).unwrap_or("");
     let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("");
-    let out = agent::assistant::quip(&paths.data_dir.join("config.json"), persona, event).await;
+    let ack_type = v.get("ackType").and_then(|x| x.as_str()).unwrap_or("");
+    let input = v.get("input").and_then(|x| x.as_str()).unwrap_or("");
+    let out = agent::assistant::quip(&paths.data_dir.join("config.json"), persona, event, ack_type, input).await;
     json_status(StatusCode::OK, out)
 }
 

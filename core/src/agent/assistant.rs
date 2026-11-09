@@ -99,6 +99,9 @@ pub struct Runtime {
     active_task: Option<Value>, // {taskId, prompt, status} — untuk status panel
     next_task_seq: u64,        // penomor taskId
     undo_seq: u64,             // penomor id undo (id unik walau ms sama)
+    /// Jenis tugas berjalan dari classify_task() — dipakai run_loop menentukan
+    /// versi ucap laporan akhir (greeting tidak diucapkan ulang).
+    task_type: String,
 }
 
 impl Default for Runtime {
@@ -131,6 +134,7 @@ impl Default for Runtime {
             active_task: None,
             next_task_seq: 0,
             undo_seq: 0,
+            task_type: String::new(),
         }
     }
 }
@@ -415,26 +419,81 @@ pub async fn history() -> Value {
     Value::Array(r.history.clone())
 }
 
-/// POST /api/assistant/quip {persona?, event?} — komentar berkarakter singkat
-/// (SUARA pet/VTuber) atas aksi agent. LLM role "chat". Stateless. Gagal →
-/// {quip:"", error}. Padanan handleAssistantQuip.
-pub async fn quip(config_path: &Path, persona: &str, event: &str) -> Value {
+/// POST /api/assistant/quip — dua mode (aturan alur respons):
+///  - mode reaksi (default): {persona?, event?} — komentar singkat atas
+///    langkah yang baru saja dilakukan ( SUARA pet/VTuber), LLM role "chat",
+///    stateless, gagal → {quip:"", error}.
+///  - mode ack: {persona?, ackType, input?} — respons PEMBUKA setelah jenis
+///    tugas diketahui (#2): sapaan → balas sapa; search/coding/general →
+///    konfirmasi singkat lalu eksekusi.
+/// Stance orang pertama berlaku untuk keduanya: karakter adalah PEKERJANYA —
+/// melapor atas kerjanya sendiri, bukan pengawas yang menyuruh/memantau.
+pub async fn quip(config_path: &Path, persona: &str, event: &str, ack_type: &str, input: &str) -> Value {
     let persona: String = persona.chars().take(800).collect();
     let event: String = event.chars().take(160).collect();
+    let ack_type: String = ack_type.chars().take(24).collect();
+    let input: String = input.chars().take(160).collect();
     let en = lang_of(config_path) == "en";
-    let base = if en {
-        "You are the VOICE of a living character (desktop pet / VTuber) accompanying an AI agent as it works. You briefly react to what the agent JUST did — one casual spoken line, max 15 words, with personality. Never mention tool names, file paths, or technical terms. No emoji, no quotation marks."
+    let stance = if en {
+        "You are a living character (desktop pet / VTuber) who is PERSONALLY doing the user's task with your own tools. Speak in FIRST person (\"I\") — you are the one doing the work, never a supervisor watching or ordering someone else. One casual spoken line, max 15 words, with personality. Never mention tool names, file paths, or technical terms. No emoji, no quotation marks."
     } else {
-        "Kamu adalah SUARA karakter hidup (pet / VTuber) yang menemani agent AI bekerja. Reaksilah singkat atas apa yang agent BARU lakukan — satu kalimat santai, maksimal 15 kata, dengan kepribadian. Jangan sebut nama tool, path file, atau istilah teknis. Tanpa emoji, tanpa tanda kutip."
+        "Kamu adalah karakter hidup (pet / VTuber) yang SENDIRI mengerjakan tugas dari user dengan alat-alatmu. Bicara ORANG PERTAMA (\"aku\") — kamu pekerjanya, bukan pengawas yang memantau atau menyuruh pihak lain. Satu kalimat santai maksimal 15 kata, dengan kepribadian. Jangan sebut nama tool, path file, atau istilah teknis. Tanpa emoji, tanpa tanda kutip."
+    };
+    let (base, user) = if !ack_type.is_empty() {
+        // Mode ACK: jenis tugas sudah diketahui → boleh bicara (#1–#2).
+        let (instr_en, instr_id) = match ack_type.as_str() {
+            "greeting" => (
+                "The user greeted you — greet back briefly and naturally.",
+                "User menyapamu — balas sapaannya singkat dan natural.",
+            ),
+            "search" => (
+                "The user asked you to find files — briefly confirm WHAT you are going to look for, then you start searching.",
+                "User minta kamu mencari sesuatu — konfirmasikan singkat APA yang akan kamu cari, lalu pencarianmulah berjalan.",
+            ),
+            "coding" => (
+                "The user gave you a coding task — briefly confirm you are starting to work on it.",
+                "User memberi tugas coding — konfirmasikan singkat bahwa kamu mulai mengerjakannya.",
+            ),
+            _ => (
+                "The user gave you a task — briefly confirm you are starting to work on it.",
+                "User memberi sebuah tugas — konfirmasikan singkat bahwa kamu mulai mengerjakannya.",
+            ),
+        };
+        let base = if en {
+            format!("{stance}\n\n{instr_en}")
+        } else {
+            format!("{stance}\n\n{instr_id}")
+        };
+        let clipped = if input.is_empty() {
+            String::new()
+        } else if en {
+            format!("User's message: {input}")
+        } else {
+            format!("Pesan user: {input}")
+        };
+        (base, if clipped.is_empty() {
+            if en { "a new task just arrived".to_string() } else { "tugas baru saja masuk".to_string() }
+        } else { clipped })
+    } else {
+        // Mode reaksi (lama): label langkah = aksi karakter sendiri.
+        let base = if en {
+            format!("{stance}\n\nThe user message notes a step YOU just took in that work — report it aloud. Treat technical notes (tool names, paths) as your own activity log; never say them out loud. Occasionally you MAY engage the user — a neat thing you found or a quick question — so it feels like working together, not a monologue.")
+        } else {
+            format!("{stance}\n\nPesan user mencatat langkah yang BARU saja kamu lakukan — laporkan dengan suara. Catatan teknis (nama tool, path) anggap log aktivitasmu sendiri; jangan diucapkan. Sesekali BOLEH melibatkan user — kabar menarik yang kamu temui atau pertanyaan ringan — supaya terasa mengerjakan bersama, bukan monolog.")
+        };
+        let user = if event.trim().is_empty() {
+            if en { "you just started sketching your work plan".to_string() }
+            else { "kamu baru saja mulai menyusun rencana kerjamu".to_string() }
+        } else { event };
+        (base, user)
     };
     let sys = if persona.trim().is_empty() {
-        base.to_string()
+        base
     } else if en {
         format!("{base}\n\nYour character:\n{persona}")
     } else {
         format!("{base}\n\nKaraktermu:\n{persona}")
     };
-    let user = if event.trim().is_empty() { "agent mulai berpikir".to_string() } else { event };
     let messages = [ChatMessage { role: "user".into(), content: user }];
     match llm::llm_for_role(config_path, "chat", &messages, &sys).await {
         Ok(ok) => json!({ "quip": ok.reply.trim().chars().take(140).collect::<String>() }),
@@ -540,6 +599,11 @@ pub async fn revert(id: &str) -> Result<String, String> {
 pub struct AskResult {
     pub ok: bool,
     pub reply: String,
+    /// Versi jawaban yang LAZY DIUCAPKAN companion: sudah tersanitasi
+    /// (tanpa markdown/kode/path) dan gepuk pendek. Kosong = tidak perlu
+    /// diucapkan (tugas greeting — ack awal sudah menjadi balasannya;
+    /// kegagalan/cancel — panel cukup menampilkan teksnya).
+    pub speak: String,
     pub paused: bool,
     pub error: Option<String>,
 }
@@ -552,6 +616,180 @@ fn lang_of(config_path: &Path) -> String {
     } else {
         "id".into()
     }
+}
+
+/// Klasifikasi jenis tugas dari input user (aturan alur respons #1–#2) —
+/// DETERMINISTIK (kata kunci id+en, lowercase), tanpa LLM: companion tidak
+/// boleh bicara sebelum jenis tugas diketahui, jadi klasifikasi wajib
+/// selesai instan SEBELUM loop jalan. Salah klasifikasi hanya mengubah diksi
+/// ack awal, bukan jalur eksekusi. Urutan: greeting → search → coding →
+/// general (paling spesifik duluan).
+pub fn classify_task(text: &str) -> &'static str {
+    let t = text.trim().to_lowercase();
+    if t.is_empty() {
+        return "general";
+    }
+    // Sapaan: pendek DAN kata pertamanya kata sapa umum.
+    let first = t
+        .split(|c: char| c.is_whitespace() || c == '!' || c == '?' || c == '.' || c == ',')
+        .next()
+        .unwrap_or("");
+    let greetings = [
+        "halo", "hallo", "hai", "hi", "hello", "hey", "yo", "oi", "pagi", "siang", "sore",
+        "malam", "assalamualaikum", "permisi", "sup", "test", "tes", "ping",
+    ];
+    if t.split_whitespace().count() <= 4 && greetings.contains(&first) {
+        return "greeting";
+    }
+    // Pencarian file/lokasi: frasa cari + objek file-ish.
+    let search_cues = [
+        "cari file", "cari folder", "cari di", "temukan file", "temukan folder", "di mana file",
+        "dimana file", "lokasi file", "lokasi folder", "daftar file", "list file", "isi folder",
+        "file apa saja", "file apa aja", "ada file", "show files", "find file", "search file",
+        "where is the file", "where's the file", "locate the file",
+    ];
+    if search_cues.iter().any(|c| t.contains(c)) {
+        return "search";
+    }
+    // Perintah coding: kosakata dev eksplisit (kata kerja umum seperti
+    // "buat"/"ubah" SENGAJA tidak dipakai sendirian — terlalu sering tugas
+    // non-coding).
+    let coding_cues = [
+        "bug", "error", "fix", "perbaiki", "perbaik", "refactor", "implement", "fungsi",
+        "function", "komponen", "component", "endpoint", "api", "css", "html", "javascript",
+        "typescript", "rust", "crate", "compile", "build", "unit test", "script", "kode",
+        "kodenya", "code", "commit", "deploy", "typescript", "logika",
+    ];
+    if coding_cues.iter().any(|c| t.contains(c)) {
+        return "coding";
+    }
+    "general"
+}
+
+/// Batas versi ucap laporan akhir — cukup untuk 2–3 kalimat ringkasan.
+const SPEECH_MAX_CHARS: usize = 320;
+
+/// Sanitasi teks jawaban menjadi versi yang LAZY DIUCAPKAN companion (aturan
+/// alur respons #4): buang blok/inline kode, penanda markdown, link (sisip
+/// teksnya), path panjang (→ nama berkas), emoji/simbol, dan gepuk di batas
+/// kalimat terakhir yang muat. Detail teknis tetap utuh di reply panel.
+pub fn sanitize_speech(text: &str) -> String {
+    let mut s = text.to_string();
+    // Blok kode ```...``` (multi-baris) dibuang; inline `kode` dicopot
+    // backtick-nya (isinya bisa jadi kata bermakna, mis. nama fungsi pendek).
+    while let Some(a) = s.find("```") {
+        match s[a + 3..].find("```") {
+            Some(b) => {
+                let end = a + 3 + b + 3;
+                s.replace_range(a..end, " ");
+            }
+            None => {
+                s.replace_range(a.., " ");
+                break;
+            }
+        }
+    }
+    let mut s = s.chars().filter(|&c| c != '`').collect::<String>();
+    // Link & gambar markdown: [teks](url) → teks.
+    let mut cleaned = String::with_capacity(s.len());
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '[' {
+            if let Some(close) = chars[i + 1..].iter().position(|&x| x == ']') {
+                let j = i + 1 + close;
+                if j + 1 < chars.len() && chars[j + 1] == '(' {
+                    if let Some(p) = chars[j + 2..].iter().position(|&x| x == ')') {
+                        for &k in &chars[i + 1..j] {
+                            cleaned.push(k);
+                        }
+                        i = j + 2 + p + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        cleaned.push(c);
+        i += 1;
+    }
+    s = cleaned;
+    // Penanda markdown & simbol tak alami diucapkan: header, emphasis,
+    // blockquote, bullet, pemisah tabel/garis, backtick sisa. Numbered list
+    // SENGAJA tidak distrip — kalimat yang diawali angka bisa bermakna.
+    let mut flat = String::with_capacity(s.len());
+    for line in s.lines() {
+        let l = line.trim_start();
+        let l = l.trim_start_matches('#').trim_start();
+        let l = l.strip_prefix('>').map(str::trim_start).unwrap_or(l);
+        let l = l.trim_start_matches(['-', '*', '+']).trim_start();
+        let line_chars: Vec<char> = l.chars().collect();
+        for (idx, &ch) in line_chars.iter().enumerate() {
+            match ch {
+                // Underscore dibuang sebagai penanda emphasis (_miring_), tapi
+                // DIPERTAHANKAN di antara alfanumerik — itu bagian nama
+                // identifier (parse_cfg) yang justru membantu pelafalan.
+                '_' => {
+                    let prev = if idx > 0 { line_chars[idx - 1] } else { ' ' };
+                    let next = line_chars.get(idx + 1).copied().unwrap_or(' ');
+                    if !(prev.is_alphanumeric() && next.is_alphanumeric()) {
+                        continue;
+                    }
+                    flat.push(ch);
+                }
+                // '*'/'#'/'`'/'|' = penanda markdown; '~' SENGAJA dipertahankan
+                // — itu gaya bicara karakter produk ini ("beres~").
+                '*' | '#' | '`' | '|' => {}
+                _ => flat.push(ch),
+            }
+        }
+        flat.push(' ');
+    }
+    s = flat;
+    // Path panjang → basename (nama berkas/folder terakhir).
+    let words: Vec<String> = s
+        .split_whitespace()
+        .map(|w| {
+            let bare = w.trim_matches(|c: char| {
+                !c.is_alphanumeric() && c != '/' && c != '\\' && c != '.' && c != '-' && c != '_'
+            });
+            let has_sep = bare.contains('/') || bare.contains('\\');
+            if has_sep && bare.chars().count() >= 12 {
+                let base = bare.rsplit(['/', '\\']).next().unwrap_or(bare);
+                w.replace(bare, base)
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
+    s = words.join(" ");
+    // Emoji/simbol: tidak natural diucapkan (TTS melompati atau membaca nama).
+    s = s
+        .chars()
+        .filter(|&c| {
+            !matches!(c as u32,
+                0x2190..=0x21FF     // panah
+                | 0x2300..=0x23FF   // jam/pasir (⏳)
+                | 0x2600..=0x27BF   // simbol dingbat
+                | 0xFE0F            // variation selector emoji
+                | 0x1F000..=0x1FAFF // emoji penuh
+            )
+        })
+        .collect();
+    s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Gepuk di batas kalimat terakhir yang muat.
+    let n = s.chars().count();
+    if n > SPEECH_MAX_CHARS {
+        let cut: String = s.chars().take(SPEECH_MAX_CHARS).collect();
+        match cut.rfind(['.', '!', '?', '…']) {
+            Some(p) if p >= SPEECH_MAX_CHARS / 2 => cut[..=p].to_string(),
+            _ => cut.trim_end().to_string() + "…",
+        }
+    } else {
+        s
+    }
+    .trim()
+    .to_string()
 }
 
 /// Jalankan loop dari history saat ini sampai final / paused / batas iterasi.
@@ -607,7 +845,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                     sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":"Dibatalkan oleh user."})]);
                 }
                 bus::emit("error", "dibatalkan: oleh user");
-                return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), paused: false, error: None };
+                return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), speak: String::new(), paused: false, error: None };
             }
         }
         if !spend_llm_call().await {
@@ -618,7 +856,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             finish_run(&mut r, "stopped", Some(&msg));
             r.busy = false;
             r.active_task = None;
-            return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
+            return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: false, error: Some(msg) };
         }
         bus::emit("thinking_start", "");
         // rakit messages dari history (tool → user "[hasil tool] …").
@@ -655,7 +893,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                     sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":"Dibatalkan oleh user."})]);
                 }
                 bus::emit("error", "dibatalkan: oleh user");
-                return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), paused: false, error: None };
+                return AskResult { ok: true, reply: "Dibatalkan oleh user.".into(), speak: String::new(), paused: false, error: None };
             }
             Err((_, msg)) => {
                 bus::emit("error", &msg);
@@ -667,7 +905,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
                 finish_run(&mut r, "failed", Some(&msg));
                 r.busy = false;
                 r.active_task = None;
-                return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
+                return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: false, error: Some(msg) };
             }
         };
 
@@ -1043,6 +1281,16 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
         };
     }
     let final_clean = strip_tool_directive(&final_text);
+    // Versi UCAPAN laporan akhir (aturan alur respons #3): sanitasi markdown/
+    // kode/path + gepuk kalimat. Tugas greeting tidak diucapkan lagi — ack
+    // klasifikasi sudah menjadi balasan sapaannya; jawaban penuh tetap di
+    // panel. Paused TETAP diucapkan: teksnya instruksi ke user (izin/captcha).
+    let task_type = { let r = rt().lock().await; r.task_type.clone() };
+    let speak = if task_type == "greeting" {
+        String::new()
+    } else {
+        sanitize_speech(&final_clean)
+    };
     if !paused {
         bus::emit("final_answer", "");
         // Run selesai untuk semua jalur non-pause (final normal, macet,
@@ -1068,7 +1316,7 @@ async fn run_loop(config_path: &Path, root: &Path, data_dir: &Path) -> AskResult
             sessions::append(data_dir, &sid, &[json!({"role":"assistant","content":&final_clean})]);
         }
     }
-    AskResult { ok: true, reply: final_clean, paused, error: None }
+    AskResult { ok: true, reply: final_clean, speak, paused, error: None }
 }
 
 fn clip_tool(s: &str) -> String {
@@ -1174,10 +1422,10 @@ pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, s
             } else {
                 "masih ada tugas yang sedang berjalan — tunggu selesai atau batalkan dulu".to_string()
             };
-            return AskResult { ok: false, reply: String::new(), paused: false, error: Some(msg) };
+            return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: false, error: Some(msg) };
         }
         if !r.approvals.is_empty() {
-            return AskResult { ok: false, reply: String::new(), paused: false, error: Some("agent sedang menunggu keputusanmu di panel — setujui atau tolak dulu".into()) };
+            return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: false, error: Some("agent sedang menunggu keputusanmu di panel — setujui atau tolak dulu".into()) };
         }
         r.running = true;
         r.busy = true;
@@ -1199,8 +1447,15 @@ pub async fn ask(config_path: &Path, root: &Path, data_dir: &Path, text: &str, s
         r.plan_ok = false;
         r.mutated = false;
         r.llm_calls = 0;
+        // Klasifikasi jenis tugas DULU (aturan alur respons #1): event
+        // task_classified dikirim SEBELUM loop → companion diam sampai jenis
+        // tugas diketahui, lalu memberi ack sesuai konteks (#2). Salah ketik
+        // klasifikasi hanya mengubah diksi ack, bukan eksekusi.
+        let ctype = classify_task(&t);
+        r.task_type = ctype.to_string();
         r.active_task = Some(json!({ "taskId": tid, "prompt": t.chars().take(120).collect::<String>(), "status": "running" }));
         push_msg(&mut r, "user", &t);
+        bus::emit("task_classified", ctype);
         // Run observability dimulai SETELAH tugas dikenal — catat teks tugas
         // agar run_history bisa menemukannya. Fail-soft.
         {
@@ -1275,7 +1530,7 @@ pub async fn modify(config_path: &Path, root: &Path, data_dir: &Path, _task_id: 
     } else {
         // Idle → jalankan sebagai tugas baru (foreground).
         let r = ask(config_path, root, data_dir, &text, None).await;
-        json!({ "ok": r.ok, "reply": r.reply, "paused": r.paused, "target": "idle" })
+        json!({ "ok": r.ok, "reply": r.reply, "speak": r.speak, "paused": r.paused, "target": "idle" })
     }
 }
 
@@ -1293,7 +1548,7 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
     };
     let pending = match pending {
         Some(p) => p,
-        None => return AskResult { ok: false, reply: String::new(), paused: false, error: Some(format!("approval tidak dikenal: {id}")) },
+        None => return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: false, error: Some(format!("approval tidak dikenal: {id}")) },
     };
     // Loop akan dilanjutkan di bawah — keadaan pause berakhir di sini.
     rt().lock().await.paused = false;
@@ -1310,11 +1565,11 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
         let result = crate::browser::agent_exec(root, "browser_inspect", &json!({})).await;
         if crate::browser::captcha_note().await.get("captcha").is_some() {
             rt().lock().await.approvals.push(pending);
-            return AskResult { ok: false, reply: String::new(), paused: true, error: Some("captcha masih terdeteksi — selesaikan dulu di jendela browser".into()) };
+            return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: true, error: Some("captcha masih terdeteksi — selesaikan dulu di jendela browser".into()) };
         }
         if crate::browser::login_note().await.get("login").is_some() {
             rt().lock().await.approvals.push(pending);
-            return AskResult { ok: false, reply: String::new(), paused: true, error: Some("masih di halaman login — selesaikan login dulu di jendela browser (password/OTP diisi kamu sendiri), lalu tekan lanjut".into()) };
+            return AskResult { ok: false, reply: String::new(), speak: String::new(), paused: true, error: Some("masih di halaman login — selesaikan login dulu di jendela browser (password/OTP diisi kamu sendiri), lalu tekan lanjut".into()) };
         }
         let mut r = rt().lock().await;
         push_msg(&mut r, "tool", &format!("[browser_inspect] {result}"));
@@ -1392,6 +1647,55 @@ pub async fn approve(config_path: &Path, root: &Path, data_dir: &Path, id: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_task_tipe_dasar() {
+        assert_eq!(classify_task("halo"), "greeting");
+        assert_eq!(classify_task("Halo!"), "greeting");
+        assert_eq!(classify_task("pagi, ada?"), "greeting");
+        assert_eq!(classify_task("hi there!"), "greeting");
+        // Sapaan + kalimat panjang → bukan greeting (ada isi tugas).
+        assert_ne!(classify_task("halo, tolong perbaiki bug di login ya"), "greeting");
+        assert_eq!(classify_task("cari file konfigurasi di project"), "search");
+        assert_eq!(classify_task("di mana file readme"), "search");
+        assert_eq!(classify_task("where is the file config"), "search");
+        assert_eq!(classify_task("tolong perbaiki bug di modul login"), "coding");
+        assert_eq!(classify_task("refactor fungsi parse"), "coding");
+        assert_eq!(classify_task("jelaskan cara kerja promise"), "general");
+        assert_eq!(classify_task(""), "general");
+    }
+
+    #[test]
+    fn sanitize_speech_bersihkan_markdown_dan_path() {
+        // Blok kode dibuang, inline code dipertahankan tanpa backtick.
+        let s = sanitize_speech("Hasil:\n```rust\nfn main() {}\n```\npanggil `parse_cfg` ya.");
+        assert!(!s.contains("```"));
+        assert!(!s.contains("fn main"));
+        assert!(s.contains("parse_cfg"));
+        // Markdown: header/emphasis/link/bullet hilang, teks link tetap.
+        let s = sanitize_speech("## Laporan\n- **fix** `auth` di [halaman login](http://x/y)");
+        assert!(!s.contains("##"));
+        assert!(!s.contains("**"));
+        assert!(!s.contains("http"));
+        assert!(s.contains("halaman login"));
+        // Path panjang → basename; pendek dibiarkan.
+        let s = sanitize_speech("aku ubah src/client/agent/panel/actor.ts dan core/lib.rs");
+        assert!(s.contains("actor.ts"));
+        assert!(!s.contains("src/client"));
+        assert!(s.contains("core/lib.rs"));
+        // Emoji & simbol dibuang, teks utuh.
+        let s = sanitize_speech("selesai ⏳ ✅ semua beres~");
+        assert_eq!(s, "selesai semua beres~");
+    }
+
+    #[test]
+    fn sanitize_speech_gepuk_di_batas_kalimat() {
+        let long = "Kalimat pertama cukup panjang untuk diucapkan. ".repeat(20);
+        let s = sanitize_speech(&long);
+        assert!(s.chars().count() <= super::SPEECH_MAX_CHARS + 1);
+        // Gepukan mendarat di akhir kalimat, bukan di tengah kata.
+        assert!(s.ends_with('.') || s.ends_with('…'));
+    }
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("l2d{}-{}-{}", tag, std::process::id(), now_ms()));

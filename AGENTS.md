@@ -50,17 +50,19 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 643 unit (bun, 41 file) + 338 guard (6 suite)
+bun run test           # SEMUA TS: 647 unit (bun, 41 file, scope test/) + 338 guard (6 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)
-cargo test --workspace # backend Rust (282 test: 274 core + 8 engine), bagian gate
+cargo test --workspace # backend Rust (283 test: 275 core + 8 engine), bagian gate
 ```
 
 **Selesai** = build bersih + `tsc` bersih + `bun run test` hijau + `cargo test
 --workspace` hijau. Tidak ada test yang memanggil jaringan (endpoint LLM di-stub
 ke provider `mock`) dan tidak ada test yang menulis `data/config.json`;
-pertahankan begitu.
+pertahankan begitu. `bun test` di-scope ke `test/` (bukan root) supaya file
+`.test.js` milik ekstensi browser di `data/browser/profile/` tidak ikut
+ter-scan — jangan kembalikan ke `bun test` polos.
 
 ## Rilis produksi (build yang diedarkan)
 

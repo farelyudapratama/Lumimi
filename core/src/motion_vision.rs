@@ -3,7 +3,14 @@
 //! Orkestrasi verifikasi visual motion: buka halaman harness render
 //! (`static/harness-motion.html`) di browser terkelola → muat model + Motion
 //! Asset → seek ke N waktu → screenshot per frame → kirim filmstrip ke LLM
-//! role `motion-vision` → verdict JSON terstruktur.
+//! role `motion-vision` → verdict JSON terstruktur. Filmstrip dirender BATCH
+//! dalam satu `Runtime.evaluate` (satu round-trip CDP), bukan satu evaluate
+//! per frame.
+//!
+//! Kunci operasi harness (`harness_lock`): verify dan probe berbagi halaman
+//! CDP yang sama — tumpang tindih akan saling menimpa state load/pose dan
+//! menghasilkan data sampah senyap. Kunci dipegang hanya selama fase browser
+//! (open+load+filmstrip), dilepas sebelum panggilan LLM.
 //!
 //! Privasi: yang dikirim = render canvas model Live2D (aset milik user),
 //! BUKAN frame webcam — aturan "webcam tak pernah di-upload" tidak tersentuh.
@@ -12,6 +19,7 @@
 //! cara mengaktifkan (degrade anggun; jalur numerik tetap jalan).
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -22,6 +30,14 @@ use crate::{browser, jsonx};
 const DETAIL_FRAMES: usize = 8; // tubuh atas (wajah/kepala) — detail halus
 const FULL_FRAMES: usize = 3; // seluruh model (termasuk kaki) — menyeluruh
 // Kualitas JPEG frame ditentukan sisi harness TS (toDataURL "image/jpeg", 0.72).
+
+static HARNESS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// Kunci global operasi harness (verify + probe). Tokio mutex (async hold
+/// lintas await), dilepas otomatis saat guard drop.
+pub async fn harness_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    HARNESS_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
 
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
@@ -202,32 +218,37 @@ pub async fn verify(
     let detail_times = frame_times_from_asset(duration, motion, DETAIL_FRAMES);
     let full_times = frame_times(duration, FULL_FRAMES);
 
-    // 1) Harness di origin loopback milik server sendiri (aman → allow_private).
+    // 1–3) SATU kunci operasi harness selama seluruh fase browser: open →
+    //      wait_ready → load → filmstrip batch (satu evaluate untuk SEMUA
+    //      frame U+F — dulu satu evaluate per frame). Kunci dilepas sebelum
+    //      panggilan LLM (tidak menyentuh browser).
     let harness_url = format!("http://127.0.0.1:{}/harness-motion.html", crate::server_port());
-    browser::open(root, &harness_url, true).await?;
-    wait_ready(60).await?;
+    let frames = {
+        let _guard = harness_lock().await;
+        browser::open(root, &harness_url, true).await?;
+        wait_ready(60).await?;
 
-    // 2) Muat model + asset (roleMap dikirim; migrasi role terjadi di harness).
-    let payload = json!({ "model": rel, "asset": motion, "roleMap": role_map });
-    let loaded = browser::evaluate(&format!("window.__motionHarness.load({})", payload)).await?;
-    if let Some(e) = loaded.get("value").and_then(|v| v.get("error")) {
-        if !e.as_str().unwrap_or("").is_empty() {
-            return Err(format!("harness load gagal: {}", e.as_str().unwrap_or("")));
+        let payload = json!({ "model": rel, "asset": motion, "roleMap": role_map });
+        let loaded = browser::evaluate(&format!("window.__motionHarness.load({})", payload)).await?;
+        if let Some(e) = loaded.get("value").and_then(|v| v.get("error")) {
+            if !e.as_str().unwrap_or("").is_empty() {
+                return Err(format!("harness load gagal: {}", e.as_str().unwrap_or("")));
+            }
         }
-    }
 
-    // 3) Filmstrip dua framing, render + capture SINKRON per frame
-    //    (canvas.toDataURL — rAF/kompositor tidak dilibatkan; jendela boleh
-    //    ter-occlude: screenshot permukaan CDP akan frame basi).
-    //    U = crop tubuh atas dari capture penuh (detail halus),
-    //    F = seluruh model + margin (kaki, proporsi, artefak).
-    let mut images: Vec<LlmImage> = Vec::new();
-    for &t in &detail_times {
-        images.push(snap_frame(t, "upper").await?);
-    }
-    for &t in &full_times {
-        images.push(snap_frame(t, "full").await?);
-    }
+        let js = format!(
+            "window.__motionHarness.filmstrip({}, {})",
+            serde_json::to_string(&detail_times).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string(&full_times).unwrap_or_else(|_| "[]".into()),
+        );
+        let res = browser::evaluate(&js).await?;
+        let val = res.get("value").cloned().unwrap_or(Value::Null);
+        parse_filmstrip(&val)?
+    };
+    let images: Vec<LlmImage> = frames
+        .into_iter()
+        .map(|(_g, _t, data)| LlmImage { mime: "image/jpeg".into(), data })
+        .collect();
 
     // 4) VLM (role motion-vision; tanpa koneksi → skipped, bukan gagal).
     //    Cancel-aware: jalur agent meneruskan sinyal Stop — future yang kalah
@@ -266,29 +287,31 @@ pub async fn verify(
     }
 }
 
-/// Snap satu frame: render eksplisit di t + capture JPEG (base64) dari canvas.
-/// `mode` = "upper" (crop kepala/wajah) atau "full" (seluruh model).
-async fn snap_frame(t: f64, mode: &str) -> Result<LlmImage, String> {
-    let res = browser::evaluate(&format!(
-        "window.__motionHarness.snap({t}, \"{mode}\")"
-    ))
-    .await?;
-    let data_url = res
-        .get("value")
-        .and_then(|v| v.get("dataUrl"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            let err = res
-                .get("value")
-                .and_then(|v| v.get("error"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("tanpa detail");
-            format!("snap gagal: {err}")
-        })?;
-    let data = data_url
-        .strip_prefix("data:image/jpeg;base64,")
-        .ok_or_else(|| "dataUrl bukan jpeg base64".to_string())?;
-    Ok(LlmImage { mime: "image/jpeg".into(), data: data.to_string() })
+/// Parse hasil filmstrip batch (nilai balik `__motionHarness.filmstrip`):
+/// daftar (grup, t, data-jpeg-base64) berurut U lalu F. Murni — teruji unit.
+/// Frame tanpa dataUrl / bukan jpeg-base64 → Err menyebut grup+waktu.
+pub fn parse_filmstrip(value: &Value) -> Result<Vec<(String, f64, String)>, String> {
+    let frames = value
+        .get("frames")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "filmstrip tanpa frames".to_string())?;
+    let mut out = Vec::with_capacity(frames.len());
+    for f in frames {
+        let g = f.get("g").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let t = f.get("t").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let data_url = f
+            .get("dataUrl")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| format!("frame {g} t={t:.2} tanpa dataUrl"))?;
+        let data = data_url
+            .strip_prefix("data:image/jpeg;base64,")
+            .ok_or_else(|| format!("frame {g} t={t:.2} bukan jpeg base64"))?;
+        out.push((g, t, data.to_string()));
+    }
+    if out.is_empty() {
+        return Err("filmstrip kosong".into());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -365,5 +388,33 @@ mod tests {
         let v2 = parse_verdict("Balas HANYA JSON persis: {\"playing\"…");
         assert_eq!(v2["ok"], false);
         assert!(v2["raw"].as_str().unwrap().len() <= 400);
+    }
+
+    #[test]
+    fn filmstrip_batch_diparse_dan_frame_rusak_ditolak() {
+        let v = json!({ "ok": true, "frames": [
+            { "g": "U", "t": 0.0, "dataUrl": "data:image/jpeg;base64,QUJD" },
+            { "g": "U", "t": 0.9, "dataUrl": "data:image/jpeg;base64,WFla" },
+            { "g": "F", "t": 1.4, "dataUrl": "data:image/jpeg;base64,REVG" },
+        ]});
+        let f = parse_filmstrip(&v).unwrap();
+        assert_eq!(f.len(), 3);
+        assert_eq!(f[0].0, "U");
+        assert_eq!(f[1].1, 0.9);
+        assert_eq!(f[2].0, "F");
+        assert_eq!(f[2].2, "REVG");
+
+        // Frame tanpa dataUrl → error menyebut grup + waktu.
+        let bad = json!({ "frames": [ { "g": "U", "t": 0.5 } ] });
+        let e = parse_filmstrip(&bad).unwrap_err();
+        assert!(e.contains('U') && e.contains("0.50"), "{e}");
+
+        // Bukan jpeg base64 → ditolak.
+        let png = json!({ "frames": [ { "g": "F", "t": 0.5, "dataUrl": "data:image/png;base64,x" } ] });
+        assert!(parse_filmstrip(&png).is_err());
+
+        // Kosong / tanpa frames → error eksplisit.
+        assert!(parse_filmstrip(&json!({ "frames": [] })).is_err());
+        assert!(parse_filmstrip(&json!({})).is_err());
     }
 }

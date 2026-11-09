@@ -40,9 +40,10 @@ dicatat di sini supaya tidak hilang. Rincian status per fase ada di blok
 - Cache-hash/stale UI untuk **rig report** (approve panel kini memvalidasi
   `modelHash` entri approve, tapi laporan rig-report sendiri masih di-fetch
   ulang tiap buka studio/panel).
-- Probe: sweep bersyarat `coupled_with`, atribusi per mesh/drawable, penanda
-  kiri/kanan frame untuk `side` (cross-check `side` menunggu penanda ini;
-  region-vs-bbox sudah ter-wire di panel approve).
+- Probe: sweep bersyarat `coupled_with`, atribusi per mesh/drawable, side
+  sisi KARAKTER (side `layar_kiri/layar_kanan/tengah` + cross-check
+  region-vs-pita-vertikal-konten SUDAH jalan 2026-10-25; sisi karakter
+  butuh info arah hadap model).
 - Refine LLM terpetaan per `beatId` (server kini refine dengan validator
   generik maks 3x; klien refine per-beat deterministik via panel Terima Batch).
 - Feed distribusi jerk native dari disk ke critic numerik (UI masih heuristic;

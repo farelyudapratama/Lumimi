@@ -323,7 +323,7 @@ desain → validasi independen → perbaiki sendiri → simpan**.
   badan/kepala — lalu fisika mengikutkan); aksi satu-tembakan mulai dari dan
   PULANG ke base pose; nilai di dalam range terobservasi model.
 
-# 17b. Critic Visual — Jalur Vision (revisi 2026-09-26)
+# 17b. Critic Visual — Jalur Vision (revisi 2026-09-26; filmstrip batch + kunci 2026-10-25)
 
 Implementasi Fase 4d `PLAN-MOTION-PIPELINE.md`. Agent/studio bisa meminta
 **penilaian visual** atas draft motion:
@@ -333,7 +333,12 @@ Implementasi Fase 4d `PLAN-MOTION-PIPELINE.md`. Agent/studio bisa meminta
   satu jalur render — live2d-view.mjs) di browser terkelola → muat model +
   asset (migrasi role→param deterministik di harness) → **8 frame** → kirim
   filmstrip ke LLM role **`motion-vision`** → verdict JSON
-  `{playing, matchesIntent, artifacts[], notes, confidence}`.
+  `{playing, matchesIntent, artifacts[], notes, confidence}`. Seluruh
+  filmstrip dirender + dicapture BATCH dalam SATU `Runtime.evaluate`
+  (`__motionHarness.filmstrip`) — satu round-trip CDP, bukan satu evaluate
+  per frame. Fase browser digenani `harness_lock` (lihat §17d) agar tidak
+  tumpang tindih dengan probe. Gagal migrasi role saat load = error keras
+  (dulu ditelan → verdict `playing:false` palsu dari pose kosong).
 - **Capture deterministik**: jendela ter-occlude mematikan rAF & kompositor
   (screenshot permukaan CDP = frame basi). Harness karenanya render eksplisit
   per frame — `pixiApp.render()` (clear) → `renderer.draw()` (update pipeline
@@ -415,7 +420,7 @@ merakit keyframe.
 Bukan engine motion kedua (§31): hasil compiler tetap Motion Asset biasa —
 jalurnya tetap Registry → Scheduler → Runtime.
 
-# 17d. Rig Report & Probe Param (revisi 2026-10-24)
+# 17d. Rig Report & Probe Param (revisi 2026-10-24; perbaikan harness 2026-10-25)
 
 Implementasi Fase 1–2 `PLAN-MOTION-PIPELINE.md` — instrumen rig dari disk
 yang memberi EVIDENSA tambahan. **Bukan pengganti role-mapping**: makna
@@ -435,25 +440,45 @@ tetap satu sumber di `role-mapping.ts` (klien); Rust tidak menebak role
   (§17b) lewat harness `__motionHarness.probe()`. Per param: drive patch
   default → min → mid → max (TANPA asset — pose murni dari drive) → settle
   physics → capture sinkron → metrik diff piksel (`changedPixels`,
-  `diffRatio`, `bbox`, `centroid`; logika murni di
-  `src/client/animation/motion-probe.ts`). Param mati (piksel tak berubah)
-  dilaporkan `dead`. Param hidup dikirim frame sweep-nya ke LLM role
-  `motion-vision` (koneksi eksplisit, aturan §17b) untuk cross-check
-  region/sign/safeRange/confidence — parser loose, jawaban sampah
-  diawetkan ke `raw`. Tanpa koneksi vision → `skipped` per param (degrade
-  anggun; metrik piksel tetap hasil). Default `params` = daftar
-  `unclassified` rig report, cap 6 per panggilan.
+  `diffRatio`, `bbox`, `centroid`, plus `content` = bbox konten di koordinat
+  frame; logika murni di `src/client/animation/motion-probe.ts`).
+  Mekanika harness (2026-10-25):
+  - **Drive patch di-re-enqueue tiap frame render** (`reapplyDrive` di loop
+    settle sinkron + `driveLoop` rAF) — antrean tulis resmi (order 900 /
+    pra-physics) sekali konsumsi per frame; tanpa re-apply, capture settle
+    membaca pose default dan SEMUA param salah dianggap mati (bug lama).
+  - **Settle adaptif konvergen**: render sampai rerata selisih signature
+    grayscale antar frame (48×27, `meanAbsDiff`) di bawah ambang 2×
+    berturut, cap 150 — bukan hitungan frame ajaib; rig tanpa physics
+    konvergen seketika, rig physics lambat dapat waktu.
+  - **Noise floor**: dua capture pose basis setelah settle terpisah → diff
+    keduanya = lantai noise (sway sisa). `dead` = sweep terburuk tak
+    melampaui k× lantai (`classifyDeadWithFloor`, k=3, dasar 8).
+  Param hidup dikirim frame sweep-nya ke LLM role `motion-vision` (koneksi
+  eksplisit, aturan §17b) untuk cross-check region/sign/side/safeRange/
+  confidence — parser loose, jawaban sampah diawetkan ke `raw`. `side`
+  didefinisikan relatif GAMBAR (`layar_kiri|layar_kanan|tengah`, sudut
+  pandang penonton; sisi karakter butuh info arah hadap — backlog). Tanpa
+  koneksi vision → `skipped` per param (degrade anggun; metrik piksel tetap
+  hasil). Default `params` = daftar `unclassified` rig report, cap 6 per
+  panggilan.
+- **Kunci operasi harness** — probe dan critic visual berbagi halaman CDP
+  yang sama; `motion_vision::harness_lock` (tokio mutex global) menggenangi
+  seluruh fase browser tiap operasi (open+load+sweep / open+load+filmstrip)
+  dan dilepas sebelum panggilan LLM. Tanpa ini, operasi tumpang tindih saling
+  menimpa state load/pose dan menghasilkan data sampah senyap.
 - **UI**: tombol "Probe Param", "Setujui Param", dan "Cek Kurva" di footer
   Motion Studio; hasil probe satu param tampil sebagai lint ringan (metrik
-  piksel + region VLM).
+  piksel + region/sign/side VLM).
 - **Panel Approve Batch (revisi 2026-10-24, Fase 3 bentuk asli)**: tombol
   "Setujui Param" mem-probe batch param `unclassified` (6/panggilan,
   sekuensial) lalu menampilkan baris per param **urut kebutuhan mata
   manusia**: `conflict` (cross-check VLM ↔ piksel, `motion-probe.ts::
-  crossCheck` — akhirnya ter-wire) → `dead`/gagal → tanpa vision → percaya
+  crossCheck`: bbox-kosong-vs-klaim + region-vs-pita-vertikal-konten +
+  side-layar-vs-tengah-konten) → `dead`/gagal → tanpa vision → percaya
   rendah (<0.6) → konsisten. Per baris: pilih role kanonik (25 role
   `ROLE_KEYWORDS`) atau "param ekstra", label (prefill cdi), evidensa
-  (region/sign/confidence/piksel/safeRange). Approve → entri promosi ke
+  (region/sign/side/confidence/piksel/safeRange). Approve → entri promosi ke
   **layer `user`** sheet (`probeApprovals.user`, schema v5 — `user` > `ai`
   mutlak, selamat re-inspeksi via `USER_AUTHORED_FIELDS`); tolak = uncheck.
   Entri tersimpan ditampilkan dengan badge **stale** bila `modelHash` berubah
@@ -474,8 +499,8 @@ tetap satu sumber di `role-mapping.ts` (klien); Rust tidak menebak role
   milik user, bukan frame webcam.
 - **Backlog terbuka** (dicatat di `ARSITEKTUR-GAP.md`): cache-hash → stale
   UI untuk RIG REPORT itu sendiri (approvals sudah divalidasi modelHash);
-  retry bersyarat `coupled_with`; atribusi per mesh/drawable; penanda
-  kiri/kanan frame untuk `side` (cross-check side menunggu ini); holdEnd
+  retry bersyarat `coupled_with`; atribusi per mesh/drawable; side sisi
+  KARAKTER (butuh info arah hadap model — side layar sudah jalan); holdEnd
   sungguhan di compiler.
 
 # 18–19. LLM Integration & Catalog

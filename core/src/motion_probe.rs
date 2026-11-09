@@ -1,15 +1,18 @@
 //! motion_probe.rs — backlog Fase 2: probe canvas runtime penuh.
 //!
 //! Sweep satu/lebih parameter model di harness (halaman yang sama dengan
-//! critic visual): drive patch → settle physics → capture sinkron → metrik diff
-//! piksel dihitung sisi harness. Untuk param yang TIDAK mati, frame sweep
-//! dikirim ke LLM role `motion-vision` untuk cross-check attribution
-//! (region/sign/safe range) — bukan pengganti role-mapping, melainkan
-//! EVIDENSA tambahan untuk param unclassified.
+//! critic visual): drive patch → settle physics (konvergen + noise floor
+//! sisi harness) → capture sinkron → metrik diff piksel dihitung sisi
+//! harness. Untuk param yang TIDAK mati, frame sweep dikirim ke LLM role
+//! `motion-vision` untuk cross-check attribution (region/sign/side/
+//! safeRange) — bukan pengganti role-mapping, melainkan EVIDENSA tambahan
+//! untuk param unclassified.
 //!
 //! Jalurnya sama dengan motion_vision (CDP → harness-motion.html); endpoint
-//! ini lapisan di atasnya. Tanpa koneksi vision → field `skipped` per param
-//! (degrade anggun; metrik piksel tetap hasil).
+//! ini lapisan di atasnya. Seluruh fase sweep digenangi `motion_vision::
+//! harness_lock` (probe & verify berbagi halaman CDP yang sama); kunci
+//! dilepas sebelum loop VLM. Tanpa koneksi vision → field `skipped` per
+//! param (degrade anggun; metrik piksel tetap hasil).
 
 use std::path::{Path, PathBuf};
 
@@ -27,22 +30,26 @@ fn round3(v: f64) -> String {
 }
 
 /// Prompt attribution probe: VLM melihat frame sweep (bukan default) dan
-/// menjawab region/arah/range aman. Deterministik — param + nilai saja.
+/// menjawab region/arah/sisi/range aman. Deterministik — param + nilai saja.
+/// `side` didefinisikan relatif GAMBAR (sudut pandang penonton) — sisi
+/// karakter butuh info arah hadap model, jadi bukan kosakata di sini.
 pub fn build_probe_prompt(param: &str, values: &[f64]) -> String {
     let frames: Vec<String> = values
         .iter()
         .enumerate()
-        .map(|(i, v)| format!("F{}: parameter dinaikkan ke nilai {}", i + 1, round3(*v)))
+        .map(|(i, v)| format!("F{}: parameter pada nilai {}", i + 1, round3(*v)))
         .collect();
     format!(
         "Kamu penganalisa rig karakter Live2D.\n\
 Parameter \"{param}\" disweep dari nilai default ke beberapa nilai (frame berurutan \
 berikut; bandingkan dengan pose default awal yang tidak disertakan).\n\
 {frames}\n\n\
-Tugas: tentukan region tubuh yang BERUBAH karena parameter ini, dan arah efek nilainya.\n\n\
+Tugas: tentukan region tubuh yang BERUBAH karena parameter ini, arah efek nilainya, \
+dan sisi gambar yang berubah.\n\n\
 Balas HANYA objek JSON:\n\
-{{ \"region\": \"kepala|mata|mulut|badan|rambut|tangan|lainnya|tidak_terlihat\", \"sign\": -1|0|1, \"safeRange\": [min, max], \"confidence\": 0.0-1.0, \"notes\": \"maksimal satu kalimat bahasa Indonesia\" }}\n\n\
-sign = arah efek nilai positif (1 = ke arah yang tampak di frame terakhir, -1 = berlawanan, 0 = tak pasti).\n\
+{{ \"region\": \"kepala|mata|mulut|badan|rambut|tangan|lainnya|tidak_terlihat\", \"sign\": -1|0|1, \"side\": \"layar_kiri|layar_kanan|tengah\", \"safeRange\": [min, max], \"confidence\": 0.0-1.0, \"notes\": \"maksimal satu kalimat bahasa Indonesia\" }}\n\n\
+sign: 1 bila perubahan makin terlihat saat nilai parameter LEBIH TINGGI, -1 bila makin terlihat saat LEBIH RENDAH, 0 bila tak pasti.\n\
+side = sisi GAMBAR (dari sudut pandang penonton) tempat perubahan paling terlihat.\n\
 safeRange = rentang nilai yang masih tampak wajar (bukan ekstrem yang merusak bentuk).",
         param = param,
         frames = frames.join("\n"),
@@ -50,7 +57,8 @@ safeRange = rentang nilai yang masih tampak wajar (bukan ekstrem yang merusak be
 }
 
 /// Parse loose jawaban VLM probe (JSON di tengah teks pun ditampung; sampah
-/// tetap diawetkan ke `raw` supaya terlihat).
+/// tetap diawetkan ke `raw` supaya terlihat). `side` hanya diterima bila
+/// kosakata layar_* valid — nilai lain dibuang (bukan diteruskan mentah).
 pub fn parse_probe_vision(reply: &str) -> Value {
     let parsed = jsonx::extract_json_object_loose(reply).unwrap_or(Value::Null);
     let region = parsed
@@ -60,6 +68,12 @@ pub fn parse_probe_vision(reply: &str) -> Value {
         .trim()
         .to_string();
     let sign = parsed.get("sign").and_then(|v| v.as_i64()).map(|s| s.clamp(-1, 1));
+    let side = parsed
+        .get("side")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let safe: Option<Vec<f64>> = parsed
         .get("safeRange")
         .and_then(|v| v.as_array())
@@ -74,6 +88,9 @@ pub fn parse_probe_vision(reply: &str) -> Value {
     });
     if let Some(s) = sign {
         out["sign"] = json!(s);
+    }
+    if matches!(side.as_str(), "layar_kiri" | "layar_kanan" | "tengah") {
+        out["side"] = json!(side);
     }
     if let Some(sr) = safe {
         out["safeRange"] = json!(sr);
@@ -129,64 +146,74 @@ pub async fn probe(config_path: &Path, root: &Path, body: &Value) -> (u16, Strin
         return (200, json!({ "ok": true, "model": model, "params": [], "note": "tidak ada param unclassified untuk disweep" }).to_string());
     }
 
-    // 1) Harness di origin loopback milik server sendiri (aman → allow_private).
+    // 1–3) SATU kunci operasi harness selama seluruh fase sweep (open + load
+    //      + sweep semua param): probe dan verify berbagi halaman CDP yang
+    //      sama — tumpang tindih saling menimpa state load/pose. Kunci
+    //      dilepas sebelum loop VLM (tidak menyentuh browser).
     let harness_url = format!("http://127.0.0.1:{}/harness-motion.html", crate::server_port());
-    if let Err(e) = browser::open(root, &harness_url, true).await {
-        return (500, json!({ "error": e }).to_string());
-    }
-    if let Err(e) = motion_vision::wait_ready(HARNESS_READY_POLLS).await {
-        return (502, json!({ "error": e }).to_string());
-    }
-
-    // 2) Muat model TANPA asset — pose murni dari drive patch probe.
-    let payload = json!({ "model": rel, "asset": Value::Null });
-    if let Err(e) = browser::evaluate(&format!("window.__motionHarness.load({})", payload)).await {
-        return (502, json!({ "error": format!("harness load gagal: {e}") }).to_string());
-    }
-
-    // 3) Sweep tiap param di harness (drive → settle → capture → metrik diff).
-    let mut results: Vec<Value> = Vec::new();
     let mut sweep_frames: Vec<Vec<Value>> = Vec::new();
-    for param in &params {
-        let js = format!("window.__motionHarness.probe({})", serde_json::to_string(param).unwrap_or_default());
-        let item = match browser::evaluate(&js).await {
-            Ok(res) => {
-                let val = res.get("value").cloned().unwrap_or(Value::Null);
-                if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    let frames = val.get("frames").cloned().unwrap_or(json!([]));
-                    sweep_frames.push(frames.as_array().cloned().unwrap_or_default());
-                    // Metrik untuk klien: tanpa dataUrl (besar; sudah dikonsumsi di sini).
-                    let mut metrics: Vec<Value> = frames.as_array().cloned().unwrap_or_default();
-                    for f in metrics.iter_mut() {
-                        if let Some(o) = f.as_object_mut() {
-                            o.remove("dataUrl");
+    let mut results: Vec<Value> = {
+        let _guard = motion_vision::harness_lock().await;
+        if let Err(e) = browser::open(root, &harness_url, true).await {
+            return (500, json!({ "error": e }).to_string());
+        }
+        if let Err(e) = motion_vision::wait_ready(HARNESS_READY_POLLS).await {
+            return (502, json!({ "error": e }).to_string());
+        }
+
+        // Muat model TANPA asset — pose murni dari drive patch probe.
+        let payload = json!({ "model": rel, "asset": Value::Null });
+        if let Err(e) = browser::evaluate(&format!("window.__motionHarness.load({})", payload)).await {
+            return (502, json!({ "error": format!("harness load gagal: {e}") }).to_string());
+        }
+
+        // Sweep tiap param di harness (drive → settle konvergen + noise floor
+        // → capture → metrik diff; semua dihitung sisi harness TS).
+        let mut results: Vec<Value> = Vec::new();
+        for param in &params {
+            let js = format!("window.__motionHarness.probe({})", serde_json::to_string(param).unwrap_or_default());
+            let item = match browser::evaluate(&js).await {
+                Ok(res) => {
+                    let val = res.get("value").cloned().unwrap_or(Value::Null);
+                    if val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        let frames = val.get("frames").cloned().unwrap_or(json!([]));
+                        sweep_frames.push(frames.as_array().cloned().unwrap_or_default());
+                        // Metrik untuk klien: tanpa dataUrl (besar; sudah dikonsumsi di sini).
+                        let mut metrics: Vec<Value> = frames.as_array().cloned().unwrap_or_default();
+                        for f in metrics.iter_mut() {
+                            if let Some(o) = f.as_object_mut() {
+                                o.remove("dataUrl");
+                            }
                         }
+                        json!({
+                            "paramId": param,
+                            "dead": val.get("dead").and_then(|v| v.as_bool()).unwrap_or(true),
+                            "range": val.get("range").cloned().unwrap_or(Value::Null),
+                            "noiseFloor": val.get("noiseFloor").cloned().unwrap_or(Value::Null),
+                            "metrics": metrics,
+                            "vision": Value::Null,
+                        })
+                    } else {
+                        sweep_frames.push(Vec::new());
+                        json!({
+                            "paramId": param,
+                            "error": val.get("error").and_then(|v| v.as_str()).unwrap_or("probe gagal"),
+                        })
                     }
-                    json!({
-                        "paramId": param,
-                        "dead": val.get("dead").and_then(|v| v.as_bool()).unwrap_or(true),
-                        "range": val.get("range").cloned().unwrap_or(Value::Null),
-                        "metrics": metrics,
-                        "vision": Value::Null,
-                    })
-                } else {
-                    sweep_frames.push(Vec::new());
-                    json!({
-                        "paramId": param,
-                        "error": val.get("error").and_then(|v| v.as_str()).unwrap_or("probe gagal"),
-                    })
                 }
-            }
-            Err(e) => {
-                sweep_frames.push(Vec::new());
-                json!({ "paramId": param, "error": e })
-            }
-        };
-        results.push(item);
-    }
+                Err(e) => {
+                    sweep_frames.push(Vec::new());
+                    json!({ "paramId": param, "error": e })
+                }
+            };
+            results.push(item);
+        }
+        results
+    };
 
     // 4) Cross-check VLM (role motion-vision) untuk param yang TIDAK mati —
     //    frame sweep yang benar-benar mengubah piksel dikirim sebagai gambar.
+    //    Di luar kunci harness: tidak menyentuh browser.
     for (i, item) in results.iter_mut().enumerate() {
         if item.get("error").is_some() {
             continue;
@@ -245,6 +272,12 @@ mod tests {
         assert!(p.contains("\"region\""), "{p}");
         assert!(p.contains("\"safeRange\""), "{p}");
         assert!(p.contains("\"sign\""), "{p}");
+        assert!(p.contains("\"side\""), "{p}");
+        assert!(p.contains("layar_kiri"), "{p}");
+        // Definisi sign tidak boleh sirkular — arah dinyatakan lewat nilai
+        // parameter (LEBIH TINGGI / LEBIH RENDAH), bukan "arah frame terakhir".
+        assert!(p.contains("LEBIH TINGGI"), "{p}");
+        assert!(p.contains("LEBIH RENDAH"), "{p}");
         // Prompt selalu menaruh instruksi JSON-only di akhir.
         assert!(p.contains("HANYA objek JSON"), "{p}");
     }
@@ -252,11 +285,12 @@ mod tests {
     #[test]
     fn vision_probe_loose_dan_sampah_ditolak() {
         let v = parse_probe_vision(
-            "{\"region\":\"kepala\",\"sign\":1,\"safeRange\":[-15,15],\"confidence\":0.8,\"notes\":\"miring kanan\"}",
+            "{\"region\":\"kepala\",\"sign\":1,\"side\":\"layar_kiri\",\"safeRange\":[-15,15],\"confidence\":0.8,\"notes\":\"miring kanan\"}",
         );
         assert_eq!(v["ok"], true);
         assert_eq!(v["region"], "kepala");
         assert_eq!(v["sign"], 1);
+        assert_eq!(v["side"], "layar_kiri");
         assert_eq!(v["safeRange"], json!([-15.0, 15.0]));
         assert_eq!(v["confidence"], json!(0.8));
         assert_eq!(v["notes"], "miring kanan");
@@ -277,5 +311,10 @@ mod tests {
         // sign di luar rentang di-clamp.
         let v5 = parse_probe_vision("{\"region\":\"mulut\",\"sign\":9}");
         assert_eq!(v5["sign"], 1);
+        // side di luar kosakata layar_* dibuang (bukan diteruskan mentah).
+        let v6 = parse_probe_vision("{\"region\":\"mata\",\"side\":\"atas\"}");
+        assert!(v6.get("side").is_none());
+        let v7 = parse_probe_vision("{\"region\":\"mata\",\"side\":\"layar_kanan\"}");
+        assert_eq!(v7["side"], "layar_kanan");
     }
 }
