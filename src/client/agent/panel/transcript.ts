@@ -50,7 +50,7 @@ type BlockBase =
     }
   | { kind: "status"; id: number; rev: number; text: string; variant?: "ok" | "err" | "warn" }
   | { kind: "speak"; id: number; rev: number; text: string }
-  | { kind: "approval"; id: number; rev: number; apId: string; tool: string; args: any; /** Kartu rencana (Fase 2): args.todos dirender sebagai rencana kerja, bukan argumen tool. */ plan?: boolean }
+  | { kind: "approval"; id: number; rev: number; apId: string; tool: string; args: any; /** Kartu rencana (Fase 2): args.todos dirender sebagai rencana kerja, bukan argumen tool. */ plan?: boolean; /** Kartu captcha: jeda sampai user menyelesaikan captcha di browser lalu lanjut. */ captcha?: boolean; /** Kartu login: jeda sampai user mengisi kredensial sendiri di browser (agent tak pernah mengetik password/OTP). */ login?: boolean }
   | { kind: "subagent"; id: number; rev: number; name: string; state: "spawned" | "done"; text: string }
   /** Ringkasan perubahan file per giliran (ala "N files changed +a −r"). */
   | { kind: "changes"; id: number; rev: number; files: FileChange[]; added: number; removed: number };
@@ -90,9 +90,23 @@ export class Transcript {
   /** Tugas berjalan = pesan user terakhir (pusat perhatian kartu TASK). */
   private task = "";
 
+  /** Cap blok transcript: sesi sangat panjang tidak boleh tumbuh tanpa batas
+   *  (setiap event SSE memicu render). Blok terlama dibuang dan diganti
+   *  penanda; msgKeys TIDAK ikut dibuang supaya syncFromHistory tidak
+   *  membangkitkan kembali riwayat yang sudah dipangkas. */
+  private static readonly MAX_BLOCKS = 600;
+
   private push(b: any): any {
     const blk: any = { id: nextId++, rev: 1, at: Date.now(), ...b };
     this.blocks.push(blk);
+    const over = this.blocks.length - Transcript.MAX_BLOCKS;
+    if (over > 0) {
+      this.blocks.splice(0, over);
+      const first = this.blocks[0] as any;
+      if (!first || first.kind !== "status") {
+        this.blocks.unshift({ id: nextId++, rev: 1, at: Date.now(), kind: "status", text: t("wb.trim.older") });
+      }
+    }
     return blk;
   }
 
@@ -109,13 +123,20 @@ export class Transcript {
   }
 
   private registerMsgKey(role: string, content: string): string {
-    const key = role + ":" + String(content || "").slice(0, 160);
+    const key = this.msgKey(role, content);
     this.msgKeys.add(key);
     return key;
   }
 
   private hasMsgKey(role: string, content: string): boolean {
-    return this.msgKeys.has(role + ":" + String(content || "").slice(0, 160));
+    return this.msgKeys.has(this.msgKey(role, content));
+  }
+
+  /** Key dedupe = role + TEKS PENUH. Dulu 160 char pertama: pesan berbeda
+   *  yang berawalan sama (atau user mengirim teks yang sama dua kali) bisa
+   *  saling dianggap duplikat saat hydrate — buang pesan yang nyata. */
+  private msgKey(role: string, content: string): string {
+    return role + ":" + String(content || "");
   }
 
   // ── Input dari user (panel) ─────────────────────────────────────
@@ -340,16 +361,18 @@ export class Transcript {
    * tanpa ini tombol Allow/Deny tak pernah muncul dan tugas mutating (mis.
    * motion_save) macet di "⚠ butuh izin". Idempoten by apId.
    */
-  ensureApproval(apId: string, tool: string, args: any, plan = false): boolean {
+  ensureApproval(apId: string, tool: string, args: any, plan = false, captcha = false, login = false): boolean {
     if (!apId) return false;
     const found = this.blocks.find((b) => b.kind === "approval" && b.apId === apId);
     if (found) {
-      // Kartu dibuat duluan oleh jalur SSE tanpa konteks plan — /status adalah
+      // Kartu dibuat duluan oleh jalur SSE tanpa konteks plan/captcha — /status adalah
       // sumber kebenaran: upgrade di tempat (render berikutnya membacanya).
       if (plan) (found as Extract<Block, { kind: "approval" }>).plan = true;
+      if (captcha) (found as Extract<Block, { kind: "approval" }>).captcha = true;
+      if (login) (found as Extract<Block, { kind: "approval" }>).login = true;
       return false;
     }
-    this.push({ kind: "approval", apId, tool, args: args ?? null, plan: plan || undefined });
+    this.push({ kind: "approval", apId, tool, args: args ?? null, plan: plan || undefined, captcha: captcha || undefined, login: login || undefined });
     return true;
   }
 

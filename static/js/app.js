@@ -1860,8 +1860,8 @@
     return null;
   }
 
-  function mapRoles(paramSet, official) {
-    if (RM) return RM.mapRoles(paramSet, official);
+  function mapRoles(paramSet, official, overrides) {
+    if (RM) return RM.mapRoles(paramSet, official, overrides);
     // Fallback lengkap bila bundle belum termuat (test harness vm tanpa
     // bundle) — logika sama, tapi sumber kebenaran tetap modul TS.
     const ids = {};
@@ -1872,6 +1872,12 @@
       lowerToReal[list[i]] = id;
     });
     for (const role in ROLE_KEYWORDS) {
+      // Tier 0: override user (sheet probeApprovals) — paramId wajib dimiliki model.
+      const ov = overrides && overrides[role];
+      if (ov && paramSet.has(ov)) {
+        ids[role] = ov;
+        continue;
+      }
       if (official && GROUP_PATTERNS[role]) {
         const pool =
           role === "mouthOpenY" ? official.lipSyncIds : official.eyeBlinkIds;
@@ -3660,6 +3666,34 @@
     }
 
     window.__addChat = addChat;
+    // Bubble streaming: dibuka sekali di delta pertama, teksnya diganti per
+    // delta. finish() menutupnya (selesai, error, atau di-Stop).
+    window.__openStreamChat = function openStreamChat(role) {
+      const log = $("#chat-log");
+      if (!log) return null;
+      const msg = document.createElement("div");
+      msg.className = "msg " + role;
+      const av = document.createElement("div");
+      av.className = "msg-avatar";
+      av.textContent = characterInitial();
+      paintAvatarEl(av, characterInitial());
+      const bb = document.createElement("div");
+      bb.className = "msg-bubble";
+      msg.appendChild(av);
+      msg.appendChild(bb);
+      log.appendChild(msg);
+      log.scrollTop = log.scrollHeight;
+      return {
+        update(text) {
+          bb.textContent = text;
+          log.scrollTop = log.scrollHeight;
+        },
+        finish(text) {
+          if (text) bb.textContent = text;
+          else msg.remove();
+        },
+      };
+    };
     // Hook lintas-scope: loadModel (scope luar) memicu gambar-ulang daftar
     // model di drawer setelah state.modelPath berubah (penanda "aktif").
     window.__refreshModels = refreshModels;
@@ -3716,6 +3750,18 @@
     $("#bubble-input").addEventListener("keydown", (e) => {
       if (e.key === "Enter") sendBubble();
     });
+    // Tombol Stop: hanya tampil selama brain sibuk; Esc juga menghentikan.
+    const stopBtn = $("#btn-chat-stop");
+    const stopReply = () => window.__agent?.stop?.();
+    stopBtn.addEventListener("click", stopReply);
+    $("#bubble-input").addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && window.__agent?.isBusy?.()) stopReply();
+    });
+    const sendBtn = $("#btn-bubble");
+    window.__setChatBusy = (on) => {
+      stopBtn.classList.toggle("hidden", !on);
+      sendBtn.classList.toggle("hidden", on);
+    };
 
     $$(".phrase-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
@@ -3779,273 +3825,6 @@
           applyFallbackPresence(!document.hidden);
         }
       });
-    }
-
-    const connList = $("#conn-list");
-    const modal = $("#conn-modal");
-    let editingId = null;
-    let lastConnSig = null;
-
-    function connSig(conns, activeId) {
-      return JSON.stringify(
-        [activeId || null].concat(
-          (conns || []).map((c) => [
-            c.id,
-            c.testStatus || "untested",
-            c.lastError || "",
-            c.rateLimitedUntil || "",
-            Array.isArray(c.roles) ? c.roles.join(",") : "",
-          ]),
-        ),
-      );
-    }
-
-    async function loadConns() {
-      try {
-        const r = await fetch(API + "/api/config");
-        const d = await r.json();
-        renderConns(d.connections || [], d.activeId);
-      } catch (e) {
-        console.error("[conn] load", e);
-      }
-    }
-    function badgeClass(s) {
-      if (s === "success") return "success";
-      if (s === "error") return "error";
-      return "default";
-    }
-    function renderConns(conns, activeId) {
-      lastConnSig = connSig(conns, activeId);
-      connList.innerHTML = "";
-      if (!conns.length) {
-        connList.innerHTML =
-          '<div class="conn-hint">' + __t("conn.emptyHint") + "</div>";
-        return;
-      }
-      for (const c of conns) {
-        const card = document.createElement("div");
-        card.className = "conn-card" + (c.id === activeId ? " active" : "");
-        const status = c.testStatus || "untested";
-
-        const coolMs = c.rateLimitedUntil
-          ? new Date(c.rateLimitedUntil).getTime() - Date.now()
-          : 0;
-        const cooling = coolMs > 0;
-        const badgeText = cooling
-          ? `◌ cooldown ${Math.ceil(coolMs / 1000)}s`
-          : status === "success"
-            ? "✓ connected"
-            : status === "error"
-              ? "✕ error"
-              : "○ untested";
-
-        const roleList = Array.isArray(c.roles) ? c.roles : [];
-        const roleTags = roleList.length
-          ? roleList
-              .map((r) => `<span class="conn-role-tag">${esc(r)}</span>`)
-              .join("")
-          : '<span class="conn-role-tag wild">' + __t("conn.allRoles") + "</span>";
-        const enabled = c.enabled !== false;
-        card.classList.toggle("disabled", !enabled);
-        // Badge hanya saat membawa informasi yang tidak ditunjukkan toggle:
-        // status tes/cooldown, atau kombinasi aktif+off (dilewati). "off" polos
-        // redundan dengan toggle — jangan digambar dua kali.
-        const showBadge = enabled || c.id === activeId;
-        const badgeTextFinal = !enabled
-          ? __t("conn.offSkipped")
-          : badgeText;
-        card.innerHTML = `
-          <div class="conn-head">
-            <label class="conn-switch" title="${__t("conn.switchTip")}">
-              <input type="checkbox" ${enabled ? "checked" : ""} data-act="toggle" />
-              <span class="slider"></span>
-            </label>
-            <span class="conn-name">${esc(c.name || c.id)}</span>
-            ${showBadge ? `<span class="conn-badge ${!enabled ? "default" : cooling ? "default" : badgeClass(status)}">${badgeTextFinal}</span>` : ""}
-          </div>
-          <div class="conn-meta">${esc(c.provider || "")} · ${esc(c.model || "")}</div>
-          <div class="conn-role-tags">${roleTags}</div>
-          ${c.lastError ? `<div class="conn-err">${esc(c.lastError)}</div>` : ""}
-          <div class="conn-actions">
-            <button data-act="active" class="${c.id === activeId ? "act-active" : ""}">${c.id === activeId ? __t("conn.isActive") : __t("conn.setActive")}</button>
-            <button data-act="edit">${__t("conn.edit")}</button>
-            <button data-act="test">${__t("conn.test")}</button>
-            <button data-act="delete">${__t("conn.delete")}</button>
-          </div>`;
-        card
-          .querySelector('[data-act="toggle"]')
-          .addEventListener("change", (e) => setEnabled(c.id, e.target.checked));
-        card
-          .querySelector('[data-act="active"]')
-          .addEventListener("click", () => setActive(c.id));
-        card
-          .querySelector('[data-act="edit"]')
-          .addEventListener("click", () => openModal(c));
-        card
-          .querySelector('[data-act="test"]')
-          .addEventListener("click", (e) => testConn(c, e.target));
-        card
-          .querySelector('[data-act="delete"]')
-          .addEventListener("click", () => delConn(c.id));
-        connList.appendChild(card);
-      }
-    }
-
-    function rolesFromForm() {
-      const box = $("#m-roles");
-      if (!box) return [];
-      return Array.from(box.querySelectorAll('input[type="checkbox"]'))
-        .filter((cb) => cb.checked)
-        .map((cb) => cb.value);
-    }
-    function rolesToForm(roles) {
-      const box = $("#m-roles");
-      if (!box) return;
-      const want = new Set(Array.isArray(roles) ? roles : []);
-      for (const cb of box.querySelectorAll('input[type="checkbox"]'))
-        cb.checked = want.has(cb.value);
-    }
-
-    function openModal(c) {
-      editingId = c ? c.id : null;
-      $("#m-name").value = c ? c.name || "" : "";
-      $("#m-provider").value = c
-        ? c.provider || "openai-compatible"
-        : "openai-compatible";
-      $("#m-baseurl").value = c ? c.baseUrl || "" : "";
-      $("#m-apikey").value = c
-        ? c.apiKey && !c.apiKey.startsWith("•")
-          ? ""
-          : ""
-        : "";
-      $("#m-model").value = c ? c.model || "" : "";
-      $("#m-system").value = c ? c.systemPrompt || "" : "";
-
-      $("#m-maxtokens").value = c && c.maxTokens != null ? c.maxTokens : "";
-      $("#m-temp").value = c && c.temperature != null ? c.temperature : "";
-      $("#m-stream").checked = !!(c && c.stream);
-      rolesToForm(c ? c.roles : []);
-      syncProviderFields();
-      modal.classList.remove("hidden");
-    }
-
-    // Provider "systemone" (Jev/Laya) = mesin KEPUTUSAN, bukan model teks: tak
-    // memakai System Prompt / Max Tokens-Temperature / Stream. Sembunyikan biar
-    // form tak menyesatkan; placeholder Base URL & Model diberi contoh Laya lokal.
-    function syncProviderFields() {
-      const isSystemOne = $("#m-provider").value === "systemone";
-      for (const id of ["#m-row-system", "#m-row-tokens", "#m-row-stream"]) {
-        const el = $(id);
-        if (el) el.classList.toggle("hidden", isSystemOne);
-      }
-      const base = $("#m-baseurl");
-      const model = $("#m-model");
-      if (base)
-        base.placeholder = isSystemOne
-          ? "kosong = https://api.typesafe.ai · Laya lokal: http://127.0.0.1:8000"
-          : "https://api.example.com/v1";
-      if (model)
-        model.placeholder = isSystemOne ? "jev-latest" : "gpt-4o-mini";
-    }
-    $("#m-provider").addEventListener("change", syncProviderFields);
-    function closeModal() {
-      modal.classList.add("hidden");
-      editingId = null;
-    }
-    $("#m-cancel").addEventListener("click", closeModal);
-    $("#btn-add-conn").addEventListener("click", () => openModal(null));
-
-    $("#m-save").addEventListener("click", async () => {
-      const k = $("#m-apikey").value.trim();
-      const conn = {
-        name: $("#m-name").value.trim() || "connection",
-        provider: $("#m-provider").value,
-        baseUrl: $("#m-baseurl").value.trim(),
-        apiKey: k,
-        model: $("#m-model").value.trim(),
-        systemPrompt: $("#m-system").value,
-        roles: rolesFromForm(),
-      };
-
-      const mt = parseInt($("#m-maxtokens").value, 10);
-      const tp = parseFloat($("#m-temp").value);
-      if (Number.isFinite(mt)) conn.maxTokens = mt;
-      if (Number.isFinite(tp)) conn.temperature = tp;
-      conn.stream = $("#m-stream").checked;
-      const body = { action: editingId ? "update" : "add" };
-
-      if (editingId && !k) delete conn.apiKey;
-      if (editingId) {
-        body.id = editingId;
-        body.connection = conn;
-      } else body.connection = conn;
-
-      await fetch(API + "/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      closeModal();
-      loadConns();
-    });
-
-    // Toggle aktif/nonaktif per koneksi: nonaktif = dilewati semua pemilihan
-    // (fallback & role routing) tanpa menghapus konfigurasinya. Koneksi aktif
-    // yang dimatikan tidak memindahkan activeId — cuma jadi tak terpakai.
-    async function setEnabled(id, enabled) {
-      try {
-        const r = await fetch(API + "/api/config", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "update",
-            id,
-            connection: { enabled },
-          }),
-        });
-        const d = await r.json();
-        if (!r.ok || d.error) throw new Error(d.error || "HTTP " + r.status);
-        loadConns();
-      } catch (e) {
-        console.error("[conn] toggle enabled", e);
-        loadConns(); // kembalikan posisi switch sesuai state server
-      }
-    }
-
-    async function setActive(id) {
-      await fetch(API + "/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "setActive", id }),
-      });
-      loadConns();
-    }
-    async function delConn(id) {
-      if (!confirm(__t("conn.delConfirm"))) return;
-      await fetch(API + "/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "delete", id }),
-      });
-      loadConns();
-    }
-    async function testConn(c, btn) {
-      btn.disabled = true;
-      btn.textContent = __t("cfg.testing");
-      const r = await fetch(API + "/api/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ connection: c }),
-      });
-      const d = await r.json();
-      btn.disabled = false;
-      btn.textContent = __t("cfg.testBtn");
-      alert(
-        d.valid
-          ? __t("cfg.connTestOk", { reply: d.reply || "" })
-          : __t("cfg.connTestFail", { msg: d.error || __t("sys.failShort") }),
-      );
-      loadConns();
     }
 
     const drop = $("#model-drop");
@@ -8100,25 +7879,11 @@
       });
     }
 
-    loadConns();
-
-    let pollBusy = false;
-    setInterval(async () => {
-      if (pollBusy || document.hidden) return;
-      pollBusy = true;
-      try {
-        const r = await fetch(API + "/api/config");
-        const d = await r.json();
-        if (connSig(d.connections || [], d.activeId) !== lastConnSig)
-          renderConns(d.connections || [], d.activeId);
-      } catch {}
-      pollBusy = false;
-    }, 4000);
   }
 
-  const SHEET_SCHEMA_VERSION = 4;
+  const SHEET_SCHEMA_VERSION = 5;
 
-  const USER_AUTHORED_FIELDS = ['userNote', 'config', 'paramGroups', 'presets'];
+  const USER_AUTHORED_FIELDS = ['userNote', 'config', 'paramGroups', 'presets', 'probeApprovals'];
 
   const PRESET_CATEGORIES = ["emosi", "properti", "aksesoris", "gerak"];
 
@@ -9666,6 +9431,11 @@
 
       classifyParams: triggerAIParamClassification,
 
+      approveProbe: approveProbeParams,
+      removeProbeApproval,
+      getProbeApprovals,
+      roleOverridesFromSheet,
+
       analyzePresets: analyzeSheetPresets,
     },
   };
@@ -9855,6 +9625,38 @@
     return out;
   }
 
+  // Normalisasi probeApprovals (v5): {user: {paramId: entri}}. Layer user =
+  // hasil approve panel probe — mutlak, tidak pernah ditimpa scan/AI.
+  // Entri diawetkan selama bentuknya objek; field numerik di-clamp,
+  // string di-trim/cap supaya sheet tidak membesar tanpa batas.
+  function normalizeProbeApprovals(raw) {
+    const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const userSrc = src.user && typeof src.user === "object" && !Array.isArray(src.user) ? src.user : {};
+    const user = {};
+    for (const pid of Object.keys(userSrc)) {
+      const e = userSrc[pid];
+      if (!e || typeof e !== "object" || Array.isArray(e)) continue;
+      const id = String(pid).slice(0, 120);
+      const out = {};
+      if (typeof e.role === "string" && e.role) out.role = e.role.slice(0, 40);
+      else out.role = null;
+      out.label = typeof e.label === "string" ? e.label.trim().slice(0, 80) : "";
+      out.region = typeof e.region === "string" ? e.region.trim().slice(0, 40) : "";
+      if (e.sign === 1 || e.sign === -1 || e.sign === 0) out.sign = e.sign;
+      if (Array.isArray(e.safeRange) && e.safeRange.length === 2
+        && Number.isFinite(e.safeRange[0]) && Number.isFinite(e.safeRange[1])
+        && e.safeRange[0] <= e.safeRange[1]) {
+        out.safeRange = [Number(e.safeRange[0]), Number(e.safeRange[1])];
+      }
+      if (Number.isFinite(e.confidence)) out.confidence = Math.max(0, Math.min(1, Number(e.confidence)));
+      if (typeof e.modelHash === "string") out.modelHash = e.modelHash.slice(0, 32);
+      if (Number.isFinite(e.approvedAt)) out.approvedAt = Number(e.approvedAt);
+      if (typeof e.notes === "string") out.notes = e.notes.trim().slice(0, 300);
+      user[id] = out;
+    }
+    return { user };
+  }
+
   function normalizeParamGroups(raw) {
     const r = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
     return { user: normalizeGroupMap(r.user), ai: normalizeGroupMap(r.ai) };
@@ -9960,6 +9762,13 @@
         sheet.modelName || "(unnamed)",
       );
     }
+    if (v < 5) {
+      sheet.schemaVersion = 5;
+      console.log(
+        "[sheet] migrated v4 -> v5 for",
+        sheet.modelName || "(unnamed)",
+      );
+    }
 
     if (typeof sheet.userNote !== "string") sheet.userNote = "";
 
@@ -9973,6 +9782,7 @@
     }
 
     sheet.paramGroups = normalizeParamGroups(sheet.paramGroups);
+    sheet.probeApprovals = normalizeProbeApprovals(sheet.probeApprovals);
     sheet.presets = normalizePresets(sheet.presets);
     if (!Array.isArray(sheet.parts)) sheet.parts = [];
     if (!Array.isArray(sheet.accessories)) sheet.accessories = [];
@@ -10395,6 +10205,143 @@
       (p) => p && p.id === paramId,
     );
     return p && typeof p.userNote === "string" ? p.userNote : "";
+  }
+
+  // ── Probe approvals (sheet v5, layer user) ────────────────────────
+  // Satu pintu promosi hasil probe panel → layer `user`. Entri:
+  // {paramId, role|null, label, region, sign, safeRange, confidence,
+  //  modelHash, notes}. role diisi = override role kanonik (jalur A);
+  // role null = param ekstra untuk beat planner (jalur B).
+  // Sekalian menulis label kategori ke paramGroups.user supaya slider
+  // param berkategori benar (resolveParamGroup: user ?? ai ?? heuristik).
+  async function approveProbeParams(entries) {
+    if (!Array.isArray(entries) || !entries.length)
+      throw new Error("entries kosong");
+    const sheet = await sheetForWrite();
+    if (!sheet.probeApprovals || typeof sheet.probeApprovals !== "object")
+      sheet.probeApprovals = { user: {} };
+    if (!sheet.probeApprovals.user || typeof sheet.probeApprovals.user !== "object")
+      sheet.probeApprovals.user = {};
+    if (!sheet.paramGroups) sheet.paramGroups = { user: {}, ai: {} };
+    if (!sheet.paramGroups.user || typeof sheet.paramGroups.user !== "object")
+      sheet.paramGroups.user = {};
+
+    const saved = [];
+    for (const raw of entries) {
+      if (!raw || typeof raw !== "object") continue;
+      const pid = String(raw.paramId || "").trim().slice(0, 120);
+      if (!pid) continue;
+      const entry = {
+        role: (typeof raw.role === "string" && raw.role) ? raw.role.slice(0, 40) : null,
+        label: String(raw.label || "").trim().slice(0, 80),
+        region: String(raw.region || "").trim().slice(0, 40),
+      };
+      if (raw.sign === 1 || raw.sign === -1 || raw.sign === 0) entry.sign = raw.sign;
+      if (Array.isArray(raw.safeRange) && raw.safeRange.length === 2
+        && Number.isFinite(raw.safeRange[0]) && Number.isFinite(raw.safeRange[1])
+        && raw.safeRange[0] <= raw.safeRange[1]) {
+        entry.safeRange = [Number(raw.safeRange[0]), Number(raw.safeRange[1])];
+      }
+      if (Number.isFinite(raw.confidence))
+        entry.confidence = Math.max(0, Math.min(1, Number(raw.confidence)));
+      if (typeof raw.modelHash === "string") entry.modelHash = raw.modelHash.slice(0, 32);
+      entry.approvedAt = Date.now();
+      if (typeof raw.notes === "string" && raw.notes.trim())
+        entry.notes = raw.notes.trim().slice(0, 300);
+
+      sheet.probeApprovals.user[pid] = entry;
+      // Label kategori slider: label user > region evidensa.
+      const cat = entry.label || entry.region;
+      if (cat) sheet.paramGroups.user[pid] = cat;
+      saved.push({ paramId: pid, ...entry });
+    }
+
+    if (!saved.length) throw new Error("tidak ada entri valid");
+    sheet.schemaVersion = SHEET_SCHEMA_VERSION;
+    await persistSheet(sheet);
+    // Override role baru harus terlihat runtime + roleMap tanpa reload.
+    try { applyRoleOverrides(); } catch (e) { console.warn("[sheet] applyRoleOverrides gagal:", e); }
+    return saved;
+  }
+
+  async function removeProbeApproval(paramId) {
+    const pid = String(paramId || "").trim();
+    if (!pid) return false;
+    const sheet = await sheetForWrite();
+    if (!sheet.probeApprovals || !sheet.probeApprovals.user || !(pid in sheet.probeApprovals.user))
+      return false;
+    delete sheet.probeApprovals.user[pid];
+    if (sheet.paramGroups && sheet.paramGroups.user) delete sheet.paramGroups.user[pid];
+    sheet.schemaVersion = SHEET_SCHEMA_VERSION;
+    await persistSheet(sheet);
+    try { applyRoleOverrides(); } catch (e) { console.warn("[sheet] applyRoleOverrides gagal:", e); }
+    return true;
+  }
+
+  function getProbeApprovals() {
+    const sheet = state.lastSheet || loadCharacterSheet();
+    const pa = sheet && sheet.probeApprovals;
+    return (pa && pa.user && typeof pa.user === "object") ? pa.user : {};
+  }
+
+  // Override role dari layer user: {role: paramId} untuk entri ber-role.
+  // Validasi keanggotaan paramSet dilakukan di konsumen (mapRoles /
+  // applyRoleOverrides) — sumber di sini murni ekstraksi sheet.
+  function roleOverridesFromSheet(sheet) {
+    const out = {};
+    const pa = sheet && sheet.probeApprovals;
+    const user = pa && pa.user && typeof pa.user === "object" ? pa.user : {};
+    for (const pid of Object.keys(user)) {
+      const e = user[pid];
+      if (e && typeof e === "object" && typeof e.role === "string" && e.role)
+        out[e.role] = pid;
+    }
+    return out;
+  }
+
+  // Terapkan override role user (sheet v5) di atas peta role aktif. Dipanggil
+  // dari getCapabilityProfile (setelah sheet model ini termuat — jangan dari
+  // buildCaps: state.lastSheet bisa masih sheet model LAMA) dan dari
+  // approveProbeParams setelah simpan. Override diverifikasi ulang terhadap
+  // paramSet model aktif — id basi dari model lain tidak pernah bocor.
+  // Invariant mouthOpenY !== mouthForm dijaga ulang setelah merge (murah).
+  function applyRoleOverrides() {
+    const ov = roleOverridesFromSheet(state.lastSheet || loadCharacterSheet());
+    const valid = {};
+    if (state.modelParams instanceof Set) {
+      for (const role of Object.keys(ov)) {
+        if (state.modelParams.has(ov[role])) valid[role] = ov[role];
+        else
+          console.warn(
+            "[roles] override user ditolak (param tak dimiliki model):",
+            role,
+            "->",
+            ov[role],
+          );
+      }
+    }
+    if (Object.keys(valid).length) {
+      state.caps.ids = Object.assign({}, state.caps.ids, valid);
+      if (
+        state.caps.ids.mouthOpenY &&
+        state.caps.ids.mouthOpenY === state.caps.ids.mouthForm
+      ) {
+        delete state.caps.ids.mouthOpenY;
+        console.warn(
+          "[roles] override membuat mouthOpenY alias mouthForm — mouthOpenY dilepas",
+        );
+      }
+    }
+    // Runtime renderer membangun peta role sendiri (RoleController) — dorong
+    // subset yang tervalidasi; setRoleOverrides menangani rebuild murah.
+    try {
+      const v = window.__live2dView;
+      if (v && typeof v.setRoleOverrides === "function")
+        v.setRoleOverrides(valid);
+    } catch (e) {
+      console.warn("[roles] setRoleOverrides gagal:", e);
+    }
+    return Object.keys(valid).length;
   }
 
   async function refreshUserNoteUI() {
@@ -11101,6 +11048,9 @@
 
     hydrateCaps(sheet);
     state.lastSheet = sheet;
+    // Override role user (probeApprovals) di atas cache scan roleIds —
+    // setelah state.lastSheet terisi supaya sumbernya sheet model INI.
+    try { applyRoleOverrides(); } catch (e) {}
 
     projectEmotionPresets(sheet);
 

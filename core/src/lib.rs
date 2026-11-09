@@ -13,12 +13,14 @@
 pub mod agent;
 pub mod behavior;
 pub mod browser;
+pub mod chat_filter;
 pub mod config;
 pub mod companion_memory;
 pub mod director;
 pub mod expressions;
 pub mod jsonx;
 pub mod llm;
+pub mod llm_sched;
 pub mod media;
 pub mod mode;
 pub mod model;
@@ -33,6 +35,8 @@ pub mod motions;
 pub mod paths;
 pub mod pet;
 pub mod rescue;
+pub mod rig_report;
+pub mod motion_probe;
 pub mod sheet;
 pub mod sheet_ai;
 pub mod speech_lang;
@@ -92,6 +96,7 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/health", get(health))
         .route("/api/version", get(version))
         .route("/api/config", get(get_config).post(post_config))
+        .route("/api/llm/routing", get(get_llm_routing))
         .route("/api/test", axum::routing::post(post_test))
         .route("/api/chat", axum::routing::post(post_chat))
         .route("/api/chat-stream", axum::routing::post(post_chat_stream))
@@ -141,6 +146,8 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/assistant/cancel", axum::routing::post(post_assistant_cancel))
         .route("/api/assistant/events", get(get_assistant_events))
         .route("/api/assistant/undo", get(get_assistant_undo))
+        .route("/api/assistant/runs", get(get_assistant_runs))
+        .route("/api/assistant/runs/{id}", get(get_assistant_run_detail))
         .route("/api/assistant/revert", axum::routing::post(post_assistant_revert))
         .route("/api/assistant/quip", axum::routing::post(post_assistant_quip))
         .route("/api/assistant/modify", axum::routing::post(post_assistant_modify))
@@ -170,6 +177,8 @@ pub fn router(paths: AppPaths) -> Router {
         .route("/api/model/expressions", get(get_expressions))
         .route("/api/model/motions", get(get_motions))
         .route("/api/model/motion-analysis", get(get_motion_analysis))
+        .route("/api/model/rig-report", get(get_rig_report))
+        .route("/api/model/probe", axum::routing::post(post_model_probe))
         .route(
             "/api/model/expressions-adoption",
             get(get_adoption).post(post_adoption),
@@ -216,6 +225,19 @@ async fn version(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
 /// GET /api/config — apiKey dimask, roles dinormalisasi (padanan handler TS).
 async fn get_config(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
     Json(config::api_config_response(&paths.data_dir.join("config.json")))
+}
+
+/// GET /api/llm/routing — rencana routing per role (urutan + alasan), untuk UI
+/// API Management. Read-only; sumbernya `llm::routing_plan` (sama dengan runtime).
+async fn get_llm_routing(State(paths): State<AppPaths>) -> Json<serde_json::Value> {
+    let cfg = config::load(&paths.data_dir.join("config.json"));
+    let conns: Vec<serde_json::Value> = cfg.get("connections").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let roles: Vec<serde_json::Value> = config::LLM_ROLES
+        .iter()
+        .map(|r| llm::routing_plan(r, &conns, now))
+        .collect();
+    Json(json!({ "roles": roles }))
 }
 
 /// POST /api/config — action add/update/delete/setActive/saveEvents/saveTTS/
@@ -431,14 +453,34 @@ async fn post_tts_translate(State(paths): State<AppPaths>, body: axum::body::Byt
 }
 
 /// POST /api/assistant/start {workDir?, persona?}.
-async fn post_assistant_start(body: axum::body::Bytes) -> Response {
+async fn post_assistant_start(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let wd = v.get("workDir").and_then(|x| x.as_str()).unwrap_or("");
     // Konteks tool motion: model aktif + peta role→paramId dari klien
     // (sumber inferensi role tetap role-mapping.ts; server hanya melipat).
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("");
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
-    json_status(StatusCode::OK, agent::assistant::start(wd, model, role_map).await)
+    let mut out = agent::assistant::start(wd, model, role_map).await;
+    // Sesi run aplikasi: app dibuka = sesi agent baru. Dibuat lazy saat
+    // permukaan pertama menyentuh agent (start panel / hand-off chat), dan
+    // hanya bila runtime belum terikat sesi manual pilihan user di rail.
+    if agent::assistant::bound_session().await.is_empty() {
+        let run = agent::sessions::ensure_run_session(&paths.data_dir);
+        if let Some(id) = run.get("id").and_then(|i| i.as_str()) {
+            match agent::assistant::bind_session(&paths.data_dir, id).await {
+                Ok(_) => { out["sessionId"] = json!(id); }
+                Err(e) => { out["sessionWarning"] = json!(e); }
+            }
+        }
+    } else {
+        // Sudah terikat (masuk mode Assistant ke-N): hydrate ulang transcript
+        // dari store — stop() mengosongkan history runtime, sesi tidak.
+        let bound = agent::assistant::bound_session().await;
+        if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &bound).await {
+            out["sessionWarning"] = json!(e);
+        }
+    }
+    json_status(StatusCode::OK, out)
 }
 
 /// GET /api/assistant/status.
@@ -451,7 +493,9 @@ async fn post_assistant_stop() -> Response {
     json_status(StatusCode::OK, agent::assistant::stop().await)
 }
 
-/// POST /api/assistant/ask {text} — jalankan tugas agent (loop penuh).
+/// POST /api/assistant/ask {text, session?} — jalankan tugas agent (loop penuh).
+/// `session:"run"` (dari hand-off chat/panggung) → runtime berlabuh ke sesi
+/// run aplikasi dulu; tanpa field → lanjut di sesi terikat saat ini (panel).
 async fn post_assistant_ask(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     // Konteks motion di-refresh tiap ask (model bisa dimuat/ganti setelah panel hidup).
@@ -459,10 +503,13 @@ async fn post_assistant_ask(State(paths): State<AppPaths>, body: axum::body::Byt
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     agent::assistant::set_model_context(model, role_map).await;
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+    let session = v.get("session").and_then(|x| x.as_str());
     let cfg = paths.data_dir.join("config.json");
-    let r = agent::assistant::ask(&cfg, &paths.root, text).await;
+    let r = agent::assistant::ask(&cfg, &paths.root, &paths.data_dir, text, session).await;
     if r.ok {
-        json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused }))
+        // speak = versi tersanitasi untuk diucapkan companion (alur respons
+        // #3–#4); kosong bila tidak perlu diucapkan (mis. tugas greeting).
+        json_status(StatusCode::OK, json!({ "reply": r.reply, "speak": r.speak, "paused": r.paused, "sessionId": agent::assistant::bound_session().await }))
     } else {
         json_status(StatusCode::BAD_GATEWAY, json!({ "error": r.error.unwrap_or_default() }))
     }
@@ -479,19 +526,26 @@ async fn post_assistant_ask_stream(State(paths): State<AppPaths>, body: axum::bo
 
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let session = v.get("session").and_then(|x| x.as_str()).map(|s| s.to_string());
     // Konteks motion di-refresh tiap ask (model bisa dimuat/ganti setelah panel hidup).
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     agent::assistant::set_model_context(&model, role_map).await;
     let cfg = paths.data_dir.join("config.json");
     let root = paths.root.clone();
+    let data_dir = paths.data_dir.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let r = agent::assistant::ask(&cfg, &root, &text).await;
+        let r = agent::assistant::ask(&cfg, &root, &data_dir, &text, session.as_deref()).await;
         // Frame SSE WAJIB ber-field "type" — kontrak stream.ts (AsSseEvent):
         // parser panel membuang frame tanpa type, jadi dulu seluruh streaming
         // mati diam-diam dan panel hidup dari hydrate history saja.
         if r.ok {
+            if !r.speak.is_empty() {
+                // Narasi laporan akhir oleh companion (alur respons #3) —
+                // versi tersanitasi; jawaban penuh tetap lewat delta/reply.
+                let _ = tx.send(json!({ "type": "speak", "text": r.speak }).to_string());
+            }
             if !r.reply.is_empty() {
                 let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
@@ -511,7 +565,7 @@ async fn post_assistant_approve(State(paths): State<AppPaths>, body: axum::body:
     let approve_it = v.get("approve").and_then(|x| x.as_bool()).unwrap_or(false);
     let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
-    let r = agent::assistant::approve(&cfg, &paths.root, id, approve_it, always).await;
+    let r = agent::assistant::approve(&cfg, &paths.root, &paths.data_dir, id, approve_it, always).await;
     if r.ok {
         json_status(StatusCode::OK, json!({ "reply": r.reply, "paused": r.paused }))
     } else {
@@ -533,11 +587,15 @@ async fn post_assistant_approve_stream(State(paths): State<AppPaths>, body: axum
     let always = v.get("always").and_then(|x| x.as_bool()).unwrap_or(false);
     let cfg = paths.data_dir.join("config.json");
     let root = paths.root.clone();
+    let data_dir = paths.data_dir.clone();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {
-        let r = agent::assistant::approve(&cfg, &root, &id, approve_it, always).await;
+        let r = agent::assistant::approve(&cfg, &root, &data_dir, &id, approve_it, always).await;
         // Kontrak sama dengan ask-stream: frame ber-type (lihat stream.ts).
         if r.ok {
+            if !r.speak.is_empty() {
+                let _ = tx.send(json!({ "type": "speak", "text": r.speak }).to_string());
+            }
             if !r.reply.is_empty() {
                 let _ = tx.send(json!({ "type": "delta", "text": r.reply }).to_string());
             }
@@ -555,12 +613,15 @@ async fn get_assistant_history() -> Json<serde_json::Value> {
     Json(agent::assistant::history().await)
 }
 
-/// POST /api/assistant/quip {persona?, event?} — komentar berkarakter singkat.
+/// POST /api/assistant/quip {persona?, event? | ackType?, input?} — mode
+/// reaksi (label langkah) atau mode ack (konfirmasi pembuka per jenis tugas).
 async fn post_assistant_quip(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let persona = v.get("persona").and_then(|x| x.as_str()).unwrap_or("");
     let event = v.get("event").and_then(|x| x.as_str()).unwrap_or("");
-    let out = agent::assistant::quip(&paths.data_dir.join("config.json"), persona, event).await;
+    let ack_type = v.get("ackType").and_then(|x| x.as_str()).unwrap_or("");
+    let input = v.get("input").and_then(|x| x.as_str()).unwrap_or("");
+    let out = agent::assistant::quip(&paths.data_dir.join("config.json"), persona, event, ack_type, input).await;
     json_status(StatusCode::OK, out)
 }
 
@@ -569,7 +630,7 @@ async fn post_assistant_modify(State(paths): State<AppPaths>, body: axum::body::
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let task_id = v.get("taskId").and_then(|x| x.as_str()).unwrap_or("");
     let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
-    let out = agent::assistant::modify(&paths.data_dir.join("config.json"), &paths.root, task_id, text).await;
+    let out = agent::assistant::modify(&paths.data_dir.join("config.json"), &paths.root, &paths.data_dir, task_id, text).await;
     let ok = out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     json_status(if ok { StatusCode::OK } else { StatusCode::BAD_REQUEST }, out)
 }
@@ -597,6 +658,21 @@ async fn get_assistant_events(uri: Uri) -> Json<serde_json::Value> {
 /// GET /api/assistant/undo — daftar snapshot mutasi.
 async fn get_assistant_undo() -> Json<serde_json::Value> {
     Json(json!({ "entries": agent::assistant::undo_list().await }))
+}
+
+/// GET /api/assistant/runs?limit=&q= — daftar run observability (terbaru dulu).
+async fn get_assistant_runs(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Json<serde_json::Value> {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(20);
+    let query = q.get("q").map(|s| s.as_str()).filter(|s| !s.trim().is_empty());
+    Json(json!({ "runs": agent::store::runs(limit, query) }))
+}
+
+/// GET /api/assistant/runs/{id} — detail run + tool execs + plan steps.
+async fn get_assistant_run_detail(axum::extract::Path(id): axum::extract::Path<i64>) -> Response {
+    match agent::store::run_detail(id) {
+        Some(v) => axum::response::IntoResponse::into_response(Json(v)),
+        None => json_status(StatusCode::NOT_FOUND, json!({ "ok": false, "error": format!("run tidak dikenal: {id}") })),
+    }
 }
 
 /// POST /api/assistant/revert {id} — kembalikan file ke snapshot.
@@ -723,34 +799,59 @@ async fn get_sessions(State(paths): State<AppPaths>) -> Json<serde_json::Value> 
     Json(agent::sessions::list(&paths.data_dir))
 }
 
-/// POST /api/assistant/sessions/new {workDir?} — buat sesi baru.
+/// POST /api/assistant/sessions/new {workDir?} — buat sesi baru dan LANGSUNG
+/// ikatkan ke runtime (transcript panel berlanjut di sesi ini). Ditolak saat
+/// tugas berjalan (kontrak MODES.md).
 async fn post_sessions_new(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let work_dir = v.get("workDir").and_then(|x| x.as_str()).unwrap_or("");
     let rec = agent::sessions::create(&paths.data_dir, work_dir);
+    let id = rec.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &id).await {
+        return json_status(StatusCode::CONFLICT, json!({ "error": e, "session": rec }));
+    }
     json_status(StatusCode::OK, json!({ "ok": true, "session": rec }))
 }
 
-/// POST /api/assistant/sessions/switch {id}.
+/// POST /api/assistant/sessions/switch {id} — pindah sesi aktif DAN ikatkan ke
+/// runtime (history hydrate dari store; panel meng-hydrate ulang transcript
+/// via event `agent:session-changed`). Ditolak saat tugas berjalan.
 async fn post_sessions_switch(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    match agent::sessions::switch_to(&paths.data_dir, id) {
-        Some(rec) => json_status(StatusCode::OK, json!({ "ok": true, "session": rec })),
-        None => json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" })),
+    if agent::sessions::switch_to(&paths.data_dir, id).is_none() {
+        return json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }));
+    }
+    match agent::assistant::bind_session(&paths.data_dir, id).await {
+        Ok(_) => json_status(StatusCode::OK, json!({ "ok": true })),
+        Err(e) => json_status(StatusCode::CONFLICT, json!({ "error": e })),
     }
 }
 
-/// POST /api/assistant/sessions/delete {id}.
+/// POST /api/assistant/sessions/delete {id} — hapus sesi. Menghapus sesi yang
+/// SEDANG terikat runtime butuh slot kosong (task tidak sedang menulis ke
+/// sana); runtime pindah ke sesi aktif pengganti (hydrate) atau lepas bila
+/// store kosong.
 async fn post_sessions_delete(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
     let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
-    let (ok, new_active) = agent::sessions::remove(&paths.data_dir, id);
-    if ok {
-        json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active }))
-    } else {
-        json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }))
+    if agent::assistant::bound_session().await == id && agent::assistant::is_busy().await {
+        return json_status(StatusCode::CONFLICT, json!({ "error": "tugas sedang berjalan — sesi aktif tidak bisa dihapus sekarang" }));
     }
+    let (ok, new_active) = agent::sessions::remove(&paths.data_dir, id);
+    if !ok {
+        return json_status(StatusCode::NOT_FOUND, json!({ "error": "sesi tidak ada" }));
+    }
+    if agent::assistant::bound_session().await == id {
+        if new_active.is_empty() {
+            agent::assistant::unbind_session().await;
+        } else if let Err(e) = agent::assistant::bind_session(&paths.data_dir, &new_active).await {
+            // Store sudah terhapus; pindah ikatan gagal (kasus nyaris mustahil
+            // karena tidak busy di cek di atas) → lapangkan sebagai warning.
+            return json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active, "warning": e }));
+        }
+    }
+    json_status(StatusCode::OK, json!({ "ok": true, "newActive": new_active }))
 }
 
 /// GET /api/mode — status mode (kunci "active" dipakai probe shell Tauri).
@@ -1095,7 +1196,21 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
 
     // channel: kirim event JSON string ke SSE.
     let (ev_tx, ev_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Klien SSE putus → ev_rx di-drop → send gagal → token batal ke LLM.
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    {
+        // Pantau putusnya klien langsung, bukan hanya saat delta gagal kirim:
+        // sebelum token pertama LLM tidak mengirim apa pun, jadi tanpa ini
+        // request tetap jalan sampai selesai walau user sudah Stop.
+        let watch_tx = ev_tx.clone();
+        let cancel_watch = cancel_tx.clone();
+        tokio::spawn(async move {
+            watch_tx.closed().await;
+            let _ = cancel_watch.send(true);
+        });
+    }
     tokio::spawn(async move {
+        let mut cancel_rx = cancel_rx;
         let cfg = config::load(&cfg_path);
         let conns: Vec<serde_json::Value> = cfg.get("connections").and_then(|x| x.as_array()).cloned().unwrap_or_default();
         let mut order = llm::order_for_role("chat", &conns);
@@ -1124,17 +1239,21 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
             let sysc = system.clone();
             // jalankan LLM stream; forward token → SSE selagi datang.
             let ev_tx2 = ev_tx.clone();
+            let cancel_tx2 = cancel_tx.clone();
             let forwarder = tokio::spawn(async move {
                 while let Some(tok) = tok_rx.recv().await {
-                    let _ = ev_tx2.send(json!({ "delta": tok }).to_string());
+                    if ev_tx2.send(json!({ "type": "delta", "text": tok }).to_string()).is_err() {
+                        let _ = cancel_tx2.send(true);
+                        break;
+                    }
                 }
             });
-            let res = llm::call_llm_stream(&conn, &msgs, &sysc, &tok_tx).await;
+            let res = llm::call_llm_stream_retry(&conn, &msgs, &sysc, &tok_tx, &mut cancel_rx).await;
             drop(tok_tx);
             let _ = forwarder.await;
             match res {
                 Ok(full) => {
-                    let _ = ev_tx.send(json!({ "done": true, "reply": full }).to_string());
+                    let _ = ev_tx.send(json!({ "type": "done", "ok": true, "reply": full }).to_string());
                     emitted_any = true;
                     break;
                 }
@@ -1146,7 +1265,7 @@ async fn post_chat_stream(State(paths): State<AppPaths>, body: axum::body::Bytes
             }
         }
         if !emitted_any {
-            let _ = ev_tx.send(json!({ "done": true, "error": last_err }).to_string());
+            let _ = ev_tx.send(json!({ "type": "done", "ok": false, "error": last_err }).to_string());
         }
     });
 
@@ -1284,7 +1403,26 @@ async fn get_motion_analysis(
     }
 }
 
-/// GET /api/model/expressions-adoption?name=X — ekspresi + flag enabled.
+/// GET /api/model/rig-report?name=X — TAMBahan: rig report ringan (provenance + model hash + unclassified).
+async fn get_rig_report(
+    State(paths): State<AppPaths>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let name = q.get("name").map(String::as_str).unwrap_or("");
+    match rig_report::analyze(&paths.model_dir, &paths.data_dir, name) {
+        Ok(v) => json_status(StatusCode::OK, v),
+        Err(e) => json_status(StatusCode::NOT_FOUND, json!({ "error": e })),
+    }
+}
+
+/// POST /api/model/probe {model, params?: [id]} — sweep param di harness
+/// (settle physics + capture + metrik diff) + cross-check VLM per param.
+async fn post_model_probe(State(paths): State<AppPaths>, body: axum::body::Bytes) -> Response {
+    let v = serde_json::from_slice::<serde_json::Value>(&body).unwrap_or(json!({}));
+    let (status, out) = motion_probe::probe(&paths.data_dir.join("config.json"), &paths.root, &v).await;
+    json_raw(status, out)
+}
+
 async fn get_adoption(
     State(paths): State<AppPaths>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -1494,7 +1632,7 @@ async fn post_motions_verify(State(paths): State<AppPaths>, body: axum::body::By
     let model = v.get("model").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
     let role_map = v.get("roleMap").cloned().unwrap_or(serde_json::Value::Null);
     let intent = v.get("intent").and_then(|x| x.as_str()).unwrap_or("");
-    match motion_vision::verify(&paths.data_dir.join("config.json"), &paths.root, &model, &role_map, motion, intent).await {
+    match motion_vision::verify(&paths.data_dir.join("config.json"), &paths.root, &model, &role_map, motion, intent, None).await {
         Ok(v) => json_status(StatusCode::OK, v),
         Err(e) => json_status(StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": e })),
     }
@@ -1830,6 +1968,9 @@ mod tests {
     async fn parity_rute_klien_terklaim() {
         // Padanan "is handled by the dispatcher" (44 test TS) — satu tabel,
         // tiap rute klien harus dikenali router (bukan penanda unknown).
+        // POST /api/assistant/start kini IKAT sesi run ke runtime global —
+        // kunci test assistant supaya mutasi itu tidak menyeberang test.
+        let _g = crate::agent::bus::BUS_TEST_LOCK.lock().unwrap();
         let cases: Vec<(&str, &str, Option<Value>)> = vec![
             ("POST", "/api/chat", Some(json!({"messages":[{"role":"user","content":"hai"}]}))),
             ("POST", "/api/tts", Some(json!({"text":""}))),
@@ -1864,6 +2005,7 @@ mod tests {
             ("POST", "/api/mode", Some(json!({"mode":"stage"}))),
             ("GET", "/api/pet/state", None),
             ("GET", "/api/browser/status", None),
+            ("GET", "/api/llm/routing", None),
             ("GET", "/api/assistant/status", None),
             ("GET", "/api/assistant/history", None),
             ("GET", "/api/assistant/events?since=0", None),

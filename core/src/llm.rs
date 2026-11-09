@@ -9,6 +9,14 @@ use serde_json::{json, Value};
 use crate::config;
 
 const DEFAULT_TIMEOUT_S: u64 = 60;
+/// Timeout TOTAL per percobaan untuk role `assistant` (loop agent). Dulu 60s
+/// flat: model reasoning yang lama berpikir (atau draft JSON tool panjang)
+/// selalu mati timeout lalu di-retry scheduler — membakar anggaran panggilan
+/// tanpa hasil. 300s masih di bawah deadline per-panggilan agent (10 menit).
+const AGENT_TIMEOUT_S: u64 = 300;
+/// Deadline keseluruhan (semua percobaan + tunggu) untuk role `assistant` —
+/// longgar untuk satu percobaan 300s + sisa waktu fallback/retry koneksi lain.
+const AGENT_DEADLINE_MS: u64 = 10 * 60 * 1000;
 
 /// Pesan chat sederhana.
 #[derive(Clone)]
@@ -38,6 +46,8 @@ pub struct LlmImage {
 /// koneksi (wildcard tidak dipakai) agar gambar tidak pernah terkirim ke
 /// model teks. Model di koneksi itu sendiri harus mendukung input gambar.
 pub const ROLE_MOTION_VISION: &str = "motion-vision";
+/// Role moderasi komentar (chat_filter.rs) — juga dipakai jalur SystemOne.
+pub const ROLE_MODERATION: &str = "moderation";
 
 fn default_model(provider: &str) -> &'static str {
     match provider {
@@ -65,6 +75,26 @@ fn clean_key(k: &str) -> String {
 pub struct LlmError {
     pub status: u16,
     pub message: String,
+    /// Dari header `Retry-After` bila provider mengirimnya (milidetik).
+    pub retry_after_ms: Option<u64>,
+}
+
+impl LlmError {
+    pub fn new(status: u16, message: String) -> Self {
+        Self { status, message, retry_after_ms: None }
+    }
+}
+
+/// Ambil `Retry-After` dari respons (sebelum body dikonsumsi).
+pub(crate) fn retry_after_of(resp: &reqwest::Response) -> Option<u64> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| crate::llm_sched::parse_retry_after(s, now_ms))
 }
 
 /// Error transient jaringan (bukan kuota/auth): koneksi putus, timeout, atau
@@ -200,22 +230,21 @@ pub async fn call_systemone(conn: &Value, state: &Value, questions: &Value) -> R
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_S))
         .build()
-        .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+        .map_err(|e| LlmError::new(0, e.to_string()))?;
     let mut req = client
         .post(format!("{base}/v1/systemone"))
         .header("Content-Type", "application/json");
     if !api_key.is_empty() {
         req = req.header("Authorization", format!("Bearer {api_key}"));
     }
-    let resp = req.json(&body).send().await.map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+    let resp = req.json(&body).send().await.map_err(|e| LlmError::new(0, e.to_string()))?;
     let status = resp.status().as_u16();
     let text = resp.text().await.unwrap_or_default();
     if status >= 400 {
-        return Err(LlmError { status, message: text.chars().take(300).collect() });
+        return Err(LlmError::new(status, text.chars().take(300).collect()));
     }
-    serde_json::from_str(&text).map_err(|_| LlmError {
-        status,
-        message: format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>()),
+    serde_json::from_str(&text).map_err(|_| {
+        LlmError::new(status, format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>()))
     })
 }
 
@@ -227,11 +256,21 @@ pub async fn systemone_probe(conn: &Value) -> Result<String, LlmError> {
     Ok(j.get("model").and_then(|v| v.as_str()).unwrap_or("ok").to_string())
 }
 
+/// Budget output efektif: nilai koneksi, dinaikkan ke `min` bila di bawahnya
+/// (tidak pernah DITURUNKAN — pilihan user tetap dihormati bila lebih besar).
+/// Floor 8192 dipakai role `assistant` (loop agent): draft JSON tool (motion
+/// dkk.) dan reasoning model murah (DeepSeek-R1/Qwen-think) gampang melampaui
+/// default 2048 — JSON terpotong di tengah = panggilan tool gagal parse.
+pub(crate) fn effective_max_tokens(conn: &Value, min: u64) -> u64 {
+    let t = conn.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(2048);
+    t.max(min)
+}
+
 /// Panggil satu koneksi LLM (non-stream). Return teks balasan atau LlmError.
 /// `images` (opsional) ditempel ke pesan user terakhir — kosong = jalur teks
 /// murni byte-identical dengan sebelumnya.
 pub async fn call_llm(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage]) -> Result<String, LlmError> {
-    call_llm_tools(conn, messages, client_system, images, &[]).await
+    call_llm_tools(conn, messages, client_system, images, &[], 0, DEFAULT_TIMEOUT_S).await
 }
 
 /// Koneksi yang pernah MENOLAK param `tools` (server OpenAI-shape tanpa
@@ -260,6 +299,15 @@ fn tandai_native_tools_ditolak(key: &str) {
 fn server_menolak_param_tools(body: &str) -> bool {
     let l = body.to_lowercase();
     ["tools is not supported", "tool_choice is not supported", "does not support tools", "does not support function", "function calling is not supported", "unknown field: tools", "unknown parameter: tools", "unrecognized request argument", "extra_forbidden", "tools.unsupported"]
+        .iter()
+        .any(|t| l.contains(t))
+}
+
+/// 400 karena budget output melebihi batas model (floor 8192 bisa melampaui
+/// model lama/kecil) → layak diulang dengan max_tokens lebih kecil.
+fn budget_output_ditolak(body: &str) -> bool {
+    let l = body.to_lowercase();
+    ["max_tokens", "max output token", "context length", "maximum context", "too large", "reduce the length"]
         .iter()
         .any(|t| l.contains(t))
 }
@@ -346,7 +394,10 @@ pub(crate) fn salvage_tool_call_from_error(body: &str) -> Option<String> {
 /// dikonversi ke `TOOL: …` kanonik. Model protokol-teks tetap bisa memakai
 /// `TOOL: …` di content. Provider yang menolak param `tools` dicoba ulang
 /// tanpa `tools` sekali lalu diingat (kompatibilitas universal).
-pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage], tools: &[Value]) -> Result<String, LlmError> {
+/// `min_max_tokens` = floor budget output (0 = default 2048; role assistant
+/// memakai 8192 — lihat `effective_max_tokens`). `timeout_s` = timeout TOTAL
+/// per percobaan (pemanggil memilih: 60s jalur biasa, 300s loop agent).
+pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_system: &str, images: &[LlmImage], tools: &[Value], min_max_tokens: u64, timeout_s: u64) -> Result<String, LlmError> {
     let provider = conn.get("provider").and_then(|v| v.as_str()).unwrap_or("openai-compatible").to_lowercase();
     let api_key = clean_key(conn.get("apiKey").and_then(|v| v.as_str()).unwrap_or(""));
     let model = {
@@ -354,7 +405,7 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
         if m.is_empty() { default_model(&provider).to_string() } else { m.to_string() }
     };
     let temp = conn.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.8);
-    let max_t = conn.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(2048);
+    let max_t = effective_max_tokens(conn, min_max_tokens);
     let sys = {
         let sp = conn.get("systemPrompt").and_then(|v| v.as_str()).unwrap_or("");
         [sp, client_system].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n\n")
@@ -371,9 +422,9 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_S))
+        .timeout(std::time::Duration::from_secs(timeout_s.max(1)))
         .build()
-        .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+        .map_err(|e| LlmError::new(0, e.to_string()))?;
 
     if provider == "openai-compatible" || provider == "groq" || provider == "openai" {
         let base = match provider.as_str() {
@@ -382,7 +433,7 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
             _ => {
                 let b = conn.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('/').to_string();
                 if b.is_empty() {
-                    return Err(LlmError { status: 0, message: "baseUrl belum diisi untuk openai-compatible".into() });
+                    return Err(LlmError::new(0, "baseUrl belum diisi untuk openai-compatible".into()));
                 }
                 b
             }
@@ -391,6 +442,9 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
         let key = no_tools_key(conn);
         // `tools` native: kirim bila ada katalog & koneksi tidak pernah menolak.
         let mut with_tools = !tools.is_empty() && !native_tools_ditolak(&key);
+        // Budget output bisa diturunkan SEKALI bila provider menolak nilai
+        // floor (model lama/kecil berbatas 4096).
+        let mut max_t_now = max_t;
         loop {
             let mut msgs_val = msgs_val.clone();
             attach_images(&mut msgs_val, images, "openai");
@@ -398,7 +452,7 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
                 "model": model,
                 "messages": msgs_val,
                 "temperature": temp,
-                "max_tokens": max_t,
+                "max_tokens": max_t_now,
                 "stream": false
             });
             if with_tools {
@@ -411,8 +465,9 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+                .map_err(|e| LlmError::new(0, e.to_string()))?;
             let status = resp.status().as_u16();
+            let retry_after = retry_after_of(&resp);
             let text = resp.text().await.unwrap_or_default();
             if status >= 400 {
                 // 1) Generation native tool-call ditolak provider tapi JSON-nya
@@ -427,9 +482,26 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
                     with_tools = false;
                     continue;
                 }
-                return Err(LlmError { status, message: text.chars().take(300).collect() });
+                // 3) Floor budget output melampaui batas model → turunkan
+                //    sekali (8192→4096) lalu ulang; penolakan kedua = gagal jujur.
+                if max_t_now > 4096 && budget_output_ditolak(&text) {
+                    max_t_now = 4096;
+                    continue;
+                }
+                return Err(LlmError {
+                    retry_after_ms: retry_after,
+                    ..LlmError::new(status, text.chars().take(300).collect())
+                });
             }
-            let j: Value = serde_json::from_str(&text).map_err(|_| LlmError { status, message: format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>()) })?;
+            // Parse tahan-banting: sebagian router/proxy menempel sampah di
+            // akhir body (mis. `data: [DONE]` SSE menempel ke JSON utuh) —
+            // parser ketat menolak SELURUH respons padahal JSON-nya sehat.
+            // jsonx::extract_json mengambil objek seimbang pertama.
+            let j: Value = match serde_json::from_str::<Value>(&text) {
+                Ok(v) => v,
+                Err(_) => crate::jsonx::extract_json(&text)
+                    .map_err(|_| LlmError::new(status, format!("respon bukan JSON: {}", text.chars().take(200).collect::<String>())))?,
+            };
             // Native function-calling: model memanggil tool lewat jalur resmi
             // provider → konversi ke baris `TOOL: …` kanonik untuk loop agent.
             if let Some(reply) = j.pointer("/choices/0/message").and_then(tool_calls_to_reply) {
@@ -448,7 +520,7 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
                     .unwrap_or("");
             }
             if content.trim().is_empty() {
-                return Err(LlmError { status, message: format!("{provider} kosong: {}", text.chars().take(200).collect::<String>()) });
+                return Err(LlmError::new(status, format!("{provider} kosong: {}", text.chars().take(200).collect::<String>())));
             }
             return Ok(content.trim().to_string());
         }
@@ -468,17 +540,20 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
         if !sys.is_empty() {
             body["systemInstruction"] = json!({ "parts": [{ "text": sys }] });
         }
-        let resp = client.post(url).json(&body).send().await.map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+        let resp = client.post(url).json(&body).send().await.map_err(|e| LlmError::new(0, e.to_string()))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if status >= 400 {
-            return Err(LlmError { status, message: text.chars().take(300).collect() });
+            return Err(LlmError::new(status, text.chars().take(300).collect()));
         }
-        let j: Value = serde_json::from_str(&text).map_err(|_| LlmError { status, message: "respon bukan JSON".into() })?;
+        let j: Value = match serde_json::from_str::<Value>(&text) {
+            Ok(v) => v,
+            Err(_) => crate::jsonx::extract_json(&text).map_err(|_| LlmError::new(status, "respon bukan JSON".into()))?,
+        };
         let parts = j.pointer("/candidates/0/content/parts").and_then(|v| v.as_array());
         let content: String = parts.map(|arr| arr.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<String>()).unwrap_or_default();
         if content.is_empty() {
-            return Err(LlmError { status, message: "Gemini kosong".into() });
+            return Err(LlmError::new(status, "Gemini kosong".into()));
         }
         return Ok(content.trim().to_string());
     }
@@ -497,21 +572,79 @@ pub async fn call_llm_tools(conn: &Value, messages: &[ChatMessage], client_syste
             .json(&body)
             .send()
             .await
-            .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+            .map_err(|e| LlmError::new(0, e.to_string()))?;
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if status >= 400 {
-            return Err(LlmError { status, message: text.chars().take(300).collect() });
+            return Err(LlmError::new(status, text.chars().take(300).collect()));
         }
-        let j: Value = serde_json::from_str(&text).map_err(|_| LlmError { status, message: "respon bukan JSON".into() })?;
+        let j: Value = match serde_json::from_str::<Value>(&text) {
+            Ok(v) => v,
+            Err(_) => crate::jsonx::extract_json(&text).map_err(|_| LlmError::new(status, "respon bukan JSON".into()))?,
+        };
         let content: String = j.get("content").and_then(|v| v.as_array()).map(|arr| arr.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect()).unwrap_or_default();
         if content.is_empty() {
-            return Err(LlmError { status, message: "Anthropic kosong".into() });
+            return Err(LlmError::new(status, "Anthropic kosong".into()));
         }
         return Ok(content.trim().to_string());
     }
 
-    Err(LlmError { status: 0, message: format!("provider tidak dikenal: {provider}") })
+    Err(LlmError::new(0, format!("provider tidak dikenal: {provider}")))
+}
+
+/// Streaming dengan retry HANYA sebelum token pertama terkirim. Begitu ada
+/// delta yang sampai ke `tx`, error tidak lagi diulang diam-diam (user sudah
+/// melihat sebagian teks).
+pub async fn call_llm_stream_retry(
+    conn: &Value,
+    messages: &[ChatMessage],
+    client_system: &str,
+    tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<String, LlmError> {
+    use crate::llm_sched::{decide_with_cap, Decision, DEFAULT_DEADLINE_MS, MAX_ATTEMPTS};
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(DEFAULT_DEADLINE_MS);
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        // Penghitung delta: dibaca sebagai "sudah ada teks ke user?".
+        let (probe_tx, mut probe_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let forward_tx = tx.clone();
+        let sent = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sent2 = sent.clone();
+        let fwd = tokio::spawn(async move {
+            while let Some(tok) = probe_rx.recv().await {
+                sent2.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = forward_tx.send(tok);
+            }
+        });
+        let res = call_llm_stream(conn, messages, client_system, &probe_tx, cancel).await;
+        drop(probe_tx);
+        let _ = fwd.await;
+        let err = match res {
+            Ok(full) => return Ok(full),
+            Err(e) => e,
+        };
+        if sent.load(std::sync::atomic::Ordering::SeqCst) || err.status == 499 {
+            return Err(err);
+        }
+        let transient = is_transient(err.status, &err.message) || err.status == 429;
+        let salt = attempt as u64 ^ 0x5bd1;
+        let wait = match decide_with_cap(attempt, transient, err.retry_after_ms, salt, MAX_ATTEMPTS) {
+            Decision::GiveUp => return Err(err),
+            Decision::RetryAfter(ms) => ms,
+        };
+        if std::time::Instant::now() + std::time::Duration::from_millis(wait) > deadline {
+            return Err(err);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(wait)) => {}
+            _ = crate::llm_sched::wait_cancel(cancel) => {
+                return Err(LlmError::new(499, "dibatalkan".into()));
+            }
+        }
+    }
 }
 
 /// Streaming: kirim delta teks lewat `tx` selagi mengalir, kembalikan teks
@@ -523,9 +656,13 @@ pub async fn call_llm_stream(
     messages: &[ChatMessage],
     client_system: &str,
     tx: &tokio::sync::mpsc::UnboundedSender<String>,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<String, LlmError> {
     use futures_util::StreamExt;
 
+    if *cancel.borrow() {
+        return Err(LlmError::new(499, "dibatalkan".into()));
+    }
     let provider = conn.get("provider").and_then(|v| v.as_str()).unwrap_or("openai-compatible").to_lowercase();
     if provider != "openai-compatible" && provider != "groq" && provider != "openai" {
         // provider tanpa jalur stream → satu delta.
@@ -550,7 +687,7 @@ pub async fn call_llm_stream(
         _ => {
             let b = conn.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").trim_end_matches('/').to_string();
             if b.is_empty() {
-                return Err(LlmError { status: 0, message: "baseUrl belum diisi untuk openai-compatible".into() });
+                return Err(LlmError::new(0, "baseUrl belum diisi untuk openai-compatible".into()));
             }
             b
         }
@@ -567,18 +704,18 @@ pub async fn call_llm_stream(
     let client = reqwest::Client::builder()
         .read_timeout(std::time::Duration::from_secs(DEFAULT_TIMEOUT_S))
         .build()
-        .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+        .map_err(|e| LlmError::new(0, e.to_string()))?;
     let resp = client
         .post(format!("{base}/chat/completions"))
         .header("Authorization", format!("Bearer {api_key}"))
         .json(&body)
         .send()
         .await
-        .map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+        .map_err(|e| LlmError::new(0, e.to_string()))?;
     let status = resp.status().as_u16();
     if status >= 400 {
         let t = resp.text().await.unwrap_or_default();
-        return Err(LlmError { status, message: t.chars().take(200).collect() });
+        return Err(LlmError::new(status, t.chars().take(200).collect()));
     }
 
     let mut stream = resp.bytes_stream();
@@ -617,8 +754,17 @@ pub async fn call_llm_stream(
             }
         }
     };
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| LlmError { status: 0, message: e.to_string() })?;
+    loop {
+        let chunk = tokio::select! {
+            c = stream.next() => match c {
+                Some(c) => c,
+                None => break,
+            },
+            _ = crate::llm_sched::wait_cancel(cancel) => {
+                return Err(LlmError::new(499, "dibatalkan".into()));
+            }
+        };
+        let bytes = chunk.map_err(|e| LlmError::new(0, e.to_string()))?;
         let s = String::from_utf8_lossy(&bytes);
         buf.push_str(&s);
         raw.push_str(&s);
@@ -652,7 +798,7 @@ pub async fn call_llm_stream(
         let _ = tx.send(reasoning.trim().to_string());
     }
     if full.trim().is_empty() {
-        return Err(LlmError { status, message: format!("{provider} stream kosong") });
+        return Err(LlmError::new(status, format!("{provider} stream kosong")));
     }
     Ok(full.trim().to_string())
 }
@@ -664,7 +810,7 @@ pub fn conn_has_role(conn: &Value, role: &str) -> bool {
 }
 
 fn enabled(conn: &Value) -> bool {
-    conn.get("enabled").and_then(|v| v.as_bool()) != Some(false)
+    conn.get("enabled").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// Urutan kandidat untuk role: eksplisit dulu, lalu wildcard. Kosong = pakai
@@ -687,6 +833,37 @@ pub fn order_for_role(role: &str, conns: &[Value]) -> Vec<usize> {
         }
     }
     out
+}
+
+/// Rencana routing untuk satu role, untuk ditampilkan di UI. Urutan kandidat
+/// SAMA dengan `order_for_role` (sumber kebenaran runtime); alasan dihitung
+/// dari field yang sama dengan yang dicek saat panggilan nyata.
+pub fn routing_plan(role: &str, conns: &[Value], now_ms: u128) -> Value {
+    let order = order_for_role(role, conns);
+    let mut rows: Vec<Value> = Vec::new();
+    for (pos, &i) in order.iter().enumerate() {
+        let c = &conns[i];
+        let id = c.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let cooldown = c
+            .get("rateLimitedUntil")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso_ms)
+            .filter(|&t| t > now_ms)
+            .map(|_| c.get("rateLimitedUntil").cloned().unwrap_or(Value::Null));
+        let explicit = config::normalize_roles(&c.get("roles").cloned().unwrap_or(Value::Null))
+            .iter()
+            .any(|r| r == role);
+        let status = if cooldown.is_some() { "cooldown" } else { "ready" };
+        rows.push(json!({
+            "id": id,
+            "priority": pos + 1,
+            "match": if explicit { "explicit" } else { "wildcard" },
+            "status": status,
+            "cooldownUntil": cooldown,
+            "lastError": c.get("lastError").cloned().unwrap_or(json!("")),
+        }));
+    }
+    json!({ "role": role, "candidates": rows })
 }
 
 /// True bila ADA koneksi enabled dengan `role` DITANDAI EKSPLISIT (bukan
@@ -732,6 +909,74 @@ pub async fn llm_for_role_tools(
     client_system: &str,
     tools: &[Value],
 ) -> Result<LlmOk, (u16, String)> {
+    let (_keep, mut rx) = tokio::sync::watch::channel(false);
+    llm_for_role_cancelable(config_path, role, messages, client_system, tools, &mut rx).await
+}
+
+/// Satu koneksi: antre di gerbangnya, lalu ulang sesuai keputusan scheduler.
+/// Deadline keseluruhan dan pembatalan dihormati di setiap jeda tunggu.
+#[allow(clippy::too_many_arguments)]
+async fn retry_call(
+    conn: &Value,
+    conn_id: &str,
+    messages: &[ChatMessage],
+    client_system: &str,
+    tools: &[Value],
+    min_max_tokens: u64,
+    timeout_s: u64,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+    attempt: &mut u32,
+    deadline: std::time::Instant,
+) -> Result<String, LlmError> {
+    use crate::llm_sched::{admit, gate_for, Admit, Decision};
+
+    let gate = gate_for(conn_id);
+    loop {
+        let permit = match admit(gate, cancel).await {
+            Admit::Permit(p) => p,
+            Admit::Full => return Err(LlmError::new(503, format!("antrean {conn_id} penuh"))),
+            Admit::Cancelled => return Err(LlmError::new(499, "dibatalkan".into())),
+        };
+        *attempt += 1;
+        let res = call_llm_tools(conn, messages, client_system, &[], tools, min_max_tokens, timeout_s).await;
+        drop(permit);
+        let err = match res {
+            Ok(reply) => return Ok(reply),
+            Err(e) => e,
+        };
+        let transient = is_transient(err.status, &err.message) || err.status == 429;
+        let salt = *attempt as u64 ^ conn_id.len() as u64;
+        // Koneksi yang ditolak total (tidak ada server di alamat itu) tidak
+        // layak dicoba sampai budget habis; cukup beberapa kali.
+        // reqwest melaporkan koneksi gagal sebagai status 0 + "error sending request".
+        let refused = err.status == 0 && err.message.to_lowercase().contains("error sending request");
+        let cap = if refused { crate::llm_sched::REFUSED_MAX_ATTEMPTS } else { crate::llm_sched::MAX_ATTEMPTS };
+        let wait = match crate::llm_sched::decide_with_cap(*attempt, transient, err.retry_after_ms, salt, cap) {
+            Decision::GiveUp => return Err(err),
+            Decision::RetryAfter(ms) => ms,
+        };
+        if std::time::Instant::now() + std::time::Duration::from_millis(wait) > deadline {
+            return Err(err);
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(wait)) => {}
+            _ = crate::llm_sched::wait_cancel(cancel) => {
+                return Err(LlmError::new(499, "dibatalkan".into()));
+            }
+        }
+    }
+}
+
+/// Penjadwal lengkap: retry + backoff + Retry-After + deadline + antrean +
+/// pembatalan. `cancel` bernilai `true` → panggilan segera berhenti.
+pub async fn llm_for_role_cancelable(
+    config_path: &Path,
+    role: &str,
+    messages: &[ChatMessage],
+    client_system: &str,
+    tools: &[Value],
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<LlmOk, (u16, String)> {
     let cfg = config::load(config_path);
     let mut conns: Vec<Value> = cfg.get("connections").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let active_id = cfg.get("activeId").and_then(|v| v.as_str()).map(String::from);
@@ -758,31 +1003,37 @@ pub async fn llm_for_role_tools(
     }
 
     let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let mut last_err = String::from("Semua connection gagal");
+    let mut reasons: Vec<String> = Vec::new();
+    // Budget per panggilan: total percobaan & deadline dibagi ke semua koneksi.
+    let mut attempts_used = 0u32;
+    // Role assistant (loop agent) butuh headroom output: draft JSON tool +
+    // reasoning model murah gampang melampaui default 2048 → JSON tool call
+    // terpotong → gagal parse (penyebab utama "tool gagal" di model kecil).
+    let min_max_tokens = if role == "assistant" { 8192 } else { 0 };
+    // Role assistant (loop agent): timeout + deadline longgar — model reasoning
+    // lambat & draft JSON panjang tidak boleh mati di timeout 60s flat.
+    let (timeout_s, deadline_ms) = if role == "assistant" {
+        (AGENT_TIMEOUT_S, AGENT_DEADLINE_MS)
+    } else {
+        (DEFAULT_TIMEOUT_S, crate::llm_sched::DEFAULT_DEADLINE_MS)
+    };
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(deadline_ms);
     for &i in &order {
+        let conn_id = conns[i].get("id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
         // skip bila masih rate-limited.
         if let Some(until) = conns[i].get("rateLimitedUntil").and_then(|v| v.as_str()) {
             if parse_iso_ms(until).map(|t| t > now_ms).unwrap_or(false) {
+                reasons.push(format!("{conn_id}: dilewati, cooldown sampai {until}"));
                 continue;
             }
         }
-        // Coba koneksi ini; ulang beberapa kali untuk error transient jaringan
-        // (koneksi putus/timeout) sebelum pindah — supaya blip tunggal tak
-        // membunuh loop multi-langkah. Error non-transient (auth/kuota) langsung.
-        let mut attempt = 0u32;
-        let outcome = loop {
-            match call_llm_tools(&conns[i], messages, client_system, &[], tools).await {
-                Ok(reply) => break Ok(reply),
-                Err(e) => {
-                    if is_transient(e.status, &e.message) && attempt < 2 {
-                        attempt += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(500 * attempt as u64)).await;
-                        continue;
-                    }
-                    break Err(e);
-                }
-            }
-        };
+        // Retry sementara dijadwalkan scheduler (llm_sched); error permanen langsung.
+        if attempts_used >= crate::llm_sched::MAX_ATTEMPTS {
+            reasons.push(format!("{conn_id}: dilewati, budget {} percobaan habis", crate::llm_sched::MAX_ATTEMPTS));
+            break;
+        }
+        let outcome = retry_call(&conns[i], &conn_id, messages, client_system, tools, min_max_tokens, timeout_s, cancel, &mut attempts_used, deadline).await;
         match outcome {
             Ok(reply) => {
                 let id = conns[i].get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -795,8 +1046,20 @@ pub async fn llm_for_role_tools(
                 return Ok(LlmOk { reply, used: id });
             }
             Err(e) => {
+                // Pembatalan user bukan kesalahan koneksi: langsung keluar dengan
+                // 499 — JANGAN menandai koneksi error (fallback/cooldown) karena
+                // pemanggil (loop agent) memakai 499 untuk membedakan "dibatalkan"
+                // dari "Semua connection gagal".
+                if e.status == 499 || *cancel.borrow() {
+                    return Err((499, "dibatalkan".into()));
+                }
                 let (fallback, cooldown) = classify_error(e.status, &e.message);
-                last_err = format!("LLM error: {}", e.message);
+                let short: String = e.message.chars().take(200).collect();
+                reasons.push(format!("{conn_id}: {short}"));
+                // Deadline keseluruhan habis: berhenti total, jangan coba koneksi lain.
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
                 if let Some(o) = conns[i].as_object_mut() {
                     o.insert("testStatus".into(), json!("error"));
                     o.insert("lastError".into(), json!(e.message));
@@ -811,7 +1074,12 @@ pub async fn llm_for_role_tools(
         }
     }
     let _ = config::save_connections(config_path, conns, json!(active_id));
-    Err((502, last_err))
+    let msg = if reasons.is_empty() {
+        "Semua connection gagal".to_string()
+    } else {
+        format!("Semua connection gagal — {}", reasons.join("; "))
+    };
+    Err((502, msg))
 }
 
 /// Panggil LLM dengan gambar (multimodal, role `motion-vision`). HANYA
@@ -891,6 +1159,73 @@ mod tests {
     use super::*;
 
     #[test]
+    fn order_for_role_lewati_disabled_dan_role_eksplisit_didahulukan() {
+        let conns = vec![
+            json!({ "id": "a", "enabled": true, "roles": [] }),
+            json!({ "id": "b", "enabled": true, "roles": ["motion"] }),
+            json!({ "id": "c", "enabled": false, "roles": ["motion"] }),
+            json!({ "id": "d", "enabled": true }),
+        ];
+        assert_eq!(order_for_role("motion", &conns), vec![1, 0, 3]);
+    }
+
+    #[test]
+    fn order_for_role_enabled_hilang_dihitung_nonaktif() {
+        let conns = vec![json!({ "id": "x", "roles": ["chat"] })];
+        assert!(order_for_role("chat", &conns).is_empty());
+    }
+
+    #[test]
+    fn budget_output_floor_tak_pernah_menurunkan() {
+        // Tanpa setting → default 2048; role assistant dinaikkan ke 8192
+        // (draft JSON tool + reasoning model murah butuh headroom).
+        assert_eq!(effective_max_tokens(&json!({}), 0), 2048);
+        assert_eq!(effective_max_tokens(&json!({}), 8192), 8192);
+        // Setting user lebih besar tetap dihormati.
+        assert_eq!(effective_max_tokens(&json!({ "maxTokens": 16_384 }), 8192), 16_384);
+        // Setting kecil + floor → floor yang menang.
+        assert_eq!(effective_max_tokens(&json!({ "maxTokens": 1024 }), 8192), 8192);
+    }
+
+    #[test]
+    fn deteksi_penolakan_budget_output() {
+        // Pesan 400 khas provider saat max_tokens melebihi batas model.
+        assert!(budget_output_ditolak("max_tokens is too large: 8192. This model supports at most 4096."));
+        assert!(budget_output_ditolak("This model's maximum context length is 8192 tokens"));
+        assert!(budget_output_ditolak("max output tokens is too large"));
+        // 400 lain (auth/format) TIDAK boleh memicu penurunan budget.
+        assert!(!budget_output_ditolak("invalid api key"));
+        assert!(!budget_output_ditolak("invalid JSON body"));
+    }
+
+    #[test]
+    fn routing_plan_urutan_sama_dengan_order_for_role() {
+        let conns = vec![
+            json!({ "id": "a", "enabled": true, "roles": [] }),
+            json!({ "id": "b", "enabled": true, "roles": ["chat"], "lastError": "boom" }),
+            json!({ "id": "c", "enabled": true, "roles": ["chat"], "rateLimitedUntil": "2999-01-01T00:00:00.000Z" }),
+            json!({ "id": "d", "enabled": false, "roles": ["chat"] }),
+        ];
+        let plan = routing_plan("chat", &conns, 0);
+        let rows = plan["candidates"].as_array().unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        let runtime: Vec<&str> = order_for_role("chat", &conns).iter().map(|&i| conns[i]["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, runtime);
+        assert_eq!(ids, vec!["b", "c", "a"]);
+        assert_eq!(rows[0]["match"], "explicit");
+        assert_eq!(rows[0]["lastError"], "boom");
+        assert_eq!(rows[1]["status"], "cooldown");
+        assert_eq!(rows[2]["match"], "wildcard");
+        assert_eq!(rows[2]["status"], "ready");
+    }
+
+    #[test]
+    fn order_for_role_tanpa_koneksi_cocok_kosong() {
+        let conns = vec![json!({ "id": "a", "roles": ["sheet"] })];
+        assert!(order_for_role("chat", &conns).is_empty());
+    }
+
+    #[test]
     fn classify_sesuai_rules() {
         assert_eq!(classify_error(429, "").0, true);
         assert_eq!(classify_error(401, "").1, 120_000);
@@ -959,9 +1294,9 @@ mod tests {
     #[test]
     fn role_routing_eksplisit_dulu() {
         let conns = vec![
-            json!({ "id": "a", "roles": [] }),                 // wildcard
-            json!({ "id": "b", "roles": ["chat"] }),           // eksplisit chat
-            json!({ "id": "c", "roles": ["motion"] }),         // bukan chat
+            json!({ "id": "a", "enabled": true, "roles": [] }),                 // wildcard
+            json!({ "id": "b", "enabled": true, "roles": ["chat"] }),           // eksplisit chat
+            json!({ "id": "c", "enabled": true, "roles": ["motion"] }),         // bukan chat
         ];
         let order = order_for_role("chat", &conns);
         // eksplisit (b) dulu, lalu wildcard (a); c tak masuk
@@ -1022,6 +1357,71 @@ mod tests {
         let mut tanpa = vec![json!({ "role": "user", "content": "a" })];
         attach_images(&mut tanpa, &[], "openai");
         assert_eq!(tanpa[0]["content"], json!("a"));
+    }
+
+    #[tokio::test]
+    async fn stream_dibatalkan_berhenti_dengan_499() {
+        // Provider openai-compatible ke port tertutup: request gagal cepat,
+        // tapi token batal sudah true → harus langsung 499, tanpa retry.
+        let conn = json!({ "id": "c", "provider": "openai-compatible", "baseUrl": "http://127.0.0.1:9", "apiKey": "x", "model": "x" });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (_keep, mut cancel) = tokio::sync::watch::channel(true);
+        let err = call_llm_stream(&conn, &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &tx, &mut cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 499);
+    }
+
+    #[tokio::test]
+    async fn retry_stream_berhenti_saat_dibatalkan_di_antara_percobaan() {
+        // Error transient (port tertutup) → scheduler akan menunggu; token
+        // pembatalan di-set saat itu → harus berhenti dengan 499, bukan retry.
+        let conn = json!({ "id": "c", "provider": "openai-compatible", "baseUrl": "http://127.0.0.1:9", "apiKey": "x", "model": "x" });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (keep, mut cancel) = tokio::sync::watch::channel(false);
+        let _ = keep.send(true);
+        let err = call_llm_stream_retry(&conn, &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &tx, &mut cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 499);
+    }
+
+    #[tokio::test]
+    async fn fallback_lewati_koneksi_gagal_ke_berikutnya() {
+        let dir = std::env::temp_dir().join(format!("l2dllmfb-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        // "mati" menunjuk port tertutup (error koneksi = transient → lanjut);
+        // "m" mock selalu sukses → harus yang dipakai.
+        std::fs::write(
+            &f,
+            r#"{"activeId":"mati","connections":[{"id":"mati","enabled":true,"provider":"openai-compatible","baseUrl":"http://127.0.0.1:9","apiKey":"x","model":"x"},{"id":"m","enabled":true,"provider":"mock"}]}"#,
+        )
+        .unwrap();
+        let ok = llm_for_role_tools(&f, "chat", &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &[]).await.unwrap();
+        assert_eq!(ok.used, "m");
+        let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert_eq!(cfg["connections"][0]["testStatus"], "error");
+    }
+
+    #[tokio::test]
+    async fn cooldown_rate_limit_membuat_koneksi_dilewati() {
+        let dir = std::env::temp_dir().join(format!("l2dllmcd-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        std::fs::write(
+            &f,
+            r#"{"activeId":"m","connections":[{"id":"m","enabled":true,"provider":"mock"}]}"#,
+        )
+        .unwrap();
+        // Koneksi yang sudah dicooldown sampai masa depan harus dilewati → tak ada kandidat.
+        let mut cfg: Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        cfg["connections"][0]["rateLimitedUntil"] = json!("2999-01-01T00:00:00.000Z");
+        std::fs::write(&f, cfg.to_string()).unwrap();
+        let err = llm_for_role_tools(&f, "chat", &[ChatMessage { role: "user".into(), content: "hai".into() }], "", &[]).await.unwrap_err();
+        assert_eq!(err.0, 502);
+        assert!(err.1.starts_with("Semua connection gagal"));
+        assert!(err.1.contains("m: dilewati, cooldown sampai 2999-01-01"));
     }
 
     #[tokio::test]

@@ -30,7 +30,7 @@ dobel-klik menyalakan server dan jendela sekaligus). Inti logika **TypeScript**
 jalur: **Pixi 8 + Cubism SDK Framework 5-r.5** (teruji dengan Core 6.0.1) di
 `src/live2d/view/`; stack lama (Pixi 6 + pixi-live2d) sudah dipensiunkan.
 
-Produk ini juga membawa **agent-nya sendiri** sebagai fitur (loop, 25 tool,
+Produk ini juga membawa **agent-nya sendiri** sebagai fitur (loop, 29 tool,
 dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, bukan instruksi untukmu.
 
 ## Urutan baca wajib (mengikat)
@@ -50,17 +50,19 @@ dan permission gate di `core/src/agent/`). Jangan tertukar: itu kode produk, buk
 
 ```bash
 bun run build          # WAJIB sebelum run: static/js/bundle.js di-gitignore
-bun run test           # SEMUA TS: 457 unit (bun, 28 file) + 302 guard (5 suite)
+bun run test           # SEMUA TS: 647 unit (bun, 41 file, scope test/) + 338 guard (6 suite)
 bun run test:unit      # hanya unit test TS
 bun run test:guards    # hanya guard legacy
 bunx tsc --noEmit      # type-check (harus bersih)
-cargo test --workspace # backend Rust (179 test: 173 core + 6 engine), bagian gate
+cargo test --workspace # backend Rust (283 test: 275 core + 8 engine), bagian gate
 ```
 
 **Selesai** = build bersih + `tsc` bersih + `bun run test` hijau + `cargo test
 --workspace` hijau. Tidak ada test yang memanggil jaringan (endpoint LLM di-stub
 ke provider `mock`) dan tidak ada test yang menulis `data/config.json`;
-pertahankan begitu.
+pertahankan begitu. `bun test` di-scope ke `test/` (bukan root) supaya file
+`.test.js` milik ekstensi browser di `data/browser/profile/` tidak ikut
+ter-scan — jangan kembalikan ke `bun test` polos.
 
 ## Rilis produksi (build yang diedarkan)
 
@@ -192,6 +194,16 @@ core/                        backend Rust (axum, loopback), SATU-SATUNYA backend
   motion_vision.rs           critic visual: harness render → filmstrip 8 frame
                              → LLM role `motion-vision` (koneksi HARUS
                              ditandai eksplisit; model harus menerima gambar)
+  rig_report.rs              laporan rig per model dari disk: provenance per
+                             param (cdi3 + observasi + physics), modelHash,
+                             daftar unclassified → GET /api/model/rig-report
+  motion_probe.rs            probe canvas runtime: sweep param di harness
+                             (settle physics + capture sinkron + metrik diff
+                             piksel) + cross-check VLM → POST /api/model/probe
+  (sheet v5)                 probeApprovals.user: hasil approve panel probe
+                             ("Setujui Param" di Motion Studio) — override
+                             role-mapping tier 0 (mapRoles) + param ekstra
+                             untuk beat planner; lihat MOTION-SYSTEM-SPEC §17d
   companion_memory.rs        memory jangka panjang companion (data/
                              companion-memory.json) + keputusan latar role
                              "memory": intent chat→agent, ringkas sesi,
@@ -199,6 +211,14 @@ core/                        backend Rust (axum, loopback), SATU-SATUNYA backend
                              lewat tool memory_recall (shared, read-only).
                              Session context (RAM) ada di src/client/agent/
                              companion-memory.ts (lihat MODES.md)
+  chat_filter.rs             filter komentar penonton (moderasi): blocklist
+                             kata milik user (section `chatFilter` config) +
+                             mesin keputusan role "moderation" — SystemOne
+                             (Jev/Laya) didahulukan, fallback LLM yang
+                             DITANDAI eksplisit; dipasang di
+                             vtuber.rs::spawn_run SETELAH gerbang
+                             dedup/cooldown, fail-open saat mesin gagal.
+                             Panel: "Filter Chat" di tab AI (chat-filter.ts)
 static/harness-motion.html   halaman harness render critic visual (juga
 src/client/harness/          entry build ke-4 harness-motion.mjs) — capture
                              sinkron canvas.toDataURL, tanpa rAF/kompositor
@@ -211,7 +231,10 @@ src/client/transport/        seam transport: HTTP (apiBase/apiUrl/apiFetch/getJs
                              coreVersion/modelImportDialog/initLoopback)
 src/shared/                  types, config, llm-client (role routing)
 src/client/animation/        easing, motion-dsl, motion-io (dua arah .motion3.json),
-                             motion-registry, motion-runtime
+                             motion-registry, motion-runtime, motion-compiler
+                             (beat → keyframe deterministik), motion-critic
+                             (critic numerik kurva), motion-probe (metrik
+                             diff piksel probe)
 src/client/engine/           motion-taxonomy (klasifikasi klip .motion3.json),
                              native-clips (daftar per-file + alias rename),
                              role-mapping (inferensi role), native-expressions

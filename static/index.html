@@ -12,6 +12,7 @@
        first paint tidak boleh menunggu jaringan. app.css memakai stack
        font sistem. -->
   <link rel="stylesheet" href="css/app.css?v=matte1" />
+  <link rel="stylesheet" href="css/ai-connections.css" />
   <!-- Agent Workbench (mode assistant) — token & komponen ala harness.
        Scope-nya body.agent-mode; mode lain tidak tersentuh. -->
   <link rel="stylesheet" href="css/workbench.css?v=wb2" />
@@ -131,18 +132,19 @@
       <div id="chat-log">
         <div class="msg agent">
           <div class="msg-avatar">?</div>
-          <div class="msg-bubble" id="greeting-bubble" data-i18n="chat.greeting">Halo! Ada yang bisa kubantu?</div>
+          <div class="msg-bubble" id="greeting-bubble" data-i18n="chat.greeting">Hei, kamu datang! Lagi kepikiran apa?</div>
         </div>
       </div>
 
       <!-- Thinking indicator -->
-      <div id="thinking" class="thinking hidden" data-i18n="chat.thinking">Mikir...</div>
+      <div id="thinking" class="thinking hidden" data-i18n="chat.thinking">lagi dipikir...</div>
 
       <!-- Input -->
       <div class="chat-input">
         <button id="btn-mic" data-i18n-title="chat.micTip" data-i18n="chat.mic">Mic</button>
         <input type="text" id="bubble-input" data-i18n-ph="chat.inputPh" placeholder="Ketik pesan lalu Enter..." />
         <button id="btn-bubble" data-i18n-title="chat.sendTip" data-i18n="chat.send">Kirim</button>
+        <button id="btn-chat-stop" class="hidden" data-i18n-title="chat.stopTip" data-i18n="chat.stop">Stop</button>
       </div>
       <!-- Quick phrase: 4 icebreaker saja (dipangkas dari 7 — dock bawah
            tidak boleh lebih ramai dari inputnya; sisanya tetap bisa diketik). -->
@@ -154,7 +156,7 @@
       </div>
       <label class="brain-toggle">
         <input type="checkbox" id="toggle-brain" checked />
-        <span data-i18n="chat.brainToggle">Mode Otak (LLM mikir & balas sendiri)</span>
+        <span data-i18n="chat.brainToggle">Biar dia mikir sendiri</span>
       </label>
       </div><!-- /mode-chat -->
 
@@ -576,12 +578,31 @@
 
         <!-- ===== AI: koneksi LLM + perilaku proaktif + persepsi kamera. -->
         <div class="tab-pane" data-pane="ai">
-          <!-- AI Connections (9router-style) -->
-          <div class="section-title"><span data-i18n="cfg.connTitle">Koneksi AI</span>
-            <button id="btn-add-conn" class="mini-btn" data-i18n-title="cfg.addConnTip">＋</button>
+          <section id="conn-list" class="api-management" aria-label="Koneksi AI" data-i18n-aria="cfg.connTitle"></section>
+
+          <!-- Filter Chat (moderasi komentar penonton).
+               Blocklist kata + mesin keputusan (Jev/Laya via role "moderation"
+               atau LLM lain) menahan komentar spam/melanggar sebelum diproses
+               LLM. Logika jalan di core Rust (chat_filter.rs); panel ini hanya
+               menyimpan section chatFilter via action "saveChatFilter". -->
+          <div class="section-title" data-i18n="cf.title">Filter Chat</div>
+          <div class="cfg-box" id="chatfilter-box">
+            <p class="hint" data-i18n="cf.hint">Saring komentar penonton sebelum diproses AI.</p>
+            <div class="cfg-checks">
+              <label class="cfg-check" for="cf-enabled"><input type="checkbox" id="cf-enabled" /> <span data-i18n="cf.enabled">Saring komentar penonton</span></label>
+              <label class="cfg-check" for="cf-useDecision"><input type="checkbox" id="cf-useDecision" /> <span data-i18n="cf.useDecision">Pakai mesin keputusan (Jev/Laya / role Moderasi)</span></label>
+            </div>
+            <label class="cfg-label" for="cf-words" data-i18n="cf.words">Kata/frasa terlarang</label>
+            <textarea id="cf-words" rows="4" data-i18n-ph="cf.wordsPh" placeholder="slot&#10;judol&#10;iklan"></textarea>
+            <p class="hint" data-i18n="cf.wordsHint">Satu kata atau frasa per baris.</p>
+            <label class="cfg-label" for="cf-extraRules" data-i18n="cf.extraRules">Aturan tambahan untuk mesin keputusan</label>
+            <textarea id="cf-extraRules" rows="3" data-i18n-ph="cf.extraPh" placeholder="tahan semua komentar politik"></textarea>
+            <p class="hint" data-i18n="cf.extraHint">Instruksi bebas tentang apa lagi yang tidak boleh diproses.</p>
+            <div class="note-row">
+              <button id="btn-cf-save" class="mini-btn" data-i18n="cf.save">Simpan</button>
+              <span id="cf-save-status" class="note-status" role="status" aria-live="polite"></span>
+            </div>
           </div>
-          <div id="conn-list" class="conn-list"></div>
-          <div class="conn-hint" data-i18n-html="cfg.connHint">Router otomatis pakai connection <b>Active</b>; kalau gagal (quota/limit) fallback ke berikutnya.</div>
 
           <!-- Inisiatif (Kelakuan).
                User atur KAPAN karakter mulai proaktif lewat profil (Mati..Hidup)
@@ -749,66 +770,6 @@
   </div><!-- /.app -->
 
   <!-- § Connection editor modal -->
-  <div id="conn-modal" class="modal hidden">
-    <div class="modal-box">
-      <div class="modal-title" data-i18n="conn.title">Connection</div>
-      <div class="api-form">
-        <label><span data-i18n="conn.name">Name</span>
-          <input type="text" id="m-name" data-i18n-ph="conn.namePh" placeholder="mis. koneksi utama" />
-        </label>
-        <label><span data-i18n="cfg.provider">Provider</span>
-          <select id="m-provider">
-            <option value="openai-compatible" data-i18n="conn.prov.openaiCompat">OpenAI-Compatible (router)</option>
-            <option value="systemone" data-i18n="conn.prov.systemone">SystemOne — Jev / Laya (mesin keputusan)</option>
-            <option value="gemini" data-i18n="conn.prov.gemini">Gemini</option>
-            <option value="groq" data-i18n="conn.prov.groq">Groq</option>
-            <option value="openai" data-i18n="conn.prov.openai">OpenAI</option>
-            <option value="anthropic" data-i18n="conn.prov.anthropic">Anthropic</option>
-            <option value="mock" data-i18n="conn.prov.mock">Mock (tes lokal)</option>
-          </select>
-        </label>
-        <label><span data-i18n="conn.baseUrl">Base URL</span>
-          <input type="text" id="m-baseurl" placeholder="https://api.example.com/v1" />
-        </label>
-        <label><span data-i18n="cfg.apiKey">API Key</span>
-          <input type="password" id="m-apikey" data-i18n-ph="conn.apiKeyPh" placeholder="isi api key" autocomplete="off" />
-        </label>
-        <label><span data-i18n="cfg.modelLabel">Model</span>
-          <input type="text" id="m-model" placeholder="gpt-4o-mini" />
-        </label>
-        <label id="m-row-system"><span data-i18n="conn.systemPrompt">System Prompt</span>
-          <span class="form-hint" data-i18n="conn.systemHint">Instruksi teknis untuk sambungan INI (semua peran yang memakainya) — mis. gaya jawaban, format, bahasa. Persona karakter jangan di sini: pakai Catatan Karakter (tab Model) yang per-model.</span>
-          <textarea id="m-system" rows="2" data-i18n-ph="conn.systemPh" placeholder="mis. Jawab singkat dalam bahasa Indonesia."></textarea>
-        </label>
-        <label id="m-row-tokens"><span data-i18n="conn.maxTokTitle">Max Tokens &amp; Temperature</span>
-          <span class="form-hint" data-i18n="conn.maxTokHint">Kosong = default (2048 &amp; 0.8). Model reasoning butuh lebih besar (mis. 8192) supaya jawaban tak terpotong sebelum reasoning-nya selesai.</span>
-          <span class="cfg-pair">
-            <input type="number" id="m-maxtokens" min="64" max="200000" step="1" placeholder="2048" />
-            <input type="number" id="m-temp" min="0" max="2" step="0.1" placeholder="0.8" />
-          </span>
-        </label>
-        <label class="cfg-check" id="m-row-stream">
-          <input type="checkbox" id="m-stream" /> <span data-i18n="conn.stream">Stream mode — untuk gateway yang memotong generasi lambat</span>
-        </label>
-        <label><span data-i18n="conn.roles">Peran (roles)</span>
-          <span class="form-hint" data-i18n="conn.rolesHint">Kosongkan semua = connection ini boleh dipakai untuk semua peran.</span>
-        </label>
-        <div class="cfg-checks" id="m-roles">
-          <label class="cfg-check"><input type="checkbox" value="chat" /> <span data-i18n="conn.role.chat">chat (teks balasan)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="assistant" /> <span data-i18n="conn.role.assistant">assistant (otak agent &amp; tools)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="motion" /> <span data-i18n="conn.role.motion">motion (gerak &amp; ekspresi)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="sheet" /> <span data-i18n="conn.role.sheet">sheet (analisa parameter)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="motion-vision" /> <span data-i18n="conn.role.motionVision">motion-vision (menilai gambar — wajib model vision)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="behavior" /> <span data-i18n="conn.role.behavior">behavior (keputusan perilaku saat idle)</span></label>
-          <label class="cfg-check"><input type="checkbox" value="memory" /> <span data-i18n="conn.role.memory">memory (intent chat→agent, ringkas sesi, ekstraksi memori)</span></label>
-        </div>
-      </div>
-      <div class="modal-actions">
-        <button id="m-save" data-i18n="conn.save">Simpan</button>
-        <button id="m-cancel" data-i18n="conn.cancel">Batal</button>
-      </div>
-    </div>
-  </div>
 
   <!-- § Load indicator -->
   <div id="loader">
@@ -1153,12 +1114,17 @@
     <div class="ms-footer">
       <button id="ms-analyze" class="mini-btn ms-small" data-i18n="sheet.analyze">Analisa AI</button>
       <button id="ms-verify" class="mini-btn ms-small" data-i18n="ms.verify.button">Cek Visual</button>
+      <button id="ms-critic" class="mini-btn ms-small" data-i18n="ms.critic.button">Cek Kurva</button>
+      <button id="ms-probe" class="mini-btn ms-small" data-i18n="ms.probe.button">Probe Param</button>
+      <button id="ms-approve" class="mini-btn ms-small" data-i18n="ms.approve.button">Setujui Param</button>
       <button id="ms-generate" class="mini-btn ms-small" data-i18n="ms.generate">Buat dari Teks</button>
       <button id="ms-save" class="mini-btn ms-small" data-i18n="ms.save">Simpan</button>
       <span id="ms-status" class="note-status" role="status" aria-live="polite"></span>
       <!-- Lint independen (analisis model dari disk): hasil /api/motions/validate.
            Advisory — tidak memblokir Simpan; sanitize server tetap gerbang akhir. -->
       <div id="ms-lint" class="ms-lint hidden"></div>
+      <div id="ms-stage" class="ms-stage hidden" role="region"></div>
+      <div id="ms-approve-panel" class="ms-stage hidden" role="region"></div>
       <div id="ms-gen-box" class="ms-gen-box hidden">
         <input id="ms-gen-input" type="text" maxlength="200"
           data-i18n-ph="ms.genPh" placeholder="mis. senang, badan bergoyang kanan-kiri + senyum lebar" />

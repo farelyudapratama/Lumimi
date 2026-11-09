@@ -1,0 +1,762 @@
+/**
+ * pet-entry — pin Desktop Pet: model + indra + punch-through + sentuhan.
+ *
+ * Halaman static/pet.html tinggal markup; SEMUA logika di sini (bundle
+ * static/js/pet.js, entry ke-5 src/build.ts). Modul murni (senses/hit/punch/
+ * touch/swing/react) diuji bun test; file ini penebar kabel DOM/IPC-nya.
+ *
+ * Dua sumber sampel kursor:
+ * - Embedded (shell Lumimi): event push `pet://cursor` dari thread native
+ *   (pet_native.rs, GetAsyncKeyState = keadaan tombol GLOBAL — bebas
+ *   feedback loop saat jendela digeser). SATU-SATUNYA sumber touch/punch
+ *   di shell; DOM tak dipakai untuk itu (klik-tembus ON memang tak
+ *   menyampai event DOM, dan drag jendela mengubah client koordinat).
+ * - Dev browser (tanpa shell): DOM pointer events → detektor tetap hidup
+ *   (reaksi boop/pat jalan), tanpa pindah-jendela (butuh koordinat fisik).
+ *
+ * Gaze + sway + swing = rAF lokal, TANPA IPC per-frame (aturan arsitektur).
+ */
+import { transport } from "../transport";
+import { createSenses } from "./senses";
+import { expandAABB, physicalToClient, type AABB } from "./hit";
+import { createPunchController } from "./punch";
+import { createTouchDetector, type TouchEvent } from "./touch";
+import { initialSwingState, swingStep } from "./swing";
+import { REACTION_VERBS, pickLine, resolveExpressionForVerb, resolveMotionForVerb } from "./react";
+import {
+  IDLE_ACTIONS,
+  IDLE_EMOTIONS,
+  createDozeGovernor,
+  localDecision,
+  requestDecision,
+  type DecideRequest,
+} from "./brain";
+import { createBudget, fetchProactiveLine, PET_SYSTEM_PROMPT } from "./proactive";
+import { buildRoleWriter, type RoleWriter } from "./roles";
+import { AudioLipSync } from "../speech/lip-sync";
+import {
+  chatReply,
+  directorSegments,
+  sttText,
+  ttsBlob,
+  type ChatTurn,
+  type DirectorCapabilities,
+} from "./chat";
+import { createRecorder, type Recorder } from "./voice";
+
+/** Sistem prompt percakapan pet (lebih longgar dari komentar proaktif). */
+const PET_CHAT_SYSTEM =
+  "Kamu adalah pet desktop kecil yang tinggal di layar pemakai — hangat, " +
+  "playful, dan ringkas. Balas 1–2 kalimat pendek tanpa format. " +
+  "Jika user meminta tugas berat (coding, riset panjang), sarankan lembut " +
+  "untuk memakai mode Assistant di app utama.";
+
+const w = window as any;
+const t = (k: string, v?: Record<string, unknown>) =>
+  w.__i18n ? w.__i18n.t(k, v) : k;
+
+// ── Kontrak halaman (pet.html hanya markup) ─────────────────────────────
+// Flag diminta SEBELUM modul view dieksekusi: script klasik ini jalan lebih
+// dulu daripada module live2d-view.mjs (module = deferred).
+w.__live2dRendererRequested = true;
+w.__live2dStageSize = () => ({ w: window.innerWidth, h: window.innerHeight });
+if (!w.__live2dViewWait) {
+  w.__live2dViewWait = new Promise((res: (v: unknown) => void) => {
+    w.__live2dViewReadyResolve = res;
+  });
+}
+
+const el = (id: string) => document.getElementById(id);
+const bubbleEl = el("bubble") as HTMLElement | null;
+const bubbleText = el("bubble-text") as HTMLElement | null;
+
+let bubbleTimer = 0;
+function bubble(text: string, ms = 3500): void {
+  if (!bubbleEl || !bubbleText) return;
+  bubbleText.textContent = text;
+  bubbleEl.style.display = "block";
+  window.clearTimeout(bubbleTimer);
+  bubbleTimer = window.setTimeout(() => {
+    if (bubbleEl) bubbleEl.style.display = "none";
+  }, ms);
+}
+
+const state = {
+  model: null as any,
+  clickThrough: false,
+  /** Rotasi sway idle (rad) — swing menumpuk di atasnya. */
+  swayT: 0,
+  swing: initialSwingState(),
+  /** Akselerasi pivot (px/s²) — dari pergeseran kursor fisik saat digrab. */
+  winAx: 0,
+  lastPhysX: 0,
+  lastPhysT: 0,
+  lastPhysVx: null as number | null,
+  lastReaction: "",
+  /** Posisi fisik kursor saat grab mulai (acuan pindah jendela). */
+  dragPhys: null as { x: number; y: number } | null,
+  /** Native stream hidup? (fallback DOM bila tidak). */
+  nativeSeen: 0,
+  // ── fase 2: otak ──
+  /** Timestamp sampel sentuh terakhir (grab/boop/pat/klik tombol). */
+  lastTouchT: 0,
+  doze: "awake" as "awake" | "doze",
+  roleWriter: null as RoleWriter | null,
+  brainIter: 0,
+  nextDecideAt: 0,
+  lateNightShown: "",
+  // ── fase 3: suara ──
+  recorder: null as Recorder | null,
+  speaking: false,
+  history: [] as ChatTurn[],
+  /** Audio aktif + lip-sync (untuk provider mulut framework). */
+  ttsAudio: null as HTMLAudioElement | null,
+  lip: null as AudioLipSync | null,
+};
+
+// ── Indra ────────────────────────────────────────────────────────────────
+const senses = createSenses();
+const touch = createTouchDetector();
+
+// ── Tauri window API jendela pet (null di dev browser) ──────────────────
+function petWin(): any | null {
+  try {
+    const ta = w.__TAURI__;
+    return ta?.window?.getCurrentWindow?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Origin jendela (fisik) + scaleFactor, cache 120 ms — dibaca ulang segera
+// setelah jendela dipindah (drag) supaya konversi kursor tak basi.
+let winCache: { o: { x: number; y: number }; s: number; at: number } | null = null;
+async function winOrigin(force = false): Promise<{ o: { x: number; y: number }; s: number } | null> {
+  const win = petWin();
+  if (!win) return null;
+  const now = performance.now();
+  if (!force && winCache && now - winCache.at < 120) return winCache;
+  try {
+    const [pos, s] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+    const scale = typeof s === "number" && s > 0 ? s : 1;
+    winCache = { o: { x: pos.x, y: pos.y }, s: scale, at: now };
+    return winCache;
+  } catch {
+    return null;
+  }
+}
+
+// ── Punch-through ────────────────────────────────────────────────────────
+let ignoreSeq = 0;
+let ignoreNow = false;
+async function setIgnoreCursor(on: boolean): Promise<void> {
+  const seq = ++ignoreSeq;
+  const win = petWin();
+  if (!win) return;
+  try {
+    await win.setIgnoreCursorEvents(on);
+    if (seq === ignoreSeq) ignoreNow = on;
+  } catch {
+    // dev browser: tidak ada — biarkan
+  }
+}
+const punch = createPunchController({
+  setIgnore: (on) => void setIgnoreCursor(on),
+  getBounds: () => modelBounds(),
+  getClickThrough: () => state.clickThrough,
+  enterPad: 4,
+  exitPad: 24,
+});
+
+function modelBounds(): AABB | null {
+  const m = state.model;
+  if (!m) return null;
+  try {
+    return m.getBounds() as AABB;
+  } catch {
+    return null;
+  }
+}
+
+/** bounds + pad untuk hit sentuhan (grab lebih longgar dari punch). */
+function insideModel(x: number, y: number): boolean {
+  const b = modelBounds();
+  if (!b) return false;
+  const e = expandAABB(b, 8);
+  return x >= e.x && x <= e.x + e.width && y >= e.y && y <= e.y + e.height;
+}
+
+// ── Reaksi ───────────────────────────────────────────────────────────────
+function reactTo(verb: string): void {
+  const m = state.model;
+  if (!m) return;
+  const verbs = REACTION_VERBS[verb] ?? [verb];
+  let group: string | null = null;
+  for (const v of verbs) {
+    group = resolveMotionForVerb(m.internalModel?.motionManager?.definitions, v);
+    if (group) break;
+  }
+  if (group) m.motion(group, -1, 2);
+  let expr: string | null = null;
+  for (const v of verbs) {
+    expr = resolveExpressionForVerb(m.expressions, v);
+    if (expr) break;
+  }
+  if (expr) void m.expression(expr);
+  const key = `pet.touch.${verb}`;
+  const line = pickLine([t(key)], state.lastReaction);
+  if (line && line !== key) {
+    state.lastReaction = line;
+    bubble(line);
+  }
+}
+
+// ── Umpan swing + pindah jendela saat digrab ────────────────────────────
+function feedSwing(physX: number, nowMs: number): void {
+  if (state.lastPhysT) {
+    const dt = Math.max(1, nowMs - state.lastPhysT) / 1000;
+    const vx = (physX - state.lastPhysX) / dt; // px/s
+    if (state.lastPhysVx !== null) {
+      const ax = (vx - state.lastPhysVx) / dt; // px/s²
+      state.winAx += (ax - state.winAx) * 0.5; // EMA — kursor native berisik
+    }
+    state.lastPhysVx = vx;
+  }
+  state.lastPhysX = physX;
+  state.lastPhysT = nowMs;
+}
+
+/** Pindahkan jendela pet mengikuti kursor (delta fisik layar). */
+async function moveWindowByCursor(phys: { x: number; y: number }): Promise<void> {
+  const win = petWin();
+  if (!win || !state.dragPhys) return;
+  const ndx = phys.x - state.dragPhys.x;
+  const ndy = phys.y - state.dragPhys.y;
+  if (!ndx && !ndy) return;
+  try {
+    const o = await winOrigin(true);
+    if (!o) return;
+    const P = w.__TAURI__?.window?.PhysicalPosition;
+    const pos = P ? new P(o.o.x + ndx, o.o.y + ndy) : { x: o.o.x + ndx, y: o.o.y + ndy };
+    await win.setPosition(pos);
+  } catch {}
+}
+
+// ── Event sentuh → reaksi / drag jendela ────────────────────────────────
+function handleTouchEvents(events: TouchEvent[], phys: { x: number; y: number } | null): void {
+  for (const ev of events) {
+    state.lastTouchT = performance.now();
+    switch (ev.kind) {
+      case "grab":
+        state.dragPhys = phys;
+        state.winAx = 0;
+        state.lastPhysT = 0;
+        state.lastPhysVx = null;
+        reactTo("grab");
+        break;
+      case "drag":
+        if (phys) {
+          feedSwing(phys.x, performance.now());
+          void moveWindowByCursor(phys);
+        }
+        break;
+      case "boop":
+        reactTo("boop");
+        break;
+      case "pat":
+        reactTo("pat");
+        break;
+      case "release":
+        state.dragPhys = null;
+        if (ev.grabbed) reactTo("wave"); // lepas — sapa kecil, ayun dari fisika
+        break;
+    }
+  }
+}
+
+// ── Jalur sampel utama ───────────────────────────────────────────────────
+function onSample(x: number, y: number, down: boolean, tNow: number, phys: { x: number; y: number } | null): void {
+  senses.feed({ x, y, down, t: tNow });
+  punch.feed(x, y);
+  const events = touch.feed(x, y, down, tNow);
+  if (events.length) handleTouchEvents(events, phys);
+}
+
+async function listenNativeCursor(): Promise<void> {
+  const listen = w.__TAURI__?.event?.listen;
+  if (typeof listen !== "function") return;
+  try {
+    await listen("pet://cursor", (e: { payload: { x: number; y: number; down: boolean } }) => {
+      void (async () => {
+        state.nativeSeen = performance.now();
+        const wo = await winOrigin();
+        const p = e.payload;
+        if (!wo) return;
+        const c = physicalToClient(p, wo.o, wo.s);
+        onSample(c.x, c.y, !!p.down, performance.now(), { x: p.x, y: p.y });
+      })();
+    });
+  } catch {
+    // event tidak tersedia (shell lama) — jalur DOM fallback
+  }
+}
+
+/** DOM fallback (dev browser ATAU shell tanpa event native): gaze selalu;
+ *  touch hanya bila native tidak terlihat dalam 1 dtk terakhir. */
+function listenDomPointer(): void {
+  window.addEventListener("pointermove", (e) => {
+    const nx = (e.clientX / window.innerWidth) * 2 - 1;
+    const ny = (e.clientY / window.innerHeight) * 2 - 1;
+    w.__live2dView?.setLookTarget?.(nx, -ny);
+    if (performance.now() - state.nativeSeen > 1000) {
+      onSample(e.clientX, e.clientY, e.buttons % 2 === 1, performance.now(), null);
+    }
+  });
+  window.addEventListener("pointerdown", (e) => {
+    if (performance.now() - state.nativeSeen > 1000) {
+      onSample(e.clientX, e.clientY, true, performance.now(), null);
+    }
+  });
+  window.addEventListener("pointerup", (e) => {
+    if (performance.now() - state.nativeSeen > 1000) {
+      onSample(e.clientX, e.clientY, false, performance.now(), null);
+    }
+  });
+}
+
+// ── Loop frame: sway + swing (SEMUA lokal — tak ada IPC per-frame) ───────
+function startFrameLoop(): void {
+  let last = performance.now();
+  const tick = (): void => {
+    const now = performance.now();
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+    const m = state.model;
+    if (m) {
+      state.swayT += dt;
+      // Swing disuapi akselerasi HANYA saat digrab; setelah lepas ayun
+      // mereda sendiri oleh redaman (zeta) — tanpa dorongan baru.
+      const st = swingStep(state.swing, {
+        axPx: touch.isGrabbing() ? state.winAx : 0,
+        heightPx: m.height ?? 400,
+        dt,
+      });
+      state.swing = { phi: st.phi, omega: st.omega };
+      m.rotation = Math.sin(state.swayT * 0.9) * 0.012 + st.shownAngle;
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+// ── Poll state server (sumber kebenaran klik-tembus) ─────────────────────
+function paintThrough(on: boolean): void {
+  const b = el("b-through");
+  if (!b) return;
+  b.classList.toggle("active", on);
+  b.textContent = on ? t("petWindow.ctOn") : t("petWindow.ctOff");
+}
+
+function startClickThroughPoll(): void {
+  setInterval(async () => {
+    if (!transport.isEmbedded()) return;
+    try {
+      const st = await transport.getJson<{ running: boolean; clickThrough: boolean }>("/api/pet/state");
+      const on = !!st.clickThrough;
+      if (on !== state.clickThrough) {
+        state.clickThrough = on;
+        applyClickThroughBaseline(on);
+      }
+      paintThrough(on);
+    } catch {}
+  }, 1500);
+}
+
+/** Baseline ignore saat klik-tembus berubah: ON → menembus penuh (lubang
+ * punch akan membuka sendiri saat kursor di atas model); OFF → normal. */
+function applyClickThroughBaseline(on: boolean): void {
+  if (on) punch.force(true);
+  else punch.openInput();
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────
+function absUrl(path: string): string {
+  if (/^https?:\/\//.test(path)) return path;
+  return transport.apiUrl(String(path).replace(/^\/+/, ""));
+}
+
+async function petModelArg(): Promise<string | null> {
+  const q = new URLSearchParams(location.search).get("model");
+  if (q) return q;
+  if (transport.isEmbedded()) {
+    const m = await transport.invoke<string>("pet_model");
+    if (m) return m;
+  }
+  return null;
+}
+
+async function boot(): Promise<void> {
+  await transport.initLoopback().catch(() => null);
+  const status = el("status");
+  if (status) status.textContent = t("petWindow.loadingModel");
+  let path = await petModelArg();
+  if (!path) {
+    try {
+      const d = await transport.getJson<{ models?: string[] }>("/api/models");
+      const first = (d.models || [])[0];
+      if (first) {
+        const dp = await transport.getJson<{ path?: string }>(
+          "/api/model/path?name=" + encodeURIComponent(first),
+        );
+        path = dp.path ?? null;
+      }
+    } catch {}
+  }
+  if (!path) {
+    if (status) status.textContent = t("petWindow.noModel");
+    return;
+  }
+  await w.__live2dViewWait;
+  state.model = await w.__live2dView.loadModel(absUrl(path));
+  const m = state.model;
+  const nat = m.getBounds();
+  const natW = nat.width / m.scale.x;
+  const natH = nat.height / m.scale.y;
+  const s = Math.min((window.innerWidth * 0.9) / natW, (window.innerHeight * 0.92) / natH);
+  m.scale.set(s);
+  m.x = (window.innerWidth - natW * s) / 2;
+  m.y = (window.innerHeight - natH * s) / 2 - window.innerHeight * 0.03;
+  if (status) status.textContent = t("petWindow.active");
+  // Role writer (doze/mata) — baca param + rentang MILIK model (role space).
+  try {
+    state.roleWriter = buildRoleWriter(
+      (m.getParameterIds?.() ?? []) as string[],
+      m.internalModel?.coreModel?.getModel?.(),
+      m.internalModel?.coreModel,
+    );
+  } catch {}
+  // Sumber mulut: framework menulis param dari provider ini (role-resolved).
+  w.__live2dView?.setLipsyncProvider?.(lipsyncProvider);
+  startFrameLoop();
+  startBrainLoop();
+  startDozeLoop();
+  startProactiveLoop();
+}
+
+// ── fase 2: otak idle (behavior/decide + siklus lokal) ──────────────────
+const DECIDE_EVERY_MS = 6000;
+const GAZE_DEFAULTS = ["face-user", "glance", "think", "lookaway-down", "up"];
+
+/** Gaze target dari nama intent (normalisasi −1..1). */
+function applyGaze(name: string | null | undefined): void {
+  switch (name) {
+    case "face-user":
+      w.__live2dView?.setLookTarget?.(0, 0);
+      break;
+    case "glance": {
+      const r = Math.random();
+      w.__live2dView?.setLookTarget?.((r - 0.5) * 1.4, (Math.random() - 0.5) * 0.8);
+      break;
+    }
+    case "think":
+      w.__live2dView?.setLookTarget?.(-0.5, 0.35);
+      break;
+    case "lookaway-down":
+      w.__live2dView?.setLookTarget?.(0.55, -0.5);
+      break;
+    case "up":
+      w.__live2dView?.setLookTarget?.(0, 0.8);
+      break;
+    default:
+      break;
+  }
+  void GAZE_DEFAULTS; // kosakata iklankan di capabilities, di sini hanya subset umum
+}
+
+function busyNow(): boolean {
+  return (
+    touch.isGrabbing() ||
+    performance.now() - state.lastTouchT < 5000 || // baru saja digodain
+    state.doze === "doze" ||
+    state.speaking ||
+    (state.recorder?.isOn() ?? false)
+  );
+}
+
+// ── fase 3: bicara (TTS + lip-sync) & dengar (press-to-talk) ────────────
+function lipsyncProvider(): number | null {
+  const a = state.ttsAudio;
+  if (a && state.lip && !a.paused && !a.ended) return state.lip.sample();
+  return null;
+}
+
+/** Mainkan satu segmen: bubble caption + TTS + mulut. Resolve saat selesai. */
+function speakSegment(seg: { text: string; actions: { motion?: string | null } }): Promise<void> {
+  return new Promise((resolve) => {
+    const m = state.model;
+    if (!m) return resolve();
+    bubble(seg.text, Math.max(4000, seg.text.length * 180));
+    if (seg.actions.motion) m.motion(seg.actions.motion, -1, 2);
+    void (async () => {
+      const blob = await ttsBlob(transport.fetch, seg.text);
+      if (!blob) return resolve(); // TTS gagal — caption bubble tetap tampil
+      const audio = state.ttsAudio ?? new Audio();
+      if (audio.src.startsWith("blob:")) URL.revokeObjectURL(audio.src);
+      audio.src = URL.createObjectURL(blob);
+      state.ttsAudio = audio;
+      state.lip = state.lip ?? new AudioLipSync();
+      state.lip.reset();
+      if (!state.lip.attach(audio)) state.lip = null;
+      audio.onended = () => resolve();
+      audio.onerror = () => resolve();
+      try { await audio.play(); } catch { resolve(); }
+    })();
+  });
+}
+
+async function speakSegments(segs: { text: string; actions: { motion?: string | null } }[]): Promise<void> {
+  state.speaking = true;
+  try {
+    for (const s of segs) await speakSegment(s);
+  } finally {
+    state.speaking = false;
+  }
+}
+
+async function extractMemoryTurn(): Promise<void> {
+  // Fail-soft: ekstraksi memori jangka panjang dari giliran ini.
+  try {
+    await transport.postJson("/api/companion/memory/extract", { turns: state.history.slice(-6) });
+  } catch {}
+}
+
+async function memoryContext(q: string): Promise<string> {
+  try {
+    const m = await transport.getJson<{ entries?: { text?: string }[] }>(
+      "/api/companion/memory?limit=3&q=" + encodeURIComponent(q),
+    );
+    const lines = (m?.entries ?? []).map((e) => String(e.text ?? "")).filter(Boolean);
+    return lines.length ? "Konteks kenangan: " + lines.join("; ") : "";
+  } catch {
+    return "";
+  }
+}
+
+function directorCaps(): DirectorCapabilities {
+  const m = state.model;
+  const defs = (m?.internalModel?.motionManager?.definitions ?? {}) as Record<string, unknown[]>;
+  return {
+    emotions: ["senang", "sedih", "malu", "kaget", "normal"],
+    motions: Object.keys(defs)
+      .filter((g) => (defs[g] || []).length > 0)
+      .map((id) => ({ id, description: "" })),
+  };
+}
+
+async function runVoiceTurn(): Promise<void> {
+  const rec = state.recorder;
+  if (!rec || state.speaking) return;
+  bubble(t("pet.voice.think"), 15000);
+  const out = await rec.stop();
+  const text = out ? await sttText(transport.fetch, out.wav) : null;
+  if (!text) {
+    bubble(t("pet.voice.empty"), 3500);
+    return;
+  }
+  state.history.push({ role: "user", content: text });
+  if (state.history.length > 12) state.history = state.history.slice(-12);
+  const mem = await memoryContext(text);
+  const system = PET_CHAT_SYSTEM + (mem ? "\n" + mem : "");
+  const reply = await chatReply(transport.fetch, system, state.history.slice(-12), mem);
+  if (!reply) {
+    state.history.pop(); // giliran gagal — jangan tinggalkan user turn yatim
+    bubble(t("pet.voice.fail"), 4000);
+    return;
+  }
+  state.history.push({ role: "assistant", content: reply });
+  const segs = await directorSegments(transport.postJson.bind(transport), reply, directorCaps());
+  await speakSegments(segs);
+  void extractMemoryTurn();
+}
+
+function wireVoiceButton(): void {
+  const b = el("b-talk");
+  if (!b) return;
+  const start = async (): Promise<void> => {
+    if (state.speaking || state.doze === "doze") return;
+    if (!state.recorder) state.recorder = createRecorder();
+    try {
+      await state.recorder.start();
+      state.lastTouchT = performance.now();
+      bubble(t("pet.voice.listening"), 30000);
+    } catch {
+      bubble(t("pet.voice.fail"), 4000);
+    }
+  };
+  const stop = (): void => {
+    if (state.recorder?.isOn()) void runVoiceTurn();
+  };
+  // Tahan tombol untuk bicara (press-to-talk); tekan mouse/sentuh sama.
+  b.addEventListener("pointerdown", (e) => { e.preventDefault(); void start(); });
+  b.addEventListener("pointerup", stop);
+  b.addEventListener("pointerleave", stop);
+}
+
+function startBrainLoop(): void {
+  setInterval(async () => {
+    const m = state.model;
+    if (!m || busyNow()) return;
+    const now = performance.now();
+    if (now < state.nextDecideAt) return;
+    const k = senses.state(now);
+    const defs = (m.internalModel?.motionManager?.definitions ?? {}) as Record<string, unknown[]>;
+    const motions = Object.keys(defs).filter((g) => (defs[g] || []).length > 0);
+    const req: DecideRequest = {
+      state: { idleMs: Math.round(k.sinceInputMs) },
+      capabilities: {
+        actions: [...IDLE_ACTIONS],
+        emotions: [...IDLE_EMOTIONS],
+        gazes: GAZE_DEFAULTS,
+        motions: motions.map((id) => ({ id, description: "" })),
+      },
+    };
+    let d = await requestDecision(transport.postJson.bind(transport), req);
+    const usedEngine = !!d;
+    if (!d) d = localDecision(state.brainIter++);
+    // Terapkan (semua lokal — framework yang mengeksekusi).
+    applyGaze(d.gaze ?? (d.action === "settle" ? "face-user" : "glance"));
+    if (d.motion && motions.includes(d.motion)) m.motion(d.motion, -1, 1);
+    if (d.emotion && d.emotion !== "normal") {
+      const expr = resolveExpressionForVerb(m.expressions, d.emotion);
+      if (expr) void m.expression(expr);
+    }
+    if (!usedEngine && d.action === "micro-fidget") {
+      // fidget halus tanpa klip: golekan pandang sebentar (gaze framework
+      // yang men-ease; tanpa SET param mentah).
+      applyGaze("glance");
+    }
+    state.nextDecideAt = now + (d.holdMs ?? DECIDE_EVERY_MS);
+  }, DECIDE_EVERY_MS);
+}
+
+// ── fase 2: doze (mata lempem via role space; framework blink digerbangi) ─
+function startDozeLoop(): void {
+  const gov = createDozeGovernor({
+    onEnter: () => {
+      w.__live2dView?.setBlinkGate?.(() => false);
+      bubble(t("petWindow.doze"), 2500);
+    },
+    onExit: () => {
+      w.__live2dView?.setBlinkGate?.(null);
+      // pulihkan mata ke default milik model (dev 0 = pose istirahat).
+      state.roleWriter?.setDev("eyeLOpen", 0);
+      state.roleWriter?.setDev("eyeROpen", 0);
+    },
+  });
+  setInterval(() => {
+    const k = senses.state(performance.now());
+    state.doze = gov.update(performance.now(), k.sinceInputMs > 0 ? k.sinceInputMs : null);
+    if (state.doze === "doze") {
+      // tulis ulang tiap frame saat tidur (sticky terhadap framework).
+      state.roleWriter?.setDev("eyeLOpen", -1);
+      state.roleWriter?.setDev("eyeROpen", -1);
+    }
+  }, 1000);
+}
+
+// ── fase 2: komentar proaktif ber-budget ─────────────────────────────────
+const BUDGET_KEY = "lumimi.pet.proactive.stamps";
+
+function startProactiveLoop(): void {
+  const budget = createBudget({
+    now: () => Date.now(),
+    load: () => {
+      try {
+        const raw = localStorage.getItem(BUDGET_KEY);
+        return raw ? JSON.parse(raw) as { stamps: number[] } : null;
+      } catch { return null; }
+    },
+    save: (s) => {
+      try { localStorage.setItem(BUDGET_KEY, JSON.stringify(s)); } catch {}
+    },
+  });
+  setInterval(async () => {
+    if (state.doze === "doze" || busyNow()) return;
+    const now = performance.now();
+    const k = senses.state(now);
+    const sinceTouch = state.lastTouchT ? now - state.lastTouchT : null;
+    if (!budget.canFire(sinceTouch, k.sinceInputMs > 0 ? k.sinceInputMs : null)) return;
+    // Event: larut malam sekali per malam; sisanya idle panjang.
+    const hour = new Date().getHours();
+    let event = "idle_long";
+    if (hour >= 23 || hour < 4) {
+      const today = new Date().toDateString();
+      if (state.lateNightShown === today) return;
+      state.lateNightShown = today;
+      event = "late_night";
+    }
+    budget.record();
+    const line = await fetchProactiveLine(transport.fetch, event);
+    if (line) {
+      bubble(line, 6000);
+      state.lastReaction = line;
+    } else {
+      // LLM gagal → sapa kaleng sebagai fallback (degradasi aman).
+      const lines = [
+        t("petWindow.idle1"), t("petWindow.idle2"), t("petWindow.idle3"),
+        t("petWindow.idle4"), t("petWindow.idle5"), t("petWindow.idle6"),
+      ].filter((l) => l && !l.startsWith("petWindow."));
+      const line2 = pickLine(lines, state.lastReaction);
+      if (line2) {
+        state.lastReaction = line2;
+        bubble(line2);
+      }
+    }
+  }, 60_000);
+}
+
+// ── Tombol bar ───────────────────────────────────────────────────────────
+async function closePet(): Promise<void> {
+  try {
+    await transport.postJson("/api/pet/close", {});
+  } catch {}
+  const win = petWin();
+  if (win) {
+    try { await win.destroy(); } catch {}
+  }
+  window.close();
+}
+
+function wireButtons(): void {
+  el("b-wave")?.addEventListener("click", () => reactTo("greet"));
+  // Bicara = press-to-talk (fase 3) — tekan tahan, lepas kirim.
+  wireVoiceButton();
+  const bThrough = el("b-through");
+  bThrough?.addEventListener("click", async () => {
+    try {
+      const d = await transport.postJson<{ clickThrough: boolean }>("/api/pet/clickthrough", {
+        on: !bThrough.classList.contains("active"),
+      });
+      state.clickThrough = !!d.clickThrough;
+      applyClickThroughBaseline(state.clickThrough);
+      paintThrough(state.clickThrough);
+    } catch {}
+  });
+  if (!transport.isEmbedded() && bThrough) bThrough.hidden = true;
+  el("b-close")?.addEventListener("click", () => void closePet());
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") void closePet();
+  });
+}
+
+wireButtons();
+void listenNativeCursor();
+listenDomPointer();
+startClickThroughPoll();
+void boot().catch((e) => {
+  // Fail-loud: jendela pet kosong tanpa petunjuk adalah kegagalan senyap.
+  w.__petBootError = String((e as Error)?.stack || (e as Error)?.message || e);
+  console.error("[pet] boot gagal:", e);
+  const status = el("status");
+  if (status) status.textContent = t("sys.errGeneric", { msg: (e as Error)?.message });
+});

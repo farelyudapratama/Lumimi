@@ -6,6 +6,7 @@ pub mod memory;
 pub mod motion_tools;
 pub mod plan;
 pub mod sessions;
+pub mod store;
 pub mod subagent;
 pub mod tools;
 #[path = "loop_.rs"]

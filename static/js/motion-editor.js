@@ -52,6 +52,9 @@
     search: '',
     groupFilter: '',
     analysis: null,       // hasil /api/model/motion-analysis (angka engine dari disk)
+    rigReport: null,      // hasil /api/model/rig-report (provenance + hash)
+    stagedBeats: null,    // staging panel Terima Batch: {meta, beats, prompt, rig}
+    probePanel: null,     // panel approve probe: {rows: [...], hash: modelHash}
   };
 
   function blankDraft() {
@@ -93,6 +96,32 @@
     return out;
   }
 
+  function rigForCompiler() {
+    const rr = state.rigReport;
+    if (!rr) return null;
+    const roleMap = roleMapForModel();
+    const params = {};
+    for (const field in roleMap) {
+      const pid = roleMap[field];
+      const st = rr.params && rr.params[pid];
+      if (st) params[field] = st;
+    }
+    // Map physics paramIds back to role fields.
+    const physicsOutputs = (rr.physicsOutputs || []).map(pid => {
+      for (const f in roleMap) if (roleMap[f] === pid) return f;
+      return null;
+    }).filter(Boolean);
+    // Beat kind param (paramId hasil approve user): statistik mentah per
+    // paramId + daftar output physics mentah — compiler memakainya untuk
+    // amplitudo/clamp dan physics gate param.
+    return {
+      params,
+      physicsOutputs,
+      paramsById: rr.params || {},
+      physicsParamIds: rr.physicsOutputs || [],
+    };
+  }
+
   async function fetchAnalysis() {
     state.analysis = null;
     try {
@@ -100,6 +129,8 @@
       const r = await fetch(apiBase() + '/api/model/motion-analysis?name='
         + encodeURIComponent(modelKey()) + '&roles=' + roles);
       if (r.ok) state.analysis = await r.json();
+      const rr = await fetch(apiBase() + '/api/model/rig-report?name=' + encodeURIComponent(modelKey()));
+      if (rr.ok) state.rigReport = await rr.json();
     } catch (e) { /* advisory: gagal → lanjut tanpa badge/lint semantik */ }
   }
 
@@ -1414,12 +1445,143 @@
     }
   }
 
+  /** Terima hasil generate (tracks final) ke draft — satu titik pemakaian
+   *  bersama: jalur lama (LLM tracks langsung) dan Terima Batch staging. */
+  function acceptGeneratedDraft(raw, nameFallback) {
+    pushUndo();
+    const gen = migrateSemanticTracks(raw);
+    state.draft = Object.assign(blankDraft(), gen, {
+      id: state.draft && state.draft.id ? state.draft.id : gen.id,
+      name: state.draft && state.draft.name ? state.draft.name : (gen.name || nameFallback || 'draft'),
+      sourceModelId: modelKey(),
+    });
+    state.selected = null;
+    state.dirty = true;
+    renderAll(); applyScrubPose();
+    runLint();
+    // langsung preview: user lihat gerakannya seketika
+    try { playPreview(); } catch (e) {}
+    setStatus(__t('ms.generated', { name: gen.name || nameFallback || 'draft', n: (gen.tracks || []).length }), 'ok');
+    try { runCriticNow(); } catch (e) {}
+  }
+
+  // ── Panel Terima Batch (staging beat → compiler deterministik) ─────
+  // Hasil generate mode beats ISTIRAHAT di panel ini sampai user Terimakan.
+  // Refine per-beat = slider intensitas / tanda ±, lalu recompile — compiler
+  // satu sumber kebenaran (keyframe tetap tulisan compiler, bukan LLM) dan
+  // critic auto jalan setelah diterima.
+  function stageBeats(meta, beats, promptText) {
+    state.stagedBeats = { meta, beats, prompt: promptText, rig: rigForCompiler() };
+    renderStage();
+  }
+
+  function renderStage() {
+    const host = $('#ms-stage');
+    if (!host) return;
+    const stg = state.stagedBeats;
+    if (!stg) { host.innerHTML = ''; host.classList.add('hidden'); return; }
+    const esc = (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const rows = ['<div class="ms-lint-title">' + esc(__t('ms.stage.title')) + '</div>'];
+    stg.beats.forEach((b, i) => {
+      const signLabel = b.sign === -1 ? '−' : '+';
+      const inten = Number(b.intensity != null ? b.intensity : 0.8);
+      rows.push(
+        '<div class="ms-stage-row" style="display:flex;gap:6px;align-items:center;margin:4px 0;">'
+        + '<input type="checkbox" data-inc="' + i + '"' + (b._inc ? ' checked' : '') + '>'
+        + '<span style="min-width:130px;overflow:hidden;text-overflow:ellipsis;">' + esc(b.beatId + ' · ' + (b.param || b.role)) + '</span>'
+        + '<span style="min-width:104px;font-size:0.85em;">' + esc('t=' + Number(b.start || 0).toFixed(2) + 's d=' + Number(b.duration || 0).toFixed(2) + 's') + '</span>'
+        + '<input type="range" min="0" max="1" step="0.05" data-int="' + i + '" value="' + esc(String(inten)) + '" style="flex:1;min-width:80px;">'
+        + '<span data-intlab="' + i + '" style="min-width:52px;font-size:0.85em;">int ' + esc(inten.toFixed(2)) + '</span>'
+        + '<button class="mini-btn ms-small" data-sign="' + i + '" style="width:26px;min-width:26px;">' + esc(signLabel) + '</button>'
+        + '</div>');
+    });
+    rows.push('<div style="display:flex;gap:8px;margin-top:6px;">'
+      + '<button id="ms-stage-apply" class="mini-btn ms-small">'
+      + esc(__t('ms.stage.apply', { n: stg.beats.filter((b) => b._inc).length })) + '</button>'
+      + '<button id="ms-stage-clear" class="mini-btn ms-small">' + esc(__t('ms.stage.clear')) + '</button>'
+      + '</div>');
+    host.innerHTML = rows.join('');
+    host.classList.remove('hidden');
+    host.querySelectorAll('[data-inc]').forEach((el) => el.addEventListener('change', () => {
+      const i = Number(el.getAttribute('data-inc'));
+      if (stg.beats[i]) { stg.beats[i]._inc = !!el.checked; renderStage(); }
+    }));
+    host.querySelectorAll('[data-int]').forEach((el) => el.addEventListener('input', () => {
+      const i = Number(el.getAttribute('data-int'));
+      if (stg.beats[i]) {
+        stg.beats[i].intensity = Number(el.value);
+        const lab = host.querySelector('[data-intlab="' + i + '"]');
+        if (lab) lab.textContent = 'int ' + Number(el.value).toFixed(2);
+      }
+    }));
+    host.querySelectorAll('[data-sign]').forEach((el) => el.addEventListener('click', () => {
+      const i = Number(el.getAttribute('data-sign'));
+      if (stg.beats[i]) { stg.beats[i].sign = (stg.beats[i].sign === -1) ? 1 : -1; renderStage(); }
+    }));
+    const apply = host.querySelector('#ms-stage-apply');
+    if (apply) apply.addEventListener('click', applyStagedBeats);
+    const clear = host.querySelector('#ms-stage-clear');
+    if (clear) clear.addEventListener('click', () => { state.stagedBeats = null; renderStage(); });
+  }
+
+  function applyStagedBeats() {
+    const stg = state.stagedBeats;
+    if (!stg) return;
+    const chosen = stg.beats.filter((b) => b._inc);
+    if (!chosen.length) { setStatus(__t('ms.stage.empty'), 'err'); return; }
+    const MC = (window.MotionCompiler || window.__motionCompiler);
+    if (!MC || typeof MC.compileMotion !== 'function') { setStatus('MotionCompiler tidak tersedia — jalankan bun run build', 'err'); return; }
+    try {
+      const compiled = MC.compileMotion(chosen, { defaultIntensity: 0.8 }, stg.rig);
+      if (!compiled || !compiled.tracks || !compiled.tracks.length) throw new Error('compiler tak menghasilkan track');
+      const raw = Object.assign({}, stg.meta, {
+        tracks: compiled.tracks.map((t) => {
+          const tr = {
+            target: t.target,
+            keys: (t.keys || []).map((k) => ({ t: k.t, v: k.v })),
+            easing: t.easing,
+          };
+          // Track kind param (paramId hasil approve user): bawa identitas
+          // param + min/max safeRange — sanitize server menerima apa adanya.
+          if (t.kind === 'param' && t.param) {
+            tr.kind = 'param';
+            tr.param = t.param;
+            if (t.min != null) tr.min = t.min;
+            if (t.max != null) tr.max = t.max;
+          }
+          return tr;
+        }),
+        duration: compiled.duration,
+      });
+      acceptGeneratedDraft(raw, (stg.meta && stg.meta.name) || stg.prompt || '');
+      state.stagedBeats = null;
+      renderStage();
+    } catch (e) {
+      setStatus(__t('ms.stage.applyFail', { msg: e.message }), 'err');
+    }
+  }
+
   async function generateFromText(promptArg) {
     const box = $('#ms-gen-box');
     const input = $('#ms-gen-input');
     const prompt = promptArg || (input ? input.value : '');
     if (!prompt || !prompt.trim()) { toggleGenBox(true); setStatus(__t('ms.describeFirst'), 'err'); return; }
     setStatus(__t('ms.generating'));
+    // Param ekstra hasil approve user (layer user, role=null) → boleh jadi
+    // target beat via field "param". Kosakata role kanonik tetap 16; param
+    // asing tetap ditolak server (parse_beats).
+    const sheetApi = window.__live2dAgent && window.__live2dAgent.sheet;
+    const approvals = (sheetApi && typeof sheetApi.getProbeApprovals === 'function')
+      ? (sheetApi.getProbeApprovals() || {}) : {};
+    const probeParams = Object.keys(approvals)
+      .filter(pid => approvals[pid] && !approvals[pid].role)
+      .map(pid => ({
+        id: pid,
+        label: approvals[pid].label || '',
+        safeRange: approvals[pid].safeRange || null,
+        sign: approvals[pid].sign != null ? approvals[pid].sign : 1,
+      }));
     try {
       const r = await fetch(apiBase() + '/api/motions/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1430,27 +1592,44 @@
           // dan menyisipkan amplitudo per role + daftar physics ke prompt.
           model: modelKey(),
           roleMap: roleMapForModel(),
+          mode: 'beats',
+          probeParams,
         }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
-      if (!data.motion || !Array.isArray(data.motion.tracks) || !data.motion.tracks.length) {
+      // MODE BEATS → compiler klien punya umpan; LLM hanya storyboard.
+      // Hasil TIDAK langsung mengganti draft: masuk panel Terima Batch —
+      // user menyetel/menyaring per-beat, lalu Terimakan; keyframe tetap
+      // tulisan compiler deterministik, bukan LLM.
+      let raw = data.motion;
+      if (data.beats && Array.isArray(raw && raw.beats)) {
+        const beats = raw.beats.map((b, i) => ({
+          beatId: b.beatId || ('g' + (i + 1)),
+          role: b.role,
+          // Beat kind param: paramId approve + safeRange-nya (dari layer user,
+          // BUKAN dari LLM — angka tetap bukan milik LLM).
+          param: (typeof b.param === 'string' && b.param && approvals[b.param]) ? b.param : null,
+          safeRange: (b.param && approvals[b.param] && approvals[b.param].safeRange) || null,
+          start: b.start || 0,
+          duration: b.duration || 0.3,
+          intensity: (typeof b.intensity === 'number' && Number.isFinite(b.intensity))
+            ? Math.max(0, Math.min(1, b.intensity)) : 0.8,
+          sign: b.sign === -1 ? -1 : 1,
+          holdEnd: !!b.holdEnd,
+          _inc: true,
+        }));
+        if (!beats.length) throw new Error('AI tidak menghasilkan beat');
+        const meta = Object.assign({}, raw);
+        delete meta.beats;
+        stageBeats(meta, beats, prompt.trim());
+        setStatus(__t('ms.stage.hint'), 'ok');
+        return;
+      }
+      if (!raw || !Array.isArray(raw.tracks) || !raw.tracks.length) {
         throw new Error(data.error || 'AI tidak menghasilkan keyframe yang valid');
       }
-      pushUndo();
-      const gen = migrateSemanticTracks(data.motion);
-      state.draft = Object.assign(blankDraft(), gen, {
-        id: state.draft && state.draft.id ? state.draft.id : gen.id,
-        name: state.draft && state.draft.name ? state.draft.name : (gen.name || prompt.trim().slice(0, 40)),
-        sourceModelId: modelKey(),
-      });
-      state.selected = null;
-      state.dirty = true;
-      renderAll(); applyScrubPose();
-      runLint();
-      // langsung preview: user lihat gerakannya seketika
-      try { playPreview(); } catch (e) {}
-      setStatus(__t('ms.generated', { name: gen.name || 'draft', n: (gen.tracks || []).length }), 'ok');
+      acceptGeneratedDraft(raw, prompt.trim().slice(0, 40));
       if (box) box.classList.add('hidden');
     } catch (e) {
       setStatus(__t('ms.genFail', { msg: e.message }), 'err');
@@ -1483,6 +1662,350 @@
       setStatus(__t('ms.verify.done'), 'ok');
     } catch (e) {
       setStatus(__t('ms.verify.fail', { msg: e.message }), 'err');
+    }
+  }
+
+  function runCriticNow() {
+    const d = state.draft;
+    const host = $('#ms-lint');
+    if (!d || !d.tracks || !d.tracks.some(t => t.keys && t.keys.length)) {
+      setStatus(__t('ms.needKeyframeAnalyze'), 'err'); return;
+    }
+    const CM = (window.MotionCritic || window.__motionCritic);
+    if (!CM || typeof CM.critique !== 'function') { setStatus('MotionCritic tidak tersedia — jalankan bun run build', 'err'); return; }
+    try {
+      const report = CM.critique(d, state.rigReport ? { nativeJerkSamples: null } : {});
+      const lines = ['<div class="ms-lint-title">Kritik kurva — skor ' + (report.score || 0) + '/100</div>'];
+      if (report.findings && report.findings.length) {
+        for (const f of report.findings) {
+          lines.push('<div class="ms-lint-item"><span class="lv ' + (f.severity === 'error' ? 'err' : (f.severity === 'warn' ? 'warn' : 'info')) + '">' + (f.kind || '') + '</span><span class="msg">' + String(f.message || '') + '</span></div>');
+        }
+      } else {
+        lines.push('<div class="ms-lint-item"><span class="lv info">ok</span><span class="msg">tidak ada temuan</span></div>');
+      }
+      if (host) { host.innerHTML = lines.join(''); host.classList.remove('hidden'); }
+      setStatus('Critic: skor ' + (report.score || 0) + '/100', report.score >= 70 ? 'ok' : 'err');
+    } catch (e) {
+      setStatus('Critic gagal: ' + e.message, 'err');
+    }
+  }
+
+  /** PROBE PARAM (backlog Fase 2, tombol): sweep parameter yang sedang dipilih
+   *  di harness core (settle physics + capture) + attribution VLM. Butuh satu
+   *  keyframe terpilih supaya paramId jelas; hasil berupa status + lint. */
+  async function runProbeNow() {
+    const sel = state.selected;
+    const pid = (sel && sel.param)
+      || (state.draft.tracks.find(t => t.kind === 'param' && t.keys && t.keys.length) || {}).param;
+    if (!pid) { setStatus(__t('ms.probe.needParam'), 'err'); return; }
+    setStatus(__t('ms.probe.running'));
+    try {
+      const r = await fetch(apiBase() + '/api/model/probe', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: modelKey(), params: [pid] }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+      const item = (data.params || [])[0] || {};
+      if (item.error) throw new Error(item.error);
+      if (item.dead) { setStatus(__t('ms.probe.dead'), 'warn'); return; }
+      const vis = item.vision || {};
+      const region = vis.skipped ? '(skipped: tanpa koneksi vision)' : (vis.region || '?');
+      if ($('#ms-lint')) {
+        renderVisualVerdictLikeProbe(pid, item);
+      }
+      setStatus(__t('ms.probe.ok', { region }), 'ok');
+    } catch (e) {
+      setStatus(__t('ms.probe.fail', { msg: e.message }), 'err');
+    }
+  }
+
+  /** Satu tampilan lint ringan hasil probe (bbox/metrik + region VLM). */
+  function renderVisualVerdictLikeProbe(pid, item) {
+    const host = $('#ms-lint');
+    if (!host) return;
+    const esc = (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const rows = ['<div class="ms-lint-title">Probe ' + esc(pid) + '</div>'];
+    const metrics = (item.metrics || []).filter(m => m && m.changedPixels != null);
+    for (const m of metrics.slice(1)) {
+      const bb = m.bbox ? ('bbox ' + Math.round(m.bbox.w) + '×' + Math.round(m.bbox.h)) : 'tanpa bbox';
+      rows.push('<div class="ms-lint-item"><span class="lv ' + (m.changedPixels > 0 ? 'info' : 'warn') + '">v=' + esc(m.v) + '</span><span class="msg">' + esc(bb) + ' · piksel berubah: ' + esc(m.changedPixels) + '</span></div>');
+    }
+    const vis = item.vision || {};
+    if (vis.skipped) {
+      rows.push('<div class="ms-lint-item"><span class="lv warn">vision</span><span class="msg">' + esc(vis.reason || 'skipped') + '</span></div>');
+    } else if (vis.region) {
+      rows.push('<div class="ms-lint-item"><span class="lv info">region</span><span class="msg">' + esc(vis.region) + (vis.sign != null ? ' · sign ' + esc(vis.sign) : '') + (vis.side ? ' · side ' + esc(vis.side) : '') + (vis.confidence != null ? ' · ' + Math.round(vis.confidence * 100) + '%' : '') + '</span></div>');
+    }
+    host.innerHTML = rows.join('');
+    host.classList.remove('hidden');
+  }
+
+  // ── Panel Approve Batch (Fase 3: promosi param probe → layer user) ──
+  // Probe batch param unclassified → baris per param, urut paling perlu
+  // mata manusia di atas (konflik → mati/gagal → tanpa vision → percaya
+  // rendah → konsisten) → user pilih role kanonik ATAU param ekstra →
+  // Setujui → sheet layer `user` (mutlak, selamat re-inspeksi).
+  // Stale: modelHash approve ≠ modelHash rig report kini → badge, tawarkan
+  // probe ulang — jangan dipakai buta (amanat PLAN Fase 1).
+  function agentSheetApi() {
+    const s = window.__live2dAgent && window.__live2dAgent.sheet;
+    return (s && typeof s.approveProbe === 'function') ? s : null;
+  }
+
+  function roleChoicesForDropdown() {
+    const rm = window.__roleMapping;
+    const keys = rm && rm.ROLE_KEYWORDS ? Object.keys(rm.ROLE_KEYWORDS) : [];
+    return keys.sort();
+  }
+
+  /** Bangun satu baris panel dari hasil probe. Cross-check VLM ↔ metrik
+   *  piksel (Fase 2e) dijalankan di sini — konflik region → baris naik ke
+   *  paling atas. Region "tidak_terlihat" bukan klaim (bukan konflik). */
+  function probeRowFromResult(pid, item, cdiLabel) {
+    const frames = (item.metrics || []).filter(m => m && m.changedPixels != null);
+    const worst = frames.reduce(
+      (a, b) => ((b.changedPixels || 0) > (a.changedPixels || 0) ? b : a),
+      { changedPixels: 0 },
+    );
+    const vis = item.vision || {};
+    let conflict = false;
+    let reasons = [];
+    const MP = window.MotionProbe;
+    if (MP && typeof MP.crossCheck === 'function' && !vis.skipped && vis.ok !== false
+      && vis.region && vis.region !== 'tidak_terlihat') {
+      // Cross-check lengkap (Fase 2e): region vs pita vertikal bbox konten +
+      // side layar vs garis tengah konten — `content` disediakan harness di
+      // tiap metrik frame (fraksi konten, bukan piksel model).
+      const cc = MP.crossCheck(
+        { region: vis.region, sign: vis.sign, side: vis.side, confidence: vis.confidence, notes: vis.notes },
+        { bbox: worst.bbox || null, centroid: worst.centroid || null, changedPixels: worst.changedPixels || 0, diffRatio: worst.diffRatio || 0 },
+        worst.content || null,
+      );
+      conflict = !!cc.conflict;
+      reasons = cc.reasons || [];
+    }
+    return {
+      paramId: pid,
+      label: cdiLabel || pid,
+      error: null,
+      dead: !!item.dead,
+      conflict, reasons,
+      region: vis.region || '',
+      sign: vis.sign,
+      side: vis.side || '',
+      confidence: vis.confidence,
+      safeRange: vis.safeRange || null,
+      notes: vis.notes || '',
+      range: item.range || null,
+      worst,
+      visionSkipped: !!vis.skipped,
+      roleChoice: '',
+      include: !item.dead && !conflict,
+    };
+  }
+
+  function probeRowSeverity(r) {
+    if (r.error) return 2;      // probe gagal — tak terverifikasi
+    if (r.conflict) return 0;   // konflik VLM vs piksel — wajib mata manusia
+    if (r.dead) return 1;       // dead: kategori sendiri, tidak dikubur
+    if (r.visionSkipped) return 2;
+    if (typeof r.confidence === 'number' && r.confidence < 0.6) return 3;
+    return 4;                   // konsisten
+  }
+
+  async function runApprovePanel() {
+    const sheetApi = agentSheetApi();
+    if (!sheetApi) { setStatus(__t('ms.approve.needSheet'), 'err'); return; }
+    try {
+      // Rig report segar: modelHash terkini + daftar unclassified.
+      let rr = null;
+      try {
+        const r = await fetch(apiBase() + '/api/model/rig-report?name=' + encodeURIComponent(modelKey()));
+        if (r.ok) rr = await r.json();
+      } catch (e) { /* fallback ke cache */ }
+      if (!rr) rr = state.rigReport;
+      if (!rr) throw new Error('rig report tidak tersedia');
+      state.rigReport = rr;
+
+      const approved = sheetApi.getProbeApprovals();
+      const unclassified = (rr.unclassified || []).filter(p => !(p in approved));
+      if (!unclassified.length) {
+        state.probePanel = { rows: [], hash: rr.modelHash || '' };
+        renderApprovePanel();
+        setStatus(__t('ms.approve.empty'));
+        return;
+      }
+
+      // Batch 6 param/panggilan (batas server), sekuensial supaya progres jujur.
+      const rows = [];
+      const batches = [];
+      for (let i = 0; i < unclassified.length; i += 6) batches.push(unclassified.slice(i, i + 6));
+      for (let bi = 0; bi < batches.length; bi++) {
+        setStatus(__t('ms.approve.running', { i: bi + 1, n: batches.length }));
+        const r = await fetch(apiBase() + '/api/model/probe', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelKey(), params: batches[bi] }),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+        for (const item of (data.params || [])) {
+          const cdi = (rr.provenance && rr.provenance[item.paramId] && rr.provenance[item.paramId].label) || '';
+          if (item.error) {
+            rows.push({
+              paramId: item.paramId, label: cdi || item.paramId, error: item.error,
+              dead: false, conflict: false, reasons: [], region: '', sign: null, side: '',
+              confidence: null, safeRange: null, notes: '', range: null, worst: null,
+              visionSkipped: true, roleChoice: '', include: false,
+            });
+          } else {
+            rows.push(probeRowFromResult(item.paramId, item, cdi));
+          }
+        }
+      }
+      rows.sort((a, b) => probeRowSeverity(a) - probeRowSeverity(b));
+      state.probePanel = { rows, hash: rr.modelHash || '' };
+      renderApprovePanel();
+      setStatus(__t('ms.approve.hint'));
+    } catch (e) {
+      setStatus(__t('ms.approve.probeFail', { msg: e.message }), 'err');
+    }
+  }
+
+  function renderApprovePanel() {
+    const host = $('#ms-approve-panel');
+    if (!host) return;
+    const pp = state.probePanel;
+    const sheetApi = agentSheetApi();
+    if (!pp || !sheetApi) { host.innerHTML = ''; host.classList.add('hidden'); return; }
+    const esc = (s) => String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const lines = ['<div class="ms-lint-title">' + esc(__t('ms.approve.title')) + '</div>'];
+
+    // Bagian 1: sudah di layer user (dengan badge stale + hapus).
+    const approved = sheetApi.getProbeApprovals() || {};
+    const approvedIds = Object.keys(approved);
+    if (approvedIds.length) {
+      lines.push('<div style="font-size:0.85em;opacity:.85;margin:2px 0 4px;">' + esc(__t('ms.approve.approvedTitle')) + '</div>');
+      for (const pid of approvedIds) {
+        const a = approved[pid];
+        const stale = !!(pp.hash && a.modelHash && a.modelHash !== pp.hash);
+        lines.push(
+          '<div class="ms-stage-row" style="display:flex;gap:6px;align-items:center;margin:3px 0;">'
+          + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'
+          + esc(pid + (a.label ? ' · ' + a.label : ''))
+          + ' <span class="lv info">' + esc(a.role ? ('role ' + a.role) : __t('ms.approve.roleNone')) + '</span>'
+          + (stale ? ' <span class="lv warn">' + esc(__t('ms.approve.stale')) + '</span>' : '')
+          + '</span>'
+          + '<button class="mini-btn ms-small" data-rm="' + esc(pid) + '">' + esc(__t('ms.approve.remove')) + '</button>'
+          + '</div>');
+      }
+    }
+
+    // Bagian 2: hasil probe baru — urut severity (atas = paling perlu mata manusia).
+    const rows = pp.rows || [];
+    if (rows.length) {
+      const roleKeys = roleChoicesForDropdown();
+      rows.forEach((r, i) => {
+        const sev = probeRowSeverity(r);
+        const disabled = !!(r.dead || r.error);
+        const badge = r.error
+          ? '<span class="lv err">' + esc(__t('ms.approve.probeErr')) + '</span>'
+          : r.conflict
+            ? '<span class="lv err">' + esc(__t('ms.approve.conflict')) + '</span>'
+            : r.dead
+              ? '<span class="lv warn">' + esc(__t('ms.approve.dead')) + '</span>'
+              : r.visionSkipped
+                ? '<span class="lv warn">' + esc(__t('ms.approve.noVision')) + '</span>'
+                : (sev === 3 ? '<span class="lv warn">' + esc(__t('ms.approve.lowconf')) + '</span>' : '<span class="lv info">ok</span>');
+        const ev = [];
+        if (r.region) ev.push(esc(r.region));
+        if (r.sign != null) ev.push('sign ' + esc(r.sign));
+        if (r.side) ev.push('side ' + esc(r.side));
+        if (r.confidence != null) ev.push(Math.round(r.confidence * 100) + '%');
+        if (r.worst && r.worst.changedPixels != null) ev.push(esc(r.worst.changedPixels) + ' px');
+        if (r.safeRange) ev.push('[' + esc(r.safeRange[0]) + ', ' + esc(r.safeRange[1]) + ']');
+        if (r.error) ev.push(esc(r.error));
+        if (r.reasons && r.reasons.length) ev.push(esc(r.reasons.join('; ')));
+        const roleOpts = ['<option value="">' + esc(__t('ms.approve.roleNone')) + '</option>']
+          .concat(roleKeys.map((k) => '<option value="' + esc(k) + '"' + (r.roleChoice === k ? ' selected' : '') + '>' + esc(k) + '</option>'))
+          .join('');
+        lines.push(
+          '<div class="ms-stage-row" style="display:flex;gap:6px;align-items:center;margin:3px 0;flex-wrap:wrap;">'
+          + '<input type="checkbox" data-inc="' + i + '"' + (r.include ? ' checked' : '') + (disabled ? ' disabled' : '') + '>'
+          + '<span style="min-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + esc(r.paramId) + '">' + badge + ' ' + esc(r.paramId) + '</span>'
+          + '<input type="text" data-lbl="' + i + '" value="' + esc(r.labelEdit != null ? r.labelEdit : r.label) + '" maxlength="80" style="width:130px;" title="' + esc(__t('ms.approve.labelHint')) + '">'
+          + '<select data-role="' + i + '" style="max-width:140px;">' + roleOpts + '</select>'
+          + '<span style="flex:1;min-width:180px;font-size:0.85em;opacity:.9;">' + ev.join(' · ') + '</span>'
+          + '</div>');
+      });
+      const n = rows.filter((r) => r.include).length;
+      lines.push('<div style="display:flex;gap:8px;margin-top:6px;">'
+        + '<button id="ms-approve-apply" class="mini-btn ms-small">' + esc(__t('ms.approve.apply', { n })) + '</button>'
+        + '<button id="ms-approve-close" class="mini-btn ms-small">' + esc(__t('ms.approve.clear')) + '</button>'
+        + '</div>');
+    }
+
+    host.innerHTML = lines.join('');
+    host.classList.remove('hidden');
+
+    host.querySelectorAll('[data-inc]').forEach((el) => el.addEventListener('change', () => {
+      const i = Number(el.getAttribute('data-inc'));
+      if (rows[i] && !rows[i].dead && !rows[i].error) { rows[i].include = !!el.checked; renderApprovePanel(); }
+    }));
+    host.querySelectorAll('[data-lbl]').forEach((el) => el.addEventListener('input', () => {
+      const i = Number(el.getAttribute('data-lbl'));
+      if (rows[i]) rows[i].labelEdit = el.value;
+    }));
+    host.querySelectorAll('[data-role]').forEach((el) => el.addEventListener('change', () => {
+      const i = Number(el.getAttribute('data-role'));
+      if (rows[i]) rows[i].roleChoice = el.value;
+    }));
+    host.querySelectorAll('[data-rm]').forEach((el) => el.addEventListener('click', async () => {
+      const pid = el.getAttribute('data-rm');
+      try {
+        await sheetApi.removeProbeApproval(pid);
+        setStatus(__t('ms.approve.removed', { pid }), 'ok');
+        renderApprovePanel();
+      } catch (e) {
+        setStatus(__t('ms.approve.applyFail', { msg: e.message }), 'err');
+      }
+    }));
+    const apply = host.querySelector('#ms-approve-apply');
+    if (apply) apply.addEventListener('click', applyApproveRows);
+    const close = host.querySelector('#ms-approve-close');
+    if (close) close.addEventListener('click', () => { state.probePanel = null; renderApprovePanel(); });
+  }
+
+  async function applyApproveRows() {
+    const pp = state.probePanel;
+    const sheetApi = agentSheetApi();
+    if (!pp || !sheetApi) return;
+    const chosen = (pp.rows || []).filter((r) => r.include && !r.dead && !r.error);
+    if (!chosen.length) { setStatus(__t('ms.approve.noSelection'), 'err'); return; }
+    try {
+      const entries = chosen.map((r) => ({
+        paramId: r.paramId,
+        role: r.roleChoice || null,
+        label: (r.labelEdit != null ? r.labelEdit : r.label) || '',
+        region: r.region || '',
+        sign: r.sign,
+        safeRange: r.safeRange,
+        confidence: r.confidence,
+        modelHash: pp.hash || '',
+        // Konflik cross-check diawetkan sebagai notes — bukti audit kenapa
+        // param ini perlu mata manusia saat approve.
+        notes: (r.reasons && r.reasons.length)
+          ? ('cross-check konflik: ' + r.reasons.join('; '))
+          : (r.notes || ''),
+      }));
+      await sheetApi.approveProbe(entries);
+      setStatus(__t('ms.approve.applyOk', { n: entries.length }), 'ok');
+      state.probePanel.rows = (pp.rows || []).filter((r) => !r.include);
+      renderApprovePanel();
+    } catch (e) {
+      setStatus(__t('ms.approve.applyFail', { msg: e.message }), 'err');
     }
   }
 
@@ -1700,6 +2223,9 @@
     on('#ms-save', 'click', saveDraft);
     on('#ms-analyze', 'click', analyzeWithAI);
     on('#ms-verify', 'click', verifyWithAI);
+    on('#ms-critic', 'click', runCriticNow);
+  on('#ms-probe', 'click', () => { try { runProbeNow(); } catch (e) { setStatus('Probe gagal: ' + e.message, 'err'); } });
+    on('#ms-approve', 'click', () => { try { runApprovePanel(); } catch (e) { setStatus(__t('ms.approve.probeFail', { msg: e.message }), 'err'); } });
     on('#ms-generate', 'click', () => toggleGenBox());
     on('#ms-gen-go', 'click', () => generateFromText());
     on('#ms-gen-input', 'keydown', (ev) => { if (ev.key === 'Enter') generateFromText(); });

@@ -96,4 +96,27 @@ if (!harness.success) {
   process.exit(1);
 }
 
-console.log("✓ Client bundle built → static/js/bundle.js + static/js/i18n.js + static/js/live2d-view.mjs + static/js/harness-motion.mjs (TS is now the live client source-of-truth)");
+// Entry kelima: Desktop Pet (indra kursor native, punch-through, sentuhan +
+// swing, otak). Halaman static/pet.html tinggal markup + <script src="js/pet.js">.
+// IIFE klasik (bukan ESM): tanpa importmap — tak mengimpor pixi.js, view
+// diakses lewat window.__live2dView yang dipasang live2d-view.mjs.
+const pet = await Bun.build({
+  entrypoints: ["./src/client/pet/pet-entry.ts"],
+  outdir: "./static/js",
+  naming: "pet.[ext]",
+  target: "browser",
+  format: "iife",
+  splitting: false,
+  minify: false,
+  sourcemap: "inline",
+});
+
+if (!pet.success) {
+  console.error("pet build failed:");
+  for (const msg of pet.logs) {
+    console.error(msg);
+  }
+  process.exit(1);
+}
+
+console.log("✓ Client bundle built → static/js/bundle.js + static/js/i18n.js + static/js/live2d-view.mjs + static/js/harness-motion.mjs + static/js/pet.js (TS is now the live client source-of-truth)");

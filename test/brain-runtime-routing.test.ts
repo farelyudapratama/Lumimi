@@ -21,6 +21,22 @@
 import { describe, test, expect, afterAll } from "bun:test";
 import { AgentBrain, resolveCharacterRuntime } from "../src/client/agent/brain";
 
+/** Mock Response SSE untuk /api/chat-stream: satu delta lalu done. */
+function sseResponse(reply: string): any {
+  const enc = new TextEncoder();
+  const frames = [
+    `data: ${JSON.stringify({ type: "delta", text: reply })}\n\n`,
+    `data: ${JSON.stringify({ type: "done", ok: true, reply })}\n\n`,
+  ];
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const f of frames) c.enqueue(enc.encode(f));
+      c.close();
+    },
+  });
+  return { ok: true, status: 200, body, json: async () => ({ reply }) };
+}
+
 const g = globalThis as any;
 const ORIG = { window: g.window, document: g.document, fetch: g.fetch };
 afterAll(() => {
@@ -145,7 +161,7 @@ function makeHarness(routing: { on?: boolean; runtime?: any } = {}) {
       return unlocks;
     },
     resolveChat: (i: number) =>
-      chatDs[i].resolve({ ok: true, json: async () => ({ reply: "Balasan dari LLM." }) }),
+      chatDs[i].resolve(sseResponse("Balasan dari LLM.")),
     settle: () => new Promise((r) => setTimeout(r, 5)),
   };
 }

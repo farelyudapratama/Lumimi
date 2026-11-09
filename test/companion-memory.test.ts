@@ -37,6 +37,22 @@ import {
 } from "../src/client/agent/companion-memory";
 import { AgentBrain } from "../src/client/agent/brain";
 
+/** Mock Response SSE untuk /api/chat-stream: satu delta lalu done. */
+function sseResponse(reply: string): any {
+  const enc = new TextEncoder();
+  const frames = [
+    `data: ${JSON.stringify({ type: "delta", text: reply })}\n\n`,
+    `data: ${JSON.stringify({ type: "done", ok: true, reply })}\n\n`,
+  ];
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      for (const f of frames) c.enqueue(enc.encode(f));
+      c.close();
+    },
+  });
+  return { ok: true, status: 200, body, json: async () => ({ reply }) };
+}
+
 const g = globalThis as any;
 const ORIG = { window: g.window, document: g.document, fetch: g.fetch };
 afterAll(() => {
@@ -241,6 +257,7 @@ function makeHarness(opts: {
   intent?: any;
   workerBusy?: boolean;
   intentFail?: boolean;
+  intentHang?: boolean;
 } = {}) {
   const speakLog: Array<{ text: string }> = [];
   const chatLog: any[] = [];
@@ -268,6 +285,9 @@ function makeHarness(opts: {
     },
     __addChat: (role: string, text: string) => chatLog.push({ role, text }),
     __appEvents: { idleSpeak: true, quietMs: 0 },
+    // Brain melempar agent:session-changed setelah hand-off sukses (panel
+    // ikut hydrate ulang) — stub kecil, tak ada listener di harness.
+    dispatchEvent: () => true,
   };
   g.document = { getElementById: () => null };
 
@@ -283,6 +303,12 @@ function makeHarness(opts: {
     if (url.includes("/api/companion/intent")) {
       if (opts.intentFail)
         return { ok: false, status: 500, json: async () => ({ error: "LLM down" }) };
+      if (opts.intentHang)
+        // Model role memory menggantung — hanya abort signal yang bisa lolos.
+        return new Promise<any>((_res, rej) => {
+          if (init?.signal?.aborted) return rej(new Error("AbortError"));
+          init?.signal?.addEventListener("abort", () => rej(new Error("AbortError")));
+        });
       return ok(opts.intent ?? { isTask: false, task: "" });
     }
     if (url.includes("/api/companion/summarize"))
@@ -293,8 +319,12 @@ function makeHarness(opts: {
       return ok({ reply: "Sudah beres, hasilnya ada di panel.", paused: false });
     if (url.includes("/api/animate-text"))
       return ok({ segments: [{ text: body?.text ?? "baik", emotion: "normal", gesture: null, motion: null }] });
-    // /api/chat — deferred dikendalikan test.
-    return new Promise<any>((res) => chatDs.push(res));
+    // /api/chat — deferred dikendalikan test; abort signal ikut direspect.
+    return new Promise<any>((res, rej) => {
+      if (init?.signal?.aborted) return rej(new Error("AbortError"));
+      chatDs.push(res);
+      init?.signal?.addEventListener("abort", () => rej(new Error("AbortError")));
+    });
   };
 
   const brain = new AgentBrain();
@@ -308,7 +338,7 @@ function makeHarness(opts: {
     resolveChat: (reply: string) => {
       const r = chatDs.shift();
       if (!r) throw new Error("tidak ada deferred /api/chat");
-      r({ ok: true, json: async () => ({ reply }) });
+      r(sseResponse(reply));
     },
     until: async (fn: () => boolean, ms = 2000) => {
       const t0 = Date.now();
@@ -364,6 +394,9 @@ describe("brain × memory/routing", () => {
     expect(ask.text).toContain("PERMINTAAN USER");
     expect(ask.text).toContain("cari dokumentasi WebGPU");
     expect(ask.text).toContain("User pakai Windows 11");
+    // Hand-off chat SELALU berlabuh ke sesi run aplikasi (bukan sesi manual
+    // rail) — server yang mengikat; kontrak field dijaga di sini.
+    expect(ask.session).toBe("run");
     // Ack + hasil agent diumumkan companion.
     await h.until(() => h.speakLog.some((s) => s.text.includes("Sudah beres")));
     expect(h.speakLog.some((s) => s.text.includes("kerjakan"))).toBe(true);
@@ -381,6 +414,20 @@ describe("brain × memory/routing", () => {
     await h.tick(30);
     expect(call(h, "/api/assistant/ask").length).toBe(0);
     expect(h.speakLog.some((s) => s.text.includes("belum beres"))).toBe(true);
+  });
+
+  test("intent menggantung → tidak diputus timer; stop() melepas slot tanpa hand-off", async () => {
+    AgentBrain.HOUSEKEEPING_DELAY_MS = 60_000;
+    const h = makeHarness({ intentHang: true });
+    const p = h.brain.think("tolong kerjakan sesuatu yang makan waktu lama");
+    await h.tick(30);
+    expect((h.brain as any).busy).toBe(true);
+    h.brain.stop();
+    await p;
+    // Tugas TIDAK pernah diadukan ke agent.
+    expect(call(h, "/api/assistant/ask").length).toBe(0);
+    expect((h.brain as any).busy).toBe(false);
+    await h.tick(30);
   });
 
   test("kalimat ber-keyword tapi intent CHAT → tetap jalur chat", async () => {

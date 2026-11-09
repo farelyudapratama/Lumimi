@@ -26,48 +26,64 @@
    ═══════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* ── Permukaan: 4 tingkat + satu sumur (recessed) ── */
-  --ink-0: #0A0C10;                     /* latar terdalam */
-  --ink-1: #12151C;                     /* panel utama */
-  --ink-2: #181C25;                     /* kartu / item */
-  --ink-3: #212734;                     /* hover / aktif */
-  --ink-input: #0D0F14;                 /* sumur: input, timeline, well */
+  /* ══ COZY COMPANION ══ Rebuilt from scratch 2026-10-07.
+     Suasana: lampu malam hangat di kamar, bukan dashboard dev. Base
+     plum-cokelat yang DIANGKAT (bukan near-black) supaya permukaan terasa
+     empuk & terlihat; kedalaman dari 5 tingkat warna hangat + hairline.
+     Semua SOLID (tanpa blur/gradient — UI di atas canvas WebGL). ── */
 
-  /* ── Hairline ── */
-  --line: #232936;
-  --line-soft: #1A1F28;
-  --line-strong: #333B4B;
-  --line-focus: #E0913A;
+  /* ── Permukaan: dari terdalam → paling atas ── */
+  --ink-0: #1A1512;                     /* latar terdalam (gutter app) */
+  --ink-1: #241C18;                     /* panel utama */
+  --ink-2: #2F2621;                     /* kartu / item */
+  --ink-3: #3D322B;                     /* hover / aktif */
+  --ink-input: #171210;                 /* sumur: input, timeline, well */
 
-  /* ── Teks ── */
-  --text: #EDF0F4;
-  --text-dim: #9BA5B4;
-  --muted: #66707F;
+  /* ── Hairline (warm) ── */
+  --line: #413530;
+  --line-soft: #2C241F;
+  --line-strong: #574841;
+  --line-focus: #FFB366;
 
-  /* ── Aksen tunggal (amber) + status. Tint memakai warna SOLID,
-        bukan rgba, supaya tidak ada blending di atas canvas. ── */
-  --lamp: #E0913A;
-  --lamp-soft: #F2A854;
-  --accent-subtle: #241C12;
-  --accent-border: #6B4A1E;
-  --ink-on-lamp: #16100A;
+  /* ── Teks (warm cream, bukan biru-abu) ── */
+  --text: #F7F0E8;
+  --text-dim: #C3B4A6;
+  --muted: #8A7A6D;
 
-  --mint: #21A557;
-  --mint-dim: #12231A;
-  --mint-border: #235437;
-  --rose: #DE4A45;
+  /* ── Aksen utama: apricot/amber hangat & cerah ── */
+  --lamp: #FFA94D;
+  --lamp-soft: #FFC078;
+  --accent-subtle: #3A2A18;
+  --accent-border: #7A5523;
+  --ink-on-lamp: #2A1A0A;
+
+  /* ── Blush: pink-peach lembut, aksen playful kedua (netral gender) ── */
+  --blush: #F6A5A0;
+  --blush-soft: #FBC4C0;
+  --blush-subtle: #3A211F;
+  --blush-border: #7E4844;
+
+  /* ── Sky: biru-teal lembut, aksen ketiga untuk variasi (link, info) ── */
+  --sky: #7FC9D6;
+  --sky-subtle: #16292D;
+  --sky-border: #336871;
+
+  --mint: #5BD08A;
+  --mint-dim: #16271D;
+  --mint-border: #2F6244;
+  --rose: #F0665F;
   /* coral = alias rose; app.js memakai kelas .danger/.err yang memetakan
      ke coral, sementara CSS panggung memakai rose. Keduanya satu warna. */
-  --coral: #DE4A45;
-  --coral-soft: #2A1618;
-  --coral-border: #5C2A2A;
+  --coral: #F0665F;
+  --coral-soft: #351A18;
+  --coral-border: #6E3733;
 
-  /* ── Radius: tiga langkah saja ── */
-  --r-xl: 10px;                         /* jendela & popup */
-  --r-lg: 8px;                          /* panel & drawer */
-  --r-md: 6px;                          /* kartu & form */
-  --r-sm: 4px;                          /* tombol & input */
-  --r-xs: 3px;                          /* badge */
+  /* ── Radius: gemuk & ramah (squircle feel) ── */
+  --r-xl: 22px;                         /* jendela & popup besar */
+  --r-lg: 16px;                         /* panel & drawer */
+  --r-md: 12px;                         /* kartu & form */
+  --r-sm: 10px;                         /* tombol & input */
+  --r-xs: 7px;                          /* badge */
 
   /* ── Bayangan: hanya lapisan mengambang, radius ≤10px ── */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -175,12 +191,12 @@ a:hover { text-decoration: underline; }
 }
 
 #activity {
-  flex: 0 0 56px;
+  flex: 0 0 60px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
-  padding: 10px 0;
+  gap: 8px;
+  padding: 12px 0;
   border-radius: var(--r-xl);
   background: var(--ink-1);
   border: 1px solid var(--line);
@@ -189,8 +205,8 @@ a:hover { text-decoration: underline; }
 /* Spacer: mendorong tombol terakhir (⚙ panel kontrol) ke dasar bar. */
 .act-flex { flex: 1 1 auto; }
 .act-btn {
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   display: grid;
   place-items: center;
   border: 1px solid transparent;
@@ -198,16 +214,19 @@ a:hover { text-decoration: underline; }
   background: none;
   color: var(--muted);
   cursor: pointer;
+  transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease, transform 0.14s cubic-bezier(0.34,1.56,0.64,1);
 }
-.act-btn:hover { color: var(--text-dim); background: var(--ink-3); }
+.act-btn:hover { color: var(--lamp-soft); background: var(--ink-3); transform: translateY(-1px); }
+.act-btn:active { transform: scale(0.88); }
 .act-btn.active {
-  color: var(--lamp);
-  border-color: var(--accent-border);
-  background: var(--accent-subtle);
+  color: var(--ink-on-lamp);
+  border-color: transparent;
+  background: var(--lamp);
 }
 .act-sep {
-  width: 24px;
-  height: 1px;
+  width: 22px;
+  height: 2px;
+  border-radius: 2px;
   background: var(--line);
   margin: 4px 0;
 }
@@ -219,7 +238,7 @@ a:hover { text-decoration: underline; }
 #projek-rail {
   position: absolute;
   top: 0;
-  left: 66px; /* activity 56 + gap 10 */
+  left: 70px; /* activity 60 + gap 10 */
   bottom: 0;
   width: 264px;
   z-index: 30;
@@ -590,17 +609,30 @@ a:hover { text-decoration: underline; }
 .se-box {
   max-width: 440px;
   text-align: center;
-  padding: 28px 24px;
-  border-radius: var(--r-lg);
+  padding: 32px 28px;
+  border-radius: var(--r-xl);
   background: var(--ink-1);
   border: 1px solid var(--line);
   border-top-color: var(--line-strong);
 }
+/* Lencana bulat di atas judul — motif "teman menyapa", bukan ikon error. */
+.se-box::before {
+  content: "( ˶ˆ ᵕ ˆ˶ )";
+  display: block;
+  width: fit-content;
+  margin: 0 auto 16px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-size: 15px;
+  color: var(--lamp);
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent-border);
+}
 .se-title {
   margin-bottom: 8px;
   font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 17px;
+  font-weight: 700;
+  font-size: 18px;
   color: var(--text);
 }
 .se-box p {
@@ -705,24 +737,24 @@ body.mode-chat #live-state { display: none !important; }
 .sb-header {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-bottom: 11px;
+  gap: 11px;
+  padding: 4px 4px 13px;
   border-bottom: 1px solid var(--line-soft);
 }
 .sb-avatar {
   flex-shrink: 0;
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   display: grid;
   place-items: center;
-  border-radius: var(--r-md);
+  border-radius: 50%;
   font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: 700;
+  font-size: 16px;
   text-transform: uppercase;
-  color: var(--text-dim);
-  background: var(--ink-2);
-  border: 1px solid var(--line);
+  color: var(--ink-on-lamp);
+  background: var(--lamp);
+  border: 2px solid var(--lamp-soft);
   overflow: hidden;
 }
 .sb-avatar img,
@@ -738,25 +770,28 @@ body.mode-chat #live-state { display: none !important; }
 }
 .sb-name {
   font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14.5px;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .sb-status {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  margin-top: 1px;
   font-size: 11.5px;
-  color: var(--muted);
+  color: var(--text-dim);
 }
 .dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--mint);
+  box-shadow: 0 0 0 3px var(--mint-dim);
 }
 
 /* ⚙ panel kontrol kini .act-btn di dasar activity bar — gaya tombol header
@@ -801,11 +836,11 @@ body.mode-chat #live-state { display: none !important; }
 
 .msg-avatar {
   flex-shrink: 0;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   display: grid;
   place-items: center;
-  border-radius: var(--r-sm);
+  border-radius: 50%;
   font-size: 12px;
   font-weight: 600;
   text-transform: uppercase;
@@ -822,8 +857,8 @@ body.mode-chat #live-state { display: none !important; }
 
 .msg-bubble {
   max-width: 82%;
-  padding: 8px 12px;
-  border-radius: var(--r-md);
+  padding: 9px 13px;
+  border-radius: var(--r-lg);
   font-size: 13px;
   line-height: 1.55;
   word-break: break-word;
@@ -832,16 +867,19 @@ body.mode-chat #live-state { display: none !important; }
   text-wrap: pretty;
 }
 /* Agent = permukaan; user = amber tipis. Arah bicara terbaca dari warna,
-   bukan cuma dari sisi. */
+   bukan cuma dari sisi. Sudut dekat avatar ditarik masuk → ekor bubble
+   ramah ala percakapan (murni border-radius, nol biaya paint). */
 .msg.agent .msg-bubble {
   background: var(--ink-2);
   color: var(--text);
   border: 1px solid var(--line);
+  border-top-left-radius: var(--r-xs);
 }
 .msg.user .msg-bubble {
   background: var(--accent-subtle);
   color: var(--text);
   border: 1px solid var(--accent-border);
+  border-top-right-radius: var(--r-xs);
 }
 
 #thinking {
@@ -874,31 +912,41 @@ body.mode-chat #live-state { display: none !important; }
 .chat-input {
   display: flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px;
-  border-radius: var(--r-md);
+  gap: 6px;
+  padding: 5px 5px 5px 6px;
+  border-radius: 999px;
   background: var(--ink-input);
-  border: 1px solid var(--line);
-  transition: border-color 0.12s ease;
+  border: 1.5px solid var(--line);
+  transition: border-color 0.14s ease;
 }
 .chat-input:focus-within { border-color: var(--line-focus); }
+.chat-input input {
+  border: none !important;
+  background: transparent !important;
+  min-height: 34px;
+}
+.chat-input input:focus { outline: none; }
 
 #btn-mic {
   flex-shrink: 0;
-  height: 32px;
-  padding: 0 11px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   display: grid;
   place-items: center;
-  border-radius: var(--r-sm);
+  border-radius: 50%;
   font-size: 12px;
   background: var(--ink-2);
   border: 1px solid var(--line);
   color: var(--text-dim);
+  transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease, transform 0.12s ease;
 }
 #btn-mic:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
+  color: var(--lamp-soft);
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
 }
+#btn-mic:active { transform: scale(0.9); }
 #btn-mic.recording {
   color: #FFF;
   border-color: var(--rose);
@@ -911,19 +959,20 @@ body.mode-chat #live-state { display: none !important; }
 
 #btn-bubble {
   flex-shrink: 0;
-  height: 32px;
-  padding: 0 14px;
+  height: 36px;
+  padding: 0 18px;
   display: grid;
   place-items: center;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   font-size: 12.5px;
-  font-weight: 600;
+  font-weight: 700;
   color: var(--ink-on-lamp);
   background: var(--lamp);
   border: 1px solid transparent;
+  transition: background-color 0.14s ease, transform 0.12s cubic-bezier(0.34,1.56,0.64,1);
 }
 #btn-bubble:hover { background: var(--lamp-soft); }
-#btn-bubble:active { background: var(--lamp); }
+#btn-bubble:active { background: var(--lamp); transform: scale(0.92); }
 
 .quick-phrases {
   display: flex;
@@ -931,18 +980,21 @@ body.mode-chat #live-state { display: none !important; }
   gap: 5px;
 }
 .phrase-btn {
-  padding: 4px 10px;
-  border-radius: var(--r-sm);
+  padding: 5px 12px;
+  border-radius: 999px;
   font-size: 11.5px;
   color: var(--text-dim);
   background: var(--ink-2);
   border: 1px solid var(--line);
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease, transform 0.1s ease;
 }
 .phrase-btn:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
-  background: var(--ink-3);
+  color: var(--lamp-soft);
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
+  transform: translateY(-1px);
 }
+.phrase-btn:active { transform: translateY(0) scale(0.96); }
 
 .brain-toggle {
   display: inline-flex;
@@ -1036,25 +1088,26 @@ body.mode-chat #live-state { display: none !important; }
 .tabs {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
-  gap: 2px;
-  padding: 3px;
-  border-radius: var(--r-md);
+  gap: 3px;
+  padding: 4px;
+  border-radius: 999px;
   background: var(--ink-input);
   border: 1px solid var(--line);
 }
 .tab {
-  padding: 6px 2px;
-  border-radius: var(--r-xs);
+  padding: 7px 2px;
+  border-radius: 999px;
   font-size: 11.5px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--muted);
   text-align: center;
   white-space: nowrap;
+  transition: color 0.14s ease, background-color 0.14s ease;
 }
 .tab:hover { color: var(--text-dim); }
 .tab.active {
-  color: var(--text);
-  background: var(--ink-3);
+  color: var(--ink-on-lamp);
+  background: var(--lamp);
 }
 
 .tab-body {
@@ -1071,18 +1124,25 @@ body.mode-chat #live-state { display: none !important; }
 
 /* ── Komponen bersama ───────────────────────────────────────────── */
 
-/* Judul seksi: label kecil + garis mengisi sisa baris. */
+/* Judul seksi: label kecil ramah + garis halus mengisi sisa baris. */
 .section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 16px 0 8px;
-  font-family: var(--font-mono);
-  font-weight: 500;
-  font-size: 10.5px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--muted);
+  gap: 9px;
+  margin: 18px 0 9px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  color: var(--text-dim);
+}
+.section-title::before {
+  content: "";
+  width: 4px;
+  height: 13px;
+  border-radius: 2px;
+  background: var(--lamp);
 }
 .section-title::after {
   content: "";
@@ -1127,25 +1187,27 @@ body.mode-chat #live-state { display: none !important; }
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 6px 12px;
-  border-radius: var(--r-sm);
+  padding: 7px 14px;
+  border-radius: 999px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-dim);
   background: var(--ink-2);
   border: 1px solid var(--line);
   white-space: nowrap;
+  transition: color 0.14s ease, background-color 0.14s ease, border-color 0.14s ease, transform 0.12s ease;
 }
 .mini-btn:hover {
-  color: var(--text);
-  border-color: var(--line-strong);
-  background: var(--ink-3);
+  color: var(--lamp-soft);
+  border-color: var(--accent-border);
+  background: var(--accent-subtle);
 }
-.mini-btn:active { background: var(--ink-2); }
+.mini-btn:active { transform: scale(0.95); }
 .mini-btn.ms-icon {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   padding: 0;
+  border-radius: 50%;
   font-size: 13px;
 }
 .mini-btn.ms-small {
@@ -1284,10 +1346,10 @@ input[type="range"]::-moz-range-thumb {
 .cfg-box {
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 11px;
+  gap: 10px;
+  padding: 13px;
   border-radius: var(--r-md);
-  background: var(--ink-input);
+  background: var(--ink-2);
   border: 1px solid var(--line);
 }
 
@@ -3045,31 +3107,33 @@ input[type="range"]::-moz-range-thumb {
 .mode-switch {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: 2px;
-  padding: 3px;
-  border-radius: var(--r-md);
-  background: var(--ink-input);
-  border: 1px solid var(--line);
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+  background: none;
+  border: none;
 }
 .mode-switch button {
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   padding: 0;
   display: grid;
   place-items: center;
-  border-radius: var(--r-xs);
+  border-radius: var(--r-md);
   line-height: 1;
   color: var(--muted);
-  border: 1px solid transparent;
-  overflow: hidden;
+  background: none;
+  border: none;
+  overflow: visible;
+  transition: color 0.14s ease, transform 0.14s cubic-bezier(0.34,1.56,0.64,1);
 }
 .mode-switch button svg { display: block; }
 .mode-switch button:hover { color: var(--text-dim); }
+.mode-switch button:active { transform: scale(0.86); }
 .mode-switch button.active {
   color: var(--lamp);
-  border-color: var(--accent-border);
-  background: var(--accent-subtle);
+  background: none;
+  border: none;
 }
 /* Dot status agent global di tombol Assistant (activity bar) — posisi
    absolut di sudut; warna per state: idle mint, busy amber, approval rose. */

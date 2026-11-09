@@ -85,6 +85,24 @@ pub fn plan_label(todos: &[Value]) -> String {
     s
 }
 
+/// Peringatan bila ada langkah ditandai done TANPA note bukti (kontrak
+/// verifikasi — aturan 13 system prompt). Kosong bila bersih. Tidak menolak —
+/// model bisa punya alasan sah; ia hanya dipaksa membaca pengingatnya.
+pub fn unverified_done_warning(todos: &[Value]) -> String {
+    let n = todos
+        .iter()
+        .filter(|p| {
+            p.get("status").and_then(|s| s.as_str()) == Some("done")
+                && p.get("note").and_then(|n| n.as_str()).map(|n| n.trim().is_empty()).unwrap_or(true)
+        })
+        .count();
+    if n > 0 {
+        format!("\n(peringatan: {n} langkah ditandai done TANPA note bukti — jalankan pemeriksaan nyata dan cantumkan buktinya di note, aturan 13)")
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +139,18 @@ mod tests {
     fn label_hitung() {
         let todos = vec![json!({ "status": "done" }), json!({ "status": "failed" }), json!({ "status": "pending" })];
         assert_eq!(plan_label(&todos), "1/3 selesai, 1 gagal");
+    }
+
+    #[test]
+    fn done_tanpa_bukti_diperingatkan() {
+        // done dgn note bukti → bersih.
+        let bersih = vec![json!({ "status": "done", "note": "cargo test hijau" }), json!({ "status": "pending" })];
+        assert_eq!(unverified_done_warning(&bersih), "");
+        // done tanpa note → peringatan menyebut jumlah & aturan.
+        let w = unverified_done_warning(&vec![json!({ "status": "done" }), json!({ "status": "done", "note": "" })]);
+        assert!(w.contains("2 langkah"), "{w}");
+        assert!(w.contains("aturan 13"), "{w}");
+        // pending/failed tidak diperhitungkan.
+        assert_eq!(unverified_done_warning(&vec![json!({ "status": "pending" }), json!({ "status": "failed" })]), "");
     }
 }

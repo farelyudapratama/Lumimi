@@ -119,17 +119,23 @@ export function pickFromGroup(
 
 /**
  * Petakan parameter model → role. `official` = grup resmi dari manifest.
+ * `overrides` = {role → paramId} hasil approve user (sheet layer `user`,
+ * panel probe) — otoritas TERTINGGI: dicek sebelum grup resmi. paramId yang
+ * tidak dimiliki model ditolak senyap (aturan model-agnostic: tolak id dari
+ * sumber eksternal yang tidak ada di paramSet).
  * Urutan resolusi per role:
+ *   0. override user (panel probe approve) — bila paramId ∈ paramSet
  *   1. grup resmi yang dimiliki model (by-name; satu-satunya anggota juga sah)
  *   2. id kanonik Cubism (`Param` + Role)
  *   3. keyword substring (lowercase, EN/JA/ZH)
  * Invarian yang dijaga: mouthOpenY tidak boleh alias ke mouthForm — kalau
- * bertabrakan, cari parameter "buka" lain, atau lepas mouthOpenY (jangan
- * menebak).
+ * bertabrakan (termasuk karena override), cari parameter "buka" lain, atau
+ * lepas mouthOpenY (jangan menebak).
  */
 export function mapRoles(
   paramSet: Set<string> | null | undefined,
   official?: Partial<OfficialGroups> | null,
+  overrides?: Record<string, string> | null,
 ): Record<string, string> {
   const ids: Record<string, string> = {};
   if (!paramSet || !paramSet.size) return ids;
@@ -139,6 +145,11 @@ export function mapRoles(
     lowerToReal[id.toLowerCase()] = id;
   });
   for (const role in ROLE_KEYWORDS) {
+    const ov = overrides && overrides[role];
+    if (ov && paramSet.has(ov)) {
+      ids[role] = ov;
+      continue;
+    }
     if (official && GROUP_PATTERNS[role]) {
       const pool =
         role === "mouthOpenY" ? official.lipSyncIds : official.eyeBlinkIds;

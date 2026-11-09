@@ -1,92 +1,14 @@
 /**
- * llm-roles.test.ts — multi-LLM role routing (Fase 1–2).
+ * llm-roles.test.ts — prompt-split pembicara (Fase 2).
  *
- * Yang dikunci di sini:
- *   1. normalizeRoles/connHasRole — wildcard kompatibel mundur, dedupe, drop
- *      role tak dikenal.
- *   2. orderForRole — eksplisit menang atas wildcard; tanpa kandidat → []
- *      (= jatuh ke urutan default, endpoint tidak boleh mati).
- *   3. llmWithFallback menerima urutan — bukti via provider mock + field `used`.
- *   4. Prompt-split: prompt pembicara TANPA tabel parameter / userNote
- *      per-param, TAPI kosakata (emosi/gesture) + DAFTAR AKSESORIS tetap ada
- *      (ACC safeguard), dan catatan karakter (userNote top-level) tetap ada.
+ * Routing role (normalizeRoles, connHasRole, orderForRole, llmWithFallback)
+ * sudah pindah ke Rust (core/src/llm.rs :: order_for_role + tes-nya) dan TIDAK
+ * lagi dipakai aplikasi. Yang tersisa di sini hanya prompt-split brain.
  */
 import { describe, test, expect } from "bun:test";
-import {
-  LLM_ROLES,
-  normalizeRoles,
-  connHasRole,
-  orderForRole,
-  llmWithFallback,
-} from "../src/shared/llm-client";
 import { AgentBrain } from "../src/client/agent/brain";
 // formatParamNotes pindah ke Rust core (director.rs :: notes_cap_24_x_200 +
 // param_notes_dan_persona) bersama arsip src/server/ — Batch A 2026-09-23.
-
-const conn = (id: string, roles?: string[]) =>
-  ({ id, name: id, provider: "mock", apiKey: "mock", roles } as any);
-
-describe("normalizeRoles / connHasRole", () => {
-  test("role kanonik: chat, motion, sheet, assistant, motion-vision, behavior, memory", () => {
-    expect(LLM_ROLES).toEqual(["chat", "motion", "sheet", "assistant", "motion-vision", "behavior", "memory"]);
-  });
-
-  test("absen / kosong / invalid → wildcard (semua role)", () => {
-    for (const roles of [undefined, [], "chat", 42]) {
-      expect(connHasRole({ id: "x", roles } as any, "chat")).toBe(true);
-      expect(connHasRole({ id: "x", roles } as any, "motion")).toBe(true);
-    }
-    expect(connHasRole(null, "chat")).toBe(true);
-  });
-
-  test("eksplisit mencocokkan & mengecualikan yang lain", () => {
-    const c = conn("x", ["motion"]);
-    expect(connHasRole(c, "motion")).toBe(true);
-    expect(connHasRole(c, "chat")).toBe(false);
-  });
-
-  test("case-insensitive, trim, dedupe, drop tak dikenal, non-string diabaikan", () => {
-    expect(normalizeRoles(["CHAT", "  chat  ", "Motion", "teleport", 1, null, ""])).toEqual(["chat", "motion"]);
-  });
-});
-
-describe("orderForRole", () => {
-  test("eksplisit di atas wildcard; wildcard tetap jadi kandidat", () => {
-    const a = conn("a");                    // wildcard
-    const b = conn("b", ["motion"]);        // eksplisit motion
-    const c = conn("c", ["chat"]);          // tidak match motion
-    const order = orderForRole("motion", [a, b, c]);
-    expect(order.map((x) => x.id)).toEqual(["b", "a"]);
-  });
-
-  test("tanpa kandidat sama sekali → [] (fallback urutan default, bukan mati)", () => {
-    const a = conn("a", ["chat"]);
-    const b = conn("b", ["chat"]);
-    expect(orderForRole("motion", [a, b])).toEqual([]);
-  });
-});
-
-describe("llmWithFallback menerima urutan (provider mock, bukti via `used`)", () => {
-  const getP = (conns: any[]) => ({
-    getConnections: () => conns,
-    getActive: () => conns[0],
-    persist: () => {},
-  });
-
-  test("urutan kustom: koneksi kedua-lah yang dipakai dulu", async () => {
-    const a = conn("a");
-    const b = conn("b");
-    const r = await llmWithFallback(getP([a, b]).getConnections, getP([a, b]).getActive, () => {}, [{ role: "user", content: "hai" }], "", [b, a]);
-    expect(r.used).toBe("b");
-  });
-
-  test("tanpa urutan: perilaku lama — aktif dulu", async () => {
-    const a = conn("a");
-    const b = conn("b");
-    const r = await llmWithFallback(getP([a, b]).getConnections, getP([a, b]).getActive, () => {}, [{ role: "user", content: "hai" }]);
-    expect(r.used).toBe("a");
-  });
-});
 
 describe("prompt-split: prompt pembicara lean, kosakata + aksesoris tetap", () => {
   const brain = new AgentBrain() as any;

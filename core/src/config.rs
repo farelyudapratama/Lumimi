@@ -10,7 +10,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 /// Role LLM yang dikenal (padanan LLM_ROLES di llm-client.ts).
-const LLM_ROLES: &[&str] = &[
+pub const LLM_ROLES: &[&str] = &[
     "chat",
     "motion",
     "sheet",
@@ -18,6 +18,7 @@ const LLM_ROLES: &[&str] = &[
     "motion-vision",
     "behavior",
     "memory",
+    "moderation",
 ];
 
 /// DEFAULT_CONFIG — cermin `src/shared/config.ts` (untuk backfill section baru).
@@ -44,7 +45,8 @@ pub fn default_config() -> Value {
             "maxMs": 30_000, "device": "",
             "endpoint": "", "apiKey": "", "apiModel": "whisper-1"
         },
-        "browser": { "engine": "auto" }
+        "browser": { "engine": "auto" },
+        "chatFilter": { "enabled": false, "useDecision": false, "words": [], "extraRules": "" }
     })
 }
 
@@ -61,12 +63,25 @@ pub fn load(path: &Path) -> Value {
                 }
             }
         }
+        migrate_connections_enabled(&mut merged);
     }
     merged
 }
 
 /// Mask apiKey untuk UI (padanan maskKey): kosong / "MASUKKAN…" → apa adanya;
 /// selain itu 6 char awal + 8 bullet + 4 char akhir. Berbasis char (bukan byte).
+/// Koneksi tanpa field `enabled` diberi `true` supaya tetap aktif setelah
+/// default routing berubah menjadi nonaktif bila tak ditulis.
+pub fn migrate_connections_enabled(cfg: &mut Value) {
+    if let Some(conns) = cfg.get_mut("connections").and_then(|v| v.as_array_mut()) {
+        for c in conns.iter_mut() {
+            if let Some(o) = c.as_object_mut() {
+                o.entry("enabled").or_insert(Value::Bool(true));
+            }
+        }
+    }
+}
+
 pub fn mask_key(k: &str) -> String {
     if k.is_empty() || k.starts_with("MASUKKAN") {
         return k.to_string();
@@ -156,6 +171,7 @@ pub fn api_config_response(path: &Path) -> Value {
         "stt": stt_out,
         "i18n": sect("i18n"),
         "browser": sect("browser"),
+        "chatFilter": sect("chatFilter"),
     })
 }
 
@@ -173,6 +189,20 @@ fn read_raw(path: &Path) -> Value {
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .filter(|v| v.is_object())
         .unwrap_or_else(|| json!({}))
+}
+
+/// Kunci tulis config.json global. Semua `save_*` melakukan
+/// read-modify-write; tanpa kunci ini dua penulis konkuren (mis. status
+/// koneksi yang disimpan dua panggilan LLM paralel — agent + chat) saling
+/// menimpa: yang terakhir menulis menang dan tulisan sisi lain hilang.
+/// Reader (load) aman tanpa kunci — penulisan atomik tmp+rename, jadi pembaca
+/// melihat versi lama atau baru utuh, tidak pernah setengah jadi.
+static CONFIG_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn config_write_guard() -> std::sync::MutexGuard<'static, ()> {
+    // Mutex poisoned (panic di penulis lain) tidak boleh mengunci config
+    // selamanya — lanjutkan dengan guard yang tersisa.
+    CONFIG_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// `{...base, ...over}` untuk objek (over menang). Non-objek → over.
@@ -233,6 +263,7 @@ fn now_ms() -> u128 {
 
 /// Tulis {...prev, activeId, connections} atomik (padanan saveConnections).
 pub fn save_connections(path: &Path, conns: Vec<Value>, active_id: Value) -> std::io::Result<()> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let active = if active_id.is_null() {
         conns.first().and_then(|c| c.get("id").cloned()).unwrap_or(Value::Null)
@@ -247,6 +278,7 @@ pub fn save_connections(path: &Path, conns: Vec<Value>, active_id: Value) -> std
 
 /// Simpan events (mergeEventsIntoConfig: hanya KNOWN_EVENT_KEYS).
 pub fn save_events(path: &Path, events: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let prev_events = prev.get("events").cloned().unwrap_or_else(|| json!({}));
     let merged = merge_obj(&prev_events, events);
@@ -265,6 +297,7 @@ pub fn save_events(path: &Path, events: &Value) -> std::io::Result<Value> {
 
 /// Simpan tts ({...prev.tts, ...tts}).
 pub fn save_tts(path: &Path, tts: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let merged = merge_obj(&prev.get("tts").cloned().unwrap_or_else(|| json!({})), tts);
     let data = merge_obj(&prev, &json!({ "tts": merged.clone() }));
@@ -274,6 +307,7 @@ pub fn save_tts(path: &Path, tts: &Value) -> std::io::Result<Value> {
 
 /// Simpan i18n ({...prev.i18n, ...i18n}).
 pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let merged = merge_obj(&prev.get("i18n").cloned().unwrap_or_else(|| json!({})), i18n);
     let data = merge_obj(&prev, &json!({ "i18n": merged.clone() }));
@@ -281,9 +315,49 @@ pub fn save_i18n(path: &Path, i18n: &Value) -> std::io::Result<Value> {
     Ok(merged)
 }
 
+/// Simpan chatFilter ({...prev.chatFilter, ...filter}; whitelist key +
+/// sanitasi: words bersih/unik/cap 200×100 char, extraRules cap 600 char).
+pub fn save_chat_filter(path: &Path, filter: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
+    let prev = read_raw(path);
+    let mut next = prev.get("chatFilter").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    if let Some(obj) = filter.as_object() {
+        for k in ["enabled", "useDecision"] {
+            if let Some(b) = obj.get(k).and_then(|v| v.as_bool()) {
+                next.insert(k.into(), json!(b));
+            }
+        }
+        if let Some(words) = obj.get("words").and_then(|v| v.as_array()) {
+            let mut clean: Vec<String> = Vec::new();
+            for w in words {
+                // Truncate dulu, baru dedupe — supaya tidak ada duplikat
+                // tersimpan akibat dua kata panjang yang berbeda memotong
+                // jadi string sama.
+                let s = clean_str(w.as_str().unwrap_or("")).chars().take(100).collect::<String>();
+                if s.is_empty() || clean.iter().any(|c| c.to_lowercase() == s.to_lowercase()) {
+                    continue;
+                }
+                clean.push(s);
+                if clean.len() >= 200 {
+                    break;
+                }
+            }
+            next.insert("words".into(), json!(clean));
+        }
+        if let Some(r) = obj.get("extraRules").and_then(|v| v.as_str()) {
+            next.insert("extraRules".into(), json!(clean_str(r).chars().take(600).collect::<String>()));
+        }
+    }
+    let out = Value::Object(next);
+    let data = merge_obj(&prev, &json!({ "chatFilter": out.clone() }));
+    crate::sheet::write_json_atomic(path, &data)?;
+    Ok(out)
+}
+
 /// Simpan browser ({...prev.browser, ...browser}); hanya engine yang dikenal
 /// yang diterima (auto|edge|chrome). Engine dipilih untuk browser terkontrol.
 pub fn save_browser(path: &Path, browser: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let mut next = prev.get("browser").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     if let Some(e) = browser.get("engine").and_then(|v| v.as_str()) {
@@ -307,6 +381,7 @@ const VTUBER_KEYS: &[&str] = &[
 
 /// Simpan koneksi stream VTuber (merge per-field, apiKey aman). Return vtuber.
 pub fn save_vtuber_conn(path: &Path, conn: &Value) -> std::io::Result<Value> {
+    let _guard = config_write_guard();
     let prev = read_raw(path);
     let mut next = prev.get("vtuber").and_then(|v| v.as_object()).cloned().unwrap_or_default();
     if let Some(obj) = conn.as_object() {
@@ -454,6 +529,13 @@ pub fn handle_config_post(path: &Path, body: &Value) -> (u16, String) {
                 Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
             };
         }
+        "saveChatFilter" => {
+            let cf = body.get("chatFilter").cloned().unwrap_or_else(|| json!({}));
+            return match save_chat_filter(path, &cf) {
+                Ok(out) => (200, json!({ "ok": true, "chatFilter": out }).to_string()),
+                Err(e) => (500, json!({ "error": format!("gagal menyimpan: {e}") }).to_string()),
+            };
+        }
         "save" => {
             if let Some(arr) = body.get("connections").and_then(|v| v.as_array()) {
                 conns = arr.clone();
@@ -501,6 +583,25 @@ mod tests {
     }
 
     #[test]
+    fn migrate_enabled_isi_hanya_yang_belum_punya() {
+        let mut cfg = json!({
+            "connections": [
+                { "id": "lama" },
+                { "id": "mati", "enabled": false },
+                { "id": "nyala", "enabled": true }
+            ]
+        });
+        migrate_connections_enabled(&mut cfg);
+        let c = cfg["connections"].as_array().unwrap();
+        assert_eq!(c[0]["enabled"], true);
+        assert_eq!(c[1]["enabled"], false);
+        assert_eq!(c[2]["enabled"], true);
+        let before = cfg.clone();
+        migrate_connections_enabled(&mut cfg);
+        assert_eq!(cfg, before);
+    }
+
+    #[test]
     fn roles_hanya_yang_dikenal_unik() {
         let r = json!(["chat", "CHAT", " Motion ", "bogus", "assistant"]);
         assert_eq!(normalize_roles(&r), vec!["chat", "motion", "assistant"]);
@@ -514,6 +615,7 @@ mod tests {
         // klien jatuh ke mesin browser.
         assert_eq!(cfg["tts"]["provider"], "auto");
         assert_eq!(cfg["stt"]["provider"], "auto");
+        assert_eq!(cfg["chatFilter"]["enabled"], false);
         assert_eq!(cfg["activeId"], Value::Null);
     }
 
@@ -588,6 +690,42 @@ mod tests {
         let (st2, _) = handle_config_post(&f, &json!({ "action": "saveBrowser", "browser": { "engine": "firefox" } }));
         assert_eq!(st2, 200);
         assert_eq!(load(&f)["browser"]["engine"], "chrome");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_chat_filter_sanitize_dan_whitelist() {
+        let dir = std::env::temp_dir().join(format!("l2dcfgcf-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.json");
+        let (st, body) = handle_config_post(&f, &json!({
+            "action": "saveChatFilter",
+            "chatFilter": {
+                "enabled": true,
+                "useDecision": true,
+                "words": [" Slot ", "", "slot", "judol", "x".repeat(150)],
+                "extraRules": "no politics\u{200B}",
+                "kunciAsing": "dibuang"
+            }
+        }));
+        assert_eq!(st, 200);
+        let r: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(r["chatFilter"]["enabled"], true);
+        // Dedupe case-insensitive (pertama menang), kosong dibuang, cap 100 char.
+        let words = r["chatFilter"]["words"].as_array().unwrap();
+        let got: Vec<&str> = words.iter().map(|w| w.as_str().unwrap()).collect();
+        assert_eq!(&got[..2], &["Slot", "judol"]);
+        assert_eq!(got.len(), 3);
+        assert_eq!(words[2].as_str().unwrap().chars().count(), 100);
+        // Zero-width dibuang clean_str; key asing tak masuk.
+        assert_eq!(r["chatFilter"]["extraRules"], "no politics");
+        assert!(r["chatFilter"].get("kunciAsing").is_none());
+        // File benar-benar menyimpan.
+        let cfg = load(&f);
+        assert_eq!(cfg["chatFilter"]["enabled"], true);
+        assert_eq!(cfg["chatFilter"]["words"].as_array().unwrap().len(), 3);
+        // GET /api/config menyertakan section (whitelist response).
+        assert_eq!(api_config_response(&f)["chatFilter"]["useDecision"], true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

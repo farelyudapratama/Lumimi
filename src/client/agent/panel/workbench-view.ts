@@ -54,6 +54,7 @@ const ICON_PATHS: Record<string, string[]> = {
   clock: ["M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20z", "M12 6v6l4 2"],
   warn: ["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 20h16a2 2 0 0 0 1.73-2", "M12 9v4", "M12 17h.01"],
   diff: ["M6 3v12", "m3 6 3-3 3 3", "M18 21V9", "m15 18 3 3 3-3", "M3 12h6", "M15 12h6"],
+  shield: ["M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"],
 };
 
 function icon(name: string): SVGElement {
@@ -155,6 +156,8 @@ export type ApprovalView = {
   tool: string;
   args: any;
   plan: boolean;
+  captcha?: boolean;
+  login?: boolean;
 };
 
 export type ReviewEntryView = { path: string; kind: string; added: number; removed: number; measured: boolean };
@@ -797,29 +800,41 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     deps.onApprove(ui.apId, opt.ok, opt.always);
   }
 
+  // Folder induk path untuk label "selalu izinkan" — HARUS sama dengan
+  // allow_key di assistant.rs: "sub/a.txt" → "sub", "a.txt" → "." (akar).
+  function fileToolFolder(ap: ApprovalView): string {
+    if (ap.tool !== "write_file" && ap.tool !== "edit_file" && ap.tool !== "delete_file") return "";
+    const p = String(ap.args?.path ?? "").trim().replace(/\\/g, "/");
+    if (!p || p.endsWith("/")) return ".";
+    const i = p.lastIndexOf("/");
+    return i > 0 ? p.slice(0, i) : ".";
+  }
+
   function ensureKeyHandler(): void {
     if (keyHandler || !apprCards.size) return;
     keyHandler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "TEXTAREA" || target.tagName === "INPUT")) return;
+      // Keyboard HANYA menyasar kartu TERATAS (tertua). Dulu Tab/angka/Enter
+      // diterapkan ke SEMUA kartu sekaligus — satu Enter menyetujui seluruh
+      // izin yang pending sekaligus, padahal tiap kartu keputusannya sendiri.
+      // Kartu lain tetap bisa diklik langsung.
+      const ui = apprCards.values().next().value as ApprUi | undefined;
+      if (!ui) return;
       if (e.key === "Tab") {
         e.preventDefault();
-        for (const ui of apprCards.values()) {
-          ui.sel = (ui.sel + (e.shiftKey ? -1 : 1) + ui.options.length) % ui.options.length;
-          paintSel(ui);
-        }
+        ui.sel = (ui.sel + (e.shiftKey ? -1 : 1) + ui.options.length) % ui.options.length;
+        paintSel(ui);
         return;
       }
       const idx = Number(e.key);
       if (idx >= 1 && idx <= 9) {
-        for (const ui of apprCards.values()) {
-          if (idx <= ui.options.length) { ui.sel = idx - 1; paintSel(ui); }
-        }
+        if (idx <= ui.options.length) { ui.sel = idx - 1; paintSel(ui); }
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        for (const ui of apprCards.values()) confirmAppr(ui);
+        confirmAppr(ui);
       }
     };
     document.addEventListener("keydown", keyHandler);
@@ -833,6 +848,18 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
   }
 
   function approvalOptions(ap: ApprovalView): ApprUi["options"] {
+    if (ap.captcha) {
+      return [
+        { label: t("wb.appr.captchaResume"), sub: "", ok: true, always: false },
+        { label: t("as.deny"), sub: "", ok: false, always: false },
+      ];
+    }
+    if (ap.login) {
+      return [
+        { label: t("wb.appr.loginResume"), sub: "", ok: true, always: false },
+        { label: t("as.deny"), sub: "", ok: false, always: false },
+      ];
+    }
     if (ap.plan) {
       return [
         { label: t("wb.appr.approvePlan"), sub: "", ok: true, always: false },
@@ -845,9 +872,17 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     // Selalu izinkan memakai label semantik tool — key as.approve.always
     // menerima {what}; fallback wb.appr.alwaysPlain bila tak ada variabel.
     if (mutating) {
-      const always = t("as.approve.always", { what: kindLabel });
+      // Sinkron dgn allow_key server (assistant.rs): write/edit/delete_file
+      // di-scope per folder induk path — tampilkan foldernya supaya user tahu
+      // cakupan izinnya, bukan mengira satu tool terbuka ke seluruh workdir.
+      const folder = fileToolFolder(ap);
+      let label = t("as.approve.always", { what: kindLabel });
+      if (folder && !label.includes("{what}")) {
+        const inFolder = t("wb.appr.alwaysIn", { what: kindLabel, folder });
+        if (!inFolder.includes("{what}") && !inFolder.includes("{folder}")) label = inFolder;
+      }
       opts.push({
-        label: always.includes("{what}") ? t("wb.appr.alwaysPlain") : always,
+        label: label.includes("{what}") ? t("wb.appr.alwaysPlain") : label,
         sub: t("wb.appr.alwaysSub"), ok: true, always: true,
       });
     }
@@ -859,19 +894,21 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
     const card = el("div", "wb-appr");
     card.dataset.apid = ap.apId;
     const titleRow = el("div", "wb-appr-title");
-    titleRow.appendChild(el("span", "", ap.plan ? t("as.approve.planTitle") : t("as.approve.title")));
-    titleRow.appendChild(el("span", "wb-trow-pill", ap.plan ? t("wb.appr.planTag") : ap.tool));
+    const titleText = ap.captcha ? t("wb.appr.captchaTitle") : ap.login ? t("wb.appr.loginTitle") : ap.plan ? t("as.approve.planTitle") : t("as.approve.title");
+    const pillText = ap.captcha ? t("wb.appr.captchaTag") : ap.login ? t("wb.appr.loginTag") : ap.plan ? t("wb.appr.planTag") : ap.tool;
+    titleRow.appendChild(el("span", "", titleText));
+    titleRow.appendChild(el("span", "wb-trow-pill", pillText));
     card.appendChild(titleRow);
 
     const toolCard = el("div", "wb-appr-tool");
     const toolHeadEl = el("div", "wb-appr-tool-head");
     const ico = el("span", "wb-trow-ico");
-    ico.appendChild(icon(ap.plan ? "listtodo" : toolIcon(ap.tool)));
+    ico.appendChild(icon(ap.captcha || ap.login ? "shield" : ap.plan ? "listtodo" : toolIcon(ap.tool)));
     toolHeadEl.appendChild(ico);
-    const kindLabel = ap.plan ? t("wb.appr.planTag") : toolKindLabel(ap.tool, false);
+    const kindLabel = ap.captcha ? t("wb.appr.captchaTag") : ap.login ? t("wb.appr.loginTag") : ap.plan ? t("wb.appr.planTag") : toolKindLabel(ap.tool, false);
     toolHeadEl.appendChild(el("span", "wb-trow-kind", kindLabel));
     const args = ap.args || {};
-    const primary = ap.plan ? "" : (String(args.command ?? args.path ?? args.query ?? args.key ?? "").trim());
+    const primary = ap.plan || ap.captcha || ap.login ? "" : (String(args.command ?? args.path ?? args.query ?? args.key ?? "").trim());
     if (primary) {
       const s = el("span", "wb-trow-sum");
       s.textContent = primary;
@@ -886,6 +923,10 @@ export function createWorkbenchView(root: HTMLElement, browserMount: HTMLElement
         row.appendChild(el("span", "wb-todo-txt", String(s?.task || "")));
         toolCard.appendChild(row);
       }
+    } else if (ap.captcha) {
+      toolCard.appendChild(el("div", "wb-appr-tool-note", t("wb.appr.captchaHint")));
+    } else if (ap.login) {
+      toolCard.appendChild(el("div", "wb-appr-tool-note", t("wb.appr.loginHint")));
     } else if (!ap.plan) {
       const pre = el("pre");
       try { pre.textContent = JSON.stringify(args, null, 2); } catch { pre.textContent = String(args); }

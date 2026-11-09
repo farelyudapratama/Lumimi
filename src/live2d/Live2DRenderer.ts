@@ -327,6 +327,37 @@ export class Live2DRenderer {
     }
   }
 
+  /** Terapkan override role user (sheet v5 probeApprovals, layer `user`):
+   * rebuild RoleController lalu refresh look/breath + fallback blink yang
+   * membaca peta role. Murah — hanya peta + range, tanpa re-load model.
+   * Catatan batas: updater lipsync memegang id load-time, jadi override
+   * mouthOpenY baru mengikat penuh setelah model di-load ulang. */
+  setRoleOverrides(overrides: Record<string, string> | null | undefined): void {
+    const model = this.userModel?.getModel?.();
+    if (!model || !this.userModel) return;
+    try {
+      const paramSet = new Set<string>();
+      const pc = model.getParameterCount();
+      for (let i = 0; i < pc; i++) paramSet.add(model.getParameterId(i).getString());
+      this.roleCtrl = new RoleController(model, paramSet, {
+        eyeBlinkIds: this.officialGroups.eyeBlinkIds,
+        lipSyncIds: this.officialGroups.lipSyncIds,
+      }, overrides ?? undefined);
+      this.userModel.setLookParameters(this.buildLookData());
+      this.userModel.setBreathParameters(this.buildBreathData());
+      // Fallback blink mengikuti peta role baru (deklarasi rigger tetap menang).
+      const fallbackIds: any[] = [];
+      const idMgr = CubismFramework.getIdManager();
+      for (const role of ["eyeLOpen", "eyeROpen"]) {
+        const info = this.roleCtrl.roleInfo(role);
+        if (info) fallbackIds.push(idMgr.getId(info.id));
+      }
+      this.userModel.ensureEyeBlink(fallbackIds);
+    } catch (e) {
+      console.warn("[Live2DRenderer] setRoleOverrides gagal", e);
+    }
+  }
+
   /** Puncak breath std resmi diskalakan ke range aktual; offset = default. */
   private buildBreathData(): BreathParameterData[] {
     const SPEC: Record<string, { stdHalf: number; peakStd: number; cycle: number; weight: number }> = {

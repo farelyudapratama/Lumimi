@@ -123,6 +123,12 @@ export class Live2DUserModel extends CubismUserModel {
     this._look?.setParameters(list);
   }
 
+  /** Ganti data breath (range aktual role) tanpa membuat ulang updater —
+   * dipanggil renderer saat role override user mengubah peta role. */
+  setBreathParameters(list: BreathParameterData[]): void {
+    this._breath?.setParameters(list);
+  }
+
   /** Fallback blink: rig tanpa grup EyeBlink di manifest menghasilkan
    * instance ber-0 id — isi id mata dari role mapping (by-name). Id milik
    * deklarasi rigger selalu menang (no-op bila sudah ada). */

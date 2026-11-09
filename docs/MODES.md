@@ -44,36 +44,57 @@ Layout app ala coding-agent: `[activity+projek/history][stage Live2D][conversati
 - Breakpoint `<1280px`: technical pane ditumpuk di bawah conversation dan
   gutter desktop mati; `<1024px`: shell menjadi vertikal.
 
-## Multi-session assistant (2026-09-07)
+## Multi-session assistant (2026-09-07, dipersist 2026-10-07)
 
 Riwayat sesi bernama di `data/assistant-sessions.json`
 (`{active, sessions: [{id, name, workDir, ts, messages}]}`, cap 20 sesi,
 migrasi sekali dari `assistant-history.json` lama + arsip `.bak`):
 
-- Store: `core/src/agent/sessions.rs` (`sessions::load/create/switch_to/remove` —
-  path injectable untuk test). Auto-nama sesi = pesan user pertama
-  (40 char), fallback tanggal. Tulis atomic tmp→rename.
+- Store: `core/src/agent/sessions.rs` (`sessions::load/create/switch_to/remove/
+  messages/append/ensure_run_session` — path injectable untuk test).
+  Auto-nama sesi = pesan user pertama (40 char), fallback tanggal. Tulis
+  atomic tmp→rename.
+- **Transcript dipersist**: tiap `/api/assistant/ask` menulis giliran user
+  (sebelum loop) + jawaban final assistant (termasuk "Dibatalkan oleh user.")
+  ke sesi yang terikat runtime — giliran tool antara TIDAK disimpan (yang
+  tercatat = permintaan + hasil; detail tool tetap hidup di transcript panel).
+  Runtime error TIDAK menulis giliran. Jalur approve (resume setelah izin)
+  mempersist finalnya juga.
+- **Sesi run per app dibuka** (`ensure_run_session`, memo per-proses): sesi
+  agent BARU dibuat lazy saat permukaan pertama menyentuh agent (start panel,
+  hand-off chat, atau CLI start) — dibuka lagi = sesi baru. Hand-off
+  chat/panggung (`POST /api/assistant/ask {text, session:"run"}`) SELALU
+  berlabuh ke sesi run aplikasi, terpisah dari sesi manual pilihan user di
+  rail — user bebas bikin/switch sesi lain tanpa konflik; hand-off chat
+  berikutnya menarik ikatan kembali ke sesi run. Yang dibawa lintas sesi
+  adalah long-term memory (companion-memory), bukan transcript sesi lain.
 - API: `GET /api/assistant/sessions`, `POST /api/assistant/sessions/new
   {workDir?}`, `POST /api/assistant/sessions/switch {id}`,
-  `POST /api/assistant/sessions/delete {id}` — semua menolak saat `busy`
-  (409/404 sesuai kasus).
-- **Pindah sesi TIDAK mematikan runtime** (kontrak mode utuh): facade
-  mengganti `rt.history`/`rt.workDir`/`rt.sessionId` lalu persist. Panel
-  menangkap event DOM `agent:session-changed` (dilempar `projek.ts`) dan
-  hydrate ulang transcript dari `/history`.
-- `loadSession`/`saveSession` (state.ts) kini wrapper store — CLI
+  `POST /api/assistant/sessions/delete {id}` — new/switch menolak saat `busy`
+  (409) dan LANGSUNG mengikatkan runtime (hydrate `rt.history` dari store);
+  delete menghapus sesi terikat hanya saat tidak busy, lalu runtime pindah ke
+  sesi aktif pengganti (atau lepas bila store kosong).
+- **Pindah sesi TIDAK mematikan runtime** (kontrak mode utuh): handler
+  mengganti `rt.history`/`rt.sessionId` via `assistant::bind_session` lalu
+  persist `active`. Panel menangkap event DOM `agent:session-changed`
+  (dilempar `projek.ts` — dan brain setelah hand-off chat) dan hydrate ulang
+  transcript dari `/history`. Masuk mode Assistant ke-N (setelah stop)
+  meng-hydrate ulang transcript sesi terikat, bukan mulai kosong.
   `bun run agent` ikut membuka sesi aktif tanpa perubahan.
 
 ## Cancel per-task & status global (2026-09-07 (2))
 
-- **Cancel kooperatif**: `POST /api/assistant/cancel` menyetel
-  `rt.cancelRequested` (hanya saat `busy` → `{ok,accepted}`); loop mengecek
-  flag di awal tiap turn & setelah `execTool` kembali — tool yang sedang
-  jalan selesai dulu (`run_command` ≤30 dtk), lalu reply
+- **Cancel kooperatif**: `POST /api/assistant/cancel` menyetel sinyal batal
+  (watch channel `cancel_tx`, hanya saat `busy`/paused → `{ok,accepted}`);
+  loop mengecek sinyal di awal tiap turn, dan — karena watch — panggilan LLM
+  serta `run_command` yang sedang menggantung dibatalkan SEKETIKA (child
+  process di-kill), bukan menunggu selesai seperti semula. Reply
   "Dibatalkan oleh user." + bus `error "dibatalkan: oleh user"`. Runtime
   TIDAK dimatikan (beda dengan `POST /api/assistant/stop` yang membongkar
-  runtime & approval). Panel: tombol "Stop Task" (`#as-cancel`), aktif
-  saat `running && (busy || liveAsk)`.
+  runtime & approval). Saat tugas **paused** menunggu approval (loop sudah
+  exit), cancel membersihkan sendiri: kartu approval dibuang, slot lepas —
+  tanpa ini cancel di keadaan approval tidak pernah dikonsumsi. Panel: tombol
+  "Stop Task" (`#as-cancel`), aktif saat `running && (busy || liveAsk)`.
 - **Metadata tool**: `GET /api/assistant/status` menyertakan
   `tools: [{name, level}]` (dari registry `TOOLS`) — panel menampilkan
   badge "auto" (safe) / "izin" (mutating) di header kartu tool & approval.
@@ -133,6 +154,21 @@ app utama memutar balasan via `window.__debugSpeak` (kelas speech
 → `overlay:true`); `vtuber.html` (overlay, stack render baru Pixi 8 +
 Cubism 5) memutar sendiri versinya saat on-air.
 
+Filter chat (moderasi komentar, `core/src/chat_filter.rs`): komentar
+audience yang lolos suppression DILEWATI dua lapis sebelum diproses LLM —
+(1) blocklist kata/frasa milik user (section `chatFilter` di
+data/config.json, diedit dari panel **Filter Chat** tab AI; cocok
+case-insensitive sebagai bagian teks), (2) mesin keputusan opsional
+(`useDecision`): koneksi SystemOne (Jev cloud / Laya lokal) dengan role
+`moderation` didahulukan lewat `v1/systemone` (pola sama dengan role
+`behavior`), fallback ke LLM mana pun yang ditandai role `moderation`
+EKSPLISIT (gate `has_explicit_role` — tidak membajak koneksi chat umum).
+Komentar yang ditahan tetap tampil di feed (transparansi) plus event
+system alasannya, tapi tidak dibalas. Aturan tambahan bebas user
+(`extraRules`) ikut jadi instruksi mesin. Fail-open: mesin gagal,
+timeout (10 dtk), atau jawaban tak terbaca → komentar diteruskan dengan
+catatan throttled di feed, blocklist lokal tetap jalan.
+
 ## AI Assistant (`core/src/agent/assistant.rs`)
 
 - Runtime: `{workDir, history (maks 60), approvals Map, activeTask, parkedTasks,
@@ -149,28 +185,41 @@ Cubism 5) memutar sendiri versinya saat on-air.
   (aktif → cancel kooperatif + pendingReplacement; paused → langsung;
   antrean → in-place). Slot kosong → drain otomatis (replacement dulu,
   lalu antrean FIFO). Status mengekspos `activeTask`/`parkedTasks`.
-- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **25 tool**; level = data,
-  bukan if-else di loop): 12 tool coding (`list_dir`, `read_file`, `search_code`,
+- Tools (registry di `core/src/agent/loop_.rs` (TOOLS), **29 tool**; level = data,
+  bukan if-else di loop): 14 tool coding (`list_dir`, `read_file`, `search_code`,
   `git_diff`, `write_file`, `edit_file`, `delete_file`, `run_command`,
-  `update_plan`, `remember`, `recall`, `spawn_subagent`) + 9 tool browser CDP
-  (`browser_status/open/navigate/inspect/click/type/history/close/grant_private`)
+  `update_plan`, `remember`, `recall`, `memory_recall`, `run_history`,
+  `spawn_subagent`) + 11 tool browser CDP
+  (`browser_status/open/navigate/inspect/click/type/history/screenshot/tabs/close/grant_private`)
   + 4 tool motion (`motion_analyze/validate/save/verify`).
   Level `safe` jalan otomatis; `mutating` ditahan server sampai approval user.
 - Protokol LLM: system prompt memerintahkan tool call; balasan model dideteksi
   dengan `detect()` — cari **nama tool yang dikenal** di teks (model memformat
   bebas: `TOOL: nama {json}`, `**Tool: nama**` + fence json, atau `nama {json}`),
-  lalu ambil `{...}` pertama dalam jendela 160 char; JSON longgar (key tanpa
-  kutip, kutip tunggal) ditoleransi.
+  lalu ambil `{...}` pertama dalam jendela 64.000 char (JSON terpotong
+  diselamatkan dan DITANDAI ke model — isi write_file bisa setengah);
+  JSON longgar (key tanpa kutip, kutip tunggal) ditoleransi.
 - Setelah tool aman dieksekusi, hasil dimasukkan sebagai pesan `[hasil tool]`
   dan loop lanjut (maks 6 turn) sampai jawaban final.
-- Approval: `POST /api/assistant/approve {id, approve}` — mengeksekusi tool
-  lalu melanjutkan reasoning; menolak memasukkan pesan "User MENOLAK".
+- Approval: `POST /api/assistant/approve {id, approve, always}` — mengeksekusi
+  tool lalu melanjutkan reasoning; menolak memasukkan pesan "User MENOLAK".
   Varian streaming `POST /api/assistant/approve-stream` (SSE) mengalirkan
-  hasil tool + lanjutan reasoning — dipakai panel browser.
+  hasil tool + lanjutan reasoning — dipakai panel browser. Opsi `always` =
+  allowlist SESI (kosong lagi di `stop()`), dengan kunci yang TIDAK seragam:
+  tool lain per nama tool, `run_command` per **perintah persis**, dan
+  `write_file`/`edit_file`/`delete_file` per **folder induk path** —
+  menyetujui satu file bukan berarti seluruh workdir terbuka sesi ini
+  (label kartu izin menyebut foldernya).
 - Sandbox: `safePath` mengunci path di dalam folder kerja; `run_command`
-  asinkron dengan timeout 30 dtk, output dipangkas 12 KB (server tetap
-  responsif selama perintah jalan). Tetap: shell = akses penuh mesin — hanya
-  izinkan perintah yang kamu pahami.
+  asinkron dengan timeout **per panggilan** (arg `timeout`, 1–600 dtk,
+  default 120 — naikkan untuk build/test), output dipangkas 12 KB (server
+  tetap responsif selama perintah jalan; pembatalan user meng-kill child
+  seketika). Command line yang dicatat ke store observability dimasked pola
+  rahasianya (token panjang, `--api-key=…`). Tetap: shell = akses penuh
+  mesin — hanya izinkan perintah yang kamu pahami.
+- Anggaran LLM per tugas 60 panggilan (termasuk subagent); batch
+  `spawn_subagent` sendiri di-cap **24 panggilan gabungan** supaya
+  delegasi besar tidak melapiskan budget orchestrator.
 
 ### Panel agent (remake ala ZCode, 2026-09-07)
 
@@ -190,6 +239,12 @@ actor / view / panel) di-bundle ke `bundle.js` sebagai `window.__agentPanel`;
   (SSE) vs `follow` (bus `/events?since=`, untuk pantau CLI/klien lain).
   Bus `thinking/tool_call/permission/final/error` disupresi dari transcript
   saat live (padanannya dari SSE); `verification/subagent` selalu dirender.
+- **Keyboard approval hanya kartu teratas** — Tab/tombol angka/Enter memandu
+  kartu terlama yang pending; kartu lain diklik langsung (dulu satu Enter
+  menyetujui SEMUA kartu sekaligus). Transcript panel berkapasitas 600 blok
+  (lama diganti penanda; log lengkap tetap di sesi tersimpan), render delta
+  SSE dikoalesce via rAF, dan dedupe hydrate memakai teks penuh (bukan
+  160 char pertama — dua pesan berawalan sama tidak saling menelan).
 - **Protokol putus-koneksi dua-kasus** (`decideFallback`): SSE gagal sebelum
   event pertama → cek status fresh, resend `POST /ask` sekali bila tidak busy;
   putus setelah ≥1 event → tidak pernah resend, lanjut follow dari bus
@@ -286,13 +341,19 @@ tutup-oleh-user disinkronkan via `notify_closed`). Tak ada proses kedua,
 tak ada mode CLI `pet` lagi.
 
 1. **Window pet in-process** — WebView2 transparan melayang di desktop,
-   always-on-top native, tanpa frame, tanpa taskbar. Jendela utama
-   (`Lumimi.exe [main <url>]`) berdekorasi normal dan
+   always-on-top native, tanpa frame, tanpa taskbar, **tak mencuri fokus**
+   (`set_focusable(false)` — backend WS_EX_NOACTIVATE; menyentuh pet tidak
+   memindah fokus keyboard; Esc nonaktif tanpa fokus, tombol Tutup tetap
+   hidup). Jendela utama (`Lumimi.exe [main <url>]`) berdekorasi normal dan
    menunggu server bind (maks 15 dtk) sebelum membuat jendela.
-    - Klik-tembus: toggle "Klik Tembus" di panel Pet (atau tombol di bar pet)
+    - Klik-tembus + punch-through: toggle "Klik Tembus" di panel Pet
       → `POST /api/pet/clickthrough {on}` → pet page memanggil Tauri
-      `setIgnoreCursorEvents`. Saat menyala, klik menembus ke desktop; satu-
-      satunya jalan keluar adalah toggle yang sama di app utama.
+      `setIgnoreCursorEvents`. Saat menyala, klik menembus ke desktop
+      KECUALI di atas model — thread indra native (`agent-shell/src/
+      pet_native.rs`, GetCursorPos + GetAsyncKeyState, ~25 Hz, event push
+      `pet://cursor` — BUKAN polling IPC per-frame) memberi tahu pet.js
+      di mana kursor berada; punch controller (`src/client/pet/punch.ts`)
+      membolongkan klik dengan histeresis (enter 4 px / exit 24 px).
 2. **Fallback (hanya bila core jalan TANPA shell — dev `cargo run -p
    live2d-core`)**: spawn `Lumimi.exe` + Chrome/Edge `--app` (opaque,
    always-on-top via PowerShell `SetWindowPos`, tanpa klik-tembus).
@@ -300,14 +361,35 @@ tak ada mode CLI `pet` lagi.
    `agent-shell/src/main.rs`) — exe yang di-spawn membuka jendela UTAMA
    kedua (`index.html`), BUKAN overlay pet transparan. Jadi fallback ini
    dev-only, bukan jalur produksi.
-3. `pet.html` — adapter view stack baru (importmap pixi8.mjs +
-   `js/live2d-view.mjs`; model lewat `__live2dView.loadModel`). Blink/breath
-   diputar framework; gaze kursor via `setLookTarget(±1)` — semua sendi
-   (kepala/mata/badan) ikut, ter-skala range model, tanpa id param hardcode.
-   Sapaan berkala, tombol Sapa/Bicara/Klik-tembus/Tutup (`POST /api/pet/close`
-   menutup jendela; di jalur fallback mematikan proses yang di-spawn).
-   Esc juga menutup. Bar bawah memakai
-   `data-tauri-drag-region` (bisa dipindah di shell Tauri).
+3. **Logika pet = TS** (`src/client/pet/` → entry build ke-5 `js/pet.js`;
+   `pet.html` tinggal markup). Modul murni teruji bun test:
+    - `senses.ts` — kinematika kursor (EMA) + waktu-idle;
+    - `hit.ts` — hit-area AABB facade + konversi kursor fisik→CSS px;
+    - `punch.ts` — punch-through (di atas);
+    - `touch.ts` — detektor grab (geser ≥10 px) / boop (tap) / pat
+      (wiggle ≥3 balikan arah);
+    - `swing.ts` — pendulum teredam (zeta 0.14, sudut tampil tanh 38°)
+      saat digrab-digotog (jendela mengikuti kursor via `setPosition`);
+    - `react.ts` — resolusi reaksi SEMANTIK (verb → grup motion/ekspresi
+      yang dimiliki model — model-agnostic, tanpa id hardcode);
+    - `roles.ts` — tulis param HANYA lewat role space (`mapRoles` +
+      rentang milik model) — doze menutup mata via role eyeLOpen/eyeROpen
+      + `setBlinkGate(false)`;
+    - `brain.ts` — otak idle: POST `/api/behavior/decide` (kosakata =
+      kemampuan nyata model) tiap ~6 dtk → gaze/motion/ekspresi;
+      `engine=false` → siklus deterministik lokal. Governor doze
+      histeresis: idle 10 menit → tidur, input apa pun bangun;
+    - `proactive.ts` — komentar unprompted ber-budget (maks 3/jam
+      bergulir, tenang 30 menit pasca-sentuh, syarat user hadir) dari
+      `/api/chat-stream` + konteks memori companion; persist localStorage;
+    - `voice.ts` + `wav.ts` + `chat.ts` — press-to-talk (tahan tombol
+      Bicara): mic → AudioWorklet → WAV PCM16 → `POST /api/stt` (whisper
+      in-process loopback, TANPA cloud) → `/api/chat-stream` → director
+      `/api/animate-text` → per segmen `POST /api/tts` → playback +
+      lip-sync (`AudioLipSync` modul yang sama dengan app.js, provider ke
+      `setLipsyncProvider`). Ekstraksi memori pasca-turn fail-soft.
+   Semua reaksi/gerak dieksekusi lokal (framework); IPC hanya event input
+   + command, render loop tidak pernah lewat IPC.
 4. Pindah mode dari app utama otomatis menutup jendela pet (`petClose()` di
    teardown).
 

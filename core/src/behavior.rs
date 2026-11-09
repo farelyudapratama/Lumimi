@@ -162,7 +162,7 @@ KEMBALIKAN HANYA satu objek JSON valid, tanpa markdown/pengantar, skema:\n\
 fn find_systemone_conn(config_path: &Path) -> Option<Value> {
     let cfg = crate::config::load(config_path);
     let conns = cfg.get("connections").and_then(|v| v.as_array())?;
-    let is_enabled = |c: &Value| c.get("enabled").and_then(|v| v.as_bool()) != Some(false);
+    let is_enabled = |c: &Value| c.get("enabled").and_then(|v| v.as_bool()) == Some(true);
     let is_systemone = |c: &Value| {
         c.get("provider").and_then(|v| v.as_str()).map(|s| s.eq_ignore_ascii_case("systemone")).unwrap_or(false)
     };
